@@ -302,7 +302,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
           (module.buildInfo as RedirectBuildInfo).depsConflictResolver =
             this.moduleResolutionVersion(module as NormalModule);
       });
-      const hooks = compiler.webpack?.NormalModule.getCompilationHooks(compilation);
+      const hooks = compiler.webpack?.NormalModule?.getCompilationHooks?.(compilation);
       if (hooks?.needBuild) {
         hooks.needBuild.tapAsync(PLUGIN_NAME, (module, _context, callback) => {
           const previous =
@@ -310,7 +310,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
           if (previous !== this.moduleResolutionVersion(module)) return callback(null, true);
           callback();
         });
-      } else if (!legacyCacheHookInstalled) {
+      } else if (!legacyCacheHookInstalled && compiler.cache?.hooks?.get?.tap) {
         // Early Webpack 5 has no needBuild hook. Observe cache restoration
         // before its native build check; unchanged modules remain cached.
         compiler.cache.hooks.get.tap(

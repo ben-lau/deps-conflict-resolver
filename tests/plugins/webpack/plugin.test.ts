@@ -111,6 +111,21 @@ describe('Webpack Plugin', () => {
         expect(mockCompiler.hooks.done.tap).toHaveBeenCalled();
       });
 
+      it('accepts compilers without optional module cache hooks', () => {
+        mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
+        const plugin = new DepsConflictResolverWebpackPlugin({
+          dependencies: ['vue'],
+          projectRoot: '/test',
+        });
+        const compiler = createMockCompiler();
+        plugin.apply(compiler as unknown as Compiler);
+        const setup = compiler.hooks.compilation.tap.mock.calls[0]![1];
+
+        expect(() =>
+          setup({ fileDependencies: new Set(), hooks: { succeedModule: { tap: vi.fn() } } }),
+        ).not.toThrow();
+      });
+
       it('should initialize on beforeRun', async () => {
         mockResolverInstance.initialize.mockResolvedValue(undefined);
         mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
