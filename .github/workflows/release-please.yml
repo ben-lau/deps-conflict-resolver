@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main, codex/staged-release]
+    branches: [main, staged-release]
 
 concurrency:
   group: release
@@ -13,6 +13,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/verify-release.yml
+    with:
+      ref: ${{ github.sha }}
 
   release-please:
     needs: verify
@@ -45,7 +47,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: '.node-version'
-          registry-url: https://registry.npmjs.org/
       - uses: actions/download-artifact@v8
         with:
           name: release-package
@@ -59,4 +60,4 @@ jobs:
           package_version=$(tar -xOf "$RUNNER_TEMP"/release-package/*.tgz package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
           test "v$package_version" = "$RELEASE_TAG"
       - run: npm i -g npm@latest
-      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance
+      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance --registry=https://registry.npmjs.org/
