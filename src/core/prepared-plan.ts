@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { version as resolverVersion } from '../../package.json';
 import type { AnalysisResult, DependencyInfo, ResolvedOptions } from '../types';
 import { DependencyInputs } from '../utils/dependency-inputs';
+import { packageLookupPaths } from '../utils/fs';
 
 // Bump this when the on-disk representation or compatible input probes change.
 const FORMAT = 1;
@@ -30,6 +31,8 @@ export function preparedPlanLocation(options: ResolvedOptions, owner: string): s
     excludeRedirects,
     peerOverrides,
   } = options;
+  const lookupPaths = packageLookupPaths(projectRoot);
+  if (!lookupPaths) return undefined;
   const key = hash(
     JSON.stringify([
       FORMAT,
@@ -37,7 +40,7 @@ export function preparedPlanLocation(options: ResolvedOptions, owner: string): s
       process.platform,
       process.arch,
       process.versions.node,
-      process.env.NODE_PATH,
+      lookupPaths,
       process.execPath,
       owner,
       projectRoot,
@@ -50,6 +53,10 @@ export function preparedPlanLocation(options: ResolvedOptions, owner: string): s
     ]),
   );
   return join(projectRoot, 'node_modules', '.cache', 'deps-conflict-resolver', key + '.json');
+}
+
+export async function preparePlanDirectory(file: string): Promise<void> {
+  await mkdir(dirname(file), { recursive: true });
 }
 
 type StoredAnalysis = Omit<AnalysisResult, 'analyzedDependencies'> & {
@@ -112,7 +119,6 @@ export async function writePreparedPlan(
   if (Buffer.byteLength(contents) > MAX_PLAN_BYTES)
     throw new Error('The dependency plan exceeds the cache size limit');
 
-  await mkdir(dirname(file), { recursive: true });
   const temporary = file + '.' + randomUUID() + '.tmp';
   try {
     await writeFile(temporary, contents, { mode: 0o600, flag: 'wx' });

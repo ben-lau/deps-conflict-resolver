@@ -140,7 +140,7 @@ export async function runCli(
       projectRoot,
       dependencies,
       debug: false,
-      ...(command === 'init' && { offline: true }),
+      offline: command === 'init' || options.offline === true || options.preparedPlan === true,
       strict: command === 'prepare' && strictMode,
       autoInstall: command === 'prepare',
       preparedPlan: false,

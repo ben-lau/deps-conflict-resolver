@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { buildSync } from 'esbuild';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { runCli } from '../../src/core/cli-runner';
@@ -191,6 +193,121 @@ describe('doctor and prepare commands', () => {
     expect(code, stdout).toBe(0);
     return (JSON.parse(stdout) as { preparedPlan: string }).preparedPlan;
   }
+
+  it.each(['doctor', 'prepare'] as const)(
+    'honors the offline contract of a shared prepared-plan config in %s',
+    async (command) => {
+      const config = join(root, 'offline.json');
+      writeFileSync(
+        config,
+        JSON.stringify({
+          dependencies: ['legacy'],
+          preparedPlan: true,
+          strict: true,
+          packageManager: 'npm',
+          registry: 'https://unused.invalid/',
+        }),
+      );
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        throw new Error('Unexpected online query');
+      });
+      await runCli([command, '--config', config, '--root', root, '--json', '--timings'], output);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(JSON.parse(stdout)).toMatchObject({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING' }),
+        ]),
+        timings: { counts: { analysisPasses: 1, packageManagerRuns: 0 } },
+      });
+    },
+  );
+
+  it('writes a reusable plan for a workspace with no local node_modules', async () => {
+    writeAlias();
+    const child = join(root, 'packages/app');
+    mkdirSync(child, { recursive: true });
+    writeFileSync(
+      join(child, 'package.json'),
+      JSON.stringify({
+        name: 'app',
+        dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+      }),
+    );
+    expect(
+      await runCli(
+        [
+          'prepare',
+          'legacy',
+          '--root',
+          child,
+          '--package-manager',
+          'npm',
+          '--offline',
+          '--strict',
+          '--write-plan',
+          '--json',
+        ],
+        output,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout)).toHaveProperty('preparedPlan');
+    const resolver = await createResolver({
+      projectRoot: child,
+      dependencies: ['legacy'],
+      packageManager: 'npm',
+      preparedPlan: true,
+      strict: true,
+    });
+    expect(resolver.getTimings().counts).toMatchObject({ planHits: 1, analysisPasses: 0 });
+  });
+
+  it('only reuses a plan with the same effective Node package lookup paths', () => {
+    rmSync(join(root, 'node_modules/legacy'), { recursive: true });
+    const global = join(root, 'global');
+    mkdirSync(join(global, 'legacy'), { recursive: true });
+    writeFileSync(join(global, 'legacy/package.json'), '{"name":"legacy","version":"1.0.0"}');
+    const bundle = join(root, 'resolver.cjs');
+    buildSync({
+      stdin: {
+        contents:
+          "export { runCli } from './src/core/cli-runner'; export { createResolver } from './src/index';",
+        resolveDir: process.cwd(),
+      },
+      outfile: bundle,
+      bundle: true,
+      platform: 'node',
+    });
+    const script = String.raw`
+      const {createResolver, runCli} = require(process.argv[1]);
+      const root = process.argv[2];
+      const registry = 'https://unused.invalid/';
+      console.info = console.warn = () => {};
+      (async () => {
+        if (process.argv[3] === 'write') {
+          process.exitCode = await runCli(['prepare','legacy','--root',root,'--offline','--strict','--write-plan','--json','--package-manager','npm','--registry',registry]);
+          return;
+        }
+        try {
+          const result = await createResolver({projectRoot: root, dependencies: ['legacy'], packageManager: 'npm', registry, preparedPlan: true, strict: true});
+          console.log(JSON.stringify(result.getTimings().counts));
+        } catch (error) {
+          console.log(JSON.stringify({codes: error.diagnostics?.map(d => d.code)}));
+        }
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `;
+    const run = (mode: 'read' | 'write', flags: string[] = []) =>
+      JSON.parse(
+        execFileSync(process.execPath, [...flags, '-e', script, bundle, root, mode], {
+          env: { ...process.env, NODE_PATH: global },
+          encoding: 'utf8',
+        }),
+      );
+    expect(run('write')).toHaveProperty('preparedPlan');
+    expect(run('read')).toMatchObject({ planHits: 1 });
+    expect(run('read', ['--no-global-search-paths'])).toEqual({
+      codes: expect.arrayContaining(['DEPENDENCY_NOT_FOUND']),
+    });
+  });
 
   it('uses the persisted plan without analysis, network, or installation and verifies provider links', async () => {
     const first = join(root, 'first-vue2');

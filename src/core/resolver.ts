@@ -42,7 +42,12 @@ import {
 } from './project-preparation';
 import { resolve as resolvePath } from 'node:path';
 import { PreparationMetrics, type PreparationTimings } from '../utils/preparation-metrics';
-import { preparedPlanLocation, readPreparedPlan, writePreparedPlan } from './prepared-plan';
+import {
+  preparePlanDirectory,
+  preparedPlanLocation,
+  readPreparedPlan,
+  writePreparedPlan,
+} from './prepared-plan';
 import {
   DependencyWatch,
   type AnalysisSnapshot,
@@ -538,6 +543,12 @@ export class DepsConflictResolver {
     candidate?: AnalysisSnapshot,
   ): Promise<void> {
     try {
+      const planFile = watch?.savePlan
+        ? preparedPlanLocation(this.options, this.preparation!.owner)
+        : undefined;
+      if (watch?.savePlan && !planFile)
+        throw new Error('Dependency plans require standard node_modules package lookup');
+      if (planFile) await preparePlanDirectory(planFile);
       const registryClient = new NpmRegistryClient(this.metrics, this.options);
       const cached = this.hooks.onAnalysisComplete ? undefined : this.loadPreparedPlan();
       this.analysisResult =
@@ -564,13 +575,15 @@ export class DepsConflictResolver {
       this.observeSnapshot();
       if (watch) {
         this.recordWatchFiles();
-        if (watch.savePlan) {
+        if (planFile) {
           this.assertResolved();
-          const file = preparedPlanLocation(this.options, this.preparation!.owner);
-          if (!file || !watch.inputs?.matches())
+          if (!watch.inputs?.matches())
             throw new Error('Could not record a stable dependency plan for the installed project');
-          await writePreparedPlan(file, { analysis: this.analysisResult, inputs: watch.inputs });
-          watch.planFile = file;
+          await writePreparedPlan(planFile, {
+            analysis: this.analysisResult,
+            inputs: watch.inputs,
+          });
+          watch.planFile = planFile;
         }
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
           this.watch.snapshot = {
