@@ -11,10 +11,10 @@
 ## 功能特性
 
 - 🔍 **递归依赖分析**：深度遍历依赖树中的所有子依赖、孙依赖，并按实际安装路径区分嵌套实例
-- 🎯 **智能冲突检测**：自动识别 peer 依赖与主工程的版本冲突
+- 🎯 **Peer 冲突检测**：检查入口及其实际使用的 peer 版本，识别需要隔离的依赖
 - 📦 **自动别名安装**：为冲突的依赖创建别名并自动安装合适的版本
 - 🔄 **模块解析重定向**：在运行时自动将模块引用重定向到正确的别名版本
-- 🌐 **远程版本查询**：从 npm 注册表获取版本列表，智能选择最佳版本
+- 🌐 **远程版本查询**：从 npm registry 获取版本与 peer 元数据，选择兼容的候选版本
 - ⚡ **支持 Webpack 和 Vite**：提供两种构建工具的插件实现
 
 ## 使用场景
@@ -117,7 +117,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 | 选项               | 类型                                     | 默认值                            | 说明                                                                                                                                                                                                                                                                                                 |
 | ------------------ | ---------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dependencies`     | `string[]`                               | -                                 | **必填**，需要分析的依赖包名列表                                                                                                                                                                                                                                                                     |
+| `dependencies`     | `string[]`                               | -                                 | 需要分析的依赖包名，构建插件和 `createResolver` 必填。CLI 的入口选择规则见下方「诊断、准备与离线构建」。                                                                                                                                                                                             |
 | `projectRoot`      | `string`                                 | Vite root / Webpack context / cwd | 项目根目录路径                                                                                                                                                                                                                                                                                       |
 | `autoInstall`      | `boolean`                                | `true`                            | 是否自动安装缺失的别名依赖                                                                                                                                                                                                                                                                           |
 | `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'`    | `'auto'`                          | 包管理器类型，`'auto'` 自动检测                                                                                                                                                                                                                                                                      |
@@ -127,7 +127,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 | `strict`           | `boolean`                                | `false`                           | 未解决的必要依赖、安装失败或实际解析歧义会报错                                                                                                                                                                                                                                                       |
 | `aliasPrefix`      | `string`                                 | `'aliased-'`                      | 别名前缀                                                                                                                                                                                                                                                                                             |
 | `excludeRedirects` | `Record<string, string[]>`               | `{}`                              | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                                                                                                                                       |
-| `includeRedirects` | `Record<string, string[]>`               | `{}`                              | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。仅作用于指定包名本身，不触发新冲突或不遍历子树。示例：`{ vue: ['legacy-helper'] }`                                                                                                                                                       |
+| `includeRedirects` | `Record<string, string[]>`               | `{}`                              | 强制将指定包加入重定向列表。与 `excludeRedirects` 同时匹配时以排除为准。仅作用于指定包名本身，不触发新冲突或遍历子树。示例：`{ vue: ['legacy-helper'] }`                                                                                                                                             |
 | `peerOverrides`    | `Record<string, Record<string, string>>` | `{}`                              | 覆写指定依赖包声明的 `peerDependencies` 范围，键支持 `<包名>` 或 `<包名>@<semver范围>`（含 prerelease 匹配，优先级：纯包名 < 版本范围 < 精确版本）。适用于上游包 peer 范围写得过宽（如 `>=2.5.0`）或缺失、或同包多版本共存时精准接管目标版本子树。示例：`{ '@rili/ui@1.x': { vue: '>=2.5.17 <3' } }` |
 
 ### Vite 插件专属选项
@@ -150,34 +150,59 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 **Registry 检测优先级：**
 
-1. 项目级 `.npmrc` 文件
-2. 用户级 `~/.npmrc` 文件
-3. pnpm 的用户级 `.pnpmrc` 或 yarn 项目的 `.yarnrc.yml` 文件
+1. `npm_config_registry`、`NPM_CONFIG_REGISTRY` 环境变量（Yarn 优先读取 `YARN_NPM_REGISTRY_SERVER`）
+2. 项目配置（Yarn 优先读取 `.yarnrc.yml`，其次读取 `.npmrc`）
+3. 用户级 `.npmrc` 和 pnpm 的 `.pnpmrc`
 4. 默认使用 `https://registry.npmjs.org`
 
-显式设置 `registry` 时会覆盖上述自动检测结果：解析器从该地址查询可用版本，包管理器安装别名时也使用同一地址。
+版本查询使用自动检测的结果，别名安装继承包管理器自己的配置。显式设置 `registry` 时，版本查询和别名安装都使用该设置。
 
 ## 诊断、准备与离线构建
 
-可以先查看问题，再显式准备 alias，最后让 CI 使用已安装的版本：
+可以直接给 CLI 传包名。需要与构建插件共享 `peerOverrides`、别名前缀或重定向范围时，把选项提取到项目自己的模块中。以下示例使用 `tools/legacy-deps.cjs`。
 
-```bash
-pnpm exec deps-conflict-resolver doctor legacy-lib --json
-pnpm exec deps-conflict-resolver prepare legacy-lib
-pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
+```js
+// tools/legacy-deps.cjs
+module.exports = {
+  dependencies: ['legacy-lib'],
+  peerOverrides: { 'legacy-lib': { vue: '^2' } },
+};
 ```
 
-doctor 不执行安装；没有提供包名时检查当前工程的 dependencies 和已安装的 optionalDependencies，跳过 npm alias 声明。因平台差异未安装的可选包不会报缺失；显式指定的包仍会检查是否存在。prepare 必须显式提供包名，会通过工程的包管理器更新依赖清单和锁文件。--json 输出版本为 1 的报告，包含候选 alias、有效 alias、诊断和安装结果。
+CLI 通过 `--config` 显式加载该对象，支持 JSON、ESM 的 `export default` 和 CommonJS 的 `module.exports`。模块中值为 `undefined` 的选项按省略处理，包名和命令行参数优先于文件中的对应选项。`--config`、`--root` 和选项中的相对 `projectRoot` 都以启动 CLI 的工作目录为基准。要以模块位置为基准，可在模块中用 `require('node:path').resolve(__dirname, '..')` 生成绝对路径。
 
-建议把 prepare 产生的清单及锁文件提交到版本控制，CI 先执行包管理器的冻结安装，再使用以下配置：
+```bash
+pnpm exec deps-conflict-resolver doctor --config ./tools/legacy-deps.cjs --json
+pnpm exec deps-conflict-resolver prepare --config ./tools/legacy-deps.cjs --strict
+pnpm exec deps-conflict-resolver doctor --config ./tools/legacy-deps.cjs --offline --strict --json
+```
 
-```typescript
-depsConflictResolverVitePlugin({
-  dependencies: ['legacy-lib'],
-  offline: true,
-  strict: true,
-  ssr: 'auto',
-});
+`doctor` 只分析依赖。命令行和选项文件都省略入口包名时，扫描工程的 `dependencies` 和已安装的 `optionalDependencies`，跳过 npm alias 声明。`prepare` 需要通过其中一处指定入口包，在在线模式下由包管理器更新清单和锁文件。`prepare --strict` 遇到安装前已知的错误时会停止。`--json` 输出版本为 1 的报告，包含候选 alias、有效 alias、诊断和安装结果。
+
+提交 `prepare` 生成的清单和锁文件。CI 先执行包管理器的冻结安装。如果用 npm 准备了 alias，冻结安装需要沿用 `--legacy-peer-deps`。然后开启离线严格构建。[npm ci](https://docs.npmjs.com/cli/v10/commands/npm-ci/#description)
+
+Vite 和 Webpack 在自己的配置中导入同一个对象，再按构建需要加上选项。
+
+```js
+// vite.config.mjs
+import { depsConflictResolverVitePlugin } from 'deps-conflict-resolver/vite';
+import legacyDeps from './tools/legacy-deps.cjs';
+
+export default {
+  plugins: [
+    depsConflictResolverVitePlugin({ ...legacyDeps, offline: true, strict: true, ssr: 'auto' }),
+  ],
+};
+```
+
+```js
+// webpack.config.cjs
+const { DepsConflictResolverWebpackPlugin } = require('deps-conflict-resolver/webpack');
+const legacyDeps = require('./tools/legacy-deps.cjs');
+
+module.exports = {
+  plugins: [new DepsConflictResolverWebpackPlugin({ ...legacyDeps, offline: true, strict: true })],
+};
 ```
 
 offline=true 禁止 registry 查询及包管理器安装，即使同时设置 autoInstall=true 也不会安装。缺少已验证 alias 时会产生 OFFLINE_ALIAS_MISSING；strict=true 会使未解决的必要依赖、安装失败或实际请求中的上下文歧义报错。默认仍保留自动安装和宽松处理方式。autoInstall=false 只关闭安装，本身不会禁止版本查询。
@@ -187,6 +212,10 @@ Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal�
 开发预构建只将有效 alias、直接消费方和 includeRedirects 作为入口，再跟随实际的 import / require，不会提前加载整个依赖清单。显式 ssr.external 和 SSR optimizeDeps.exclude（包括 environments.ssr 的配置）优先于自动生成的配置；外置的依赖也会传给 SSR 优化器。显式排除需要重定向的消费方时，需要手动配置其解析方式。
 
 ssr.external=true（Vite 5+）也作用于预构建入口内部的依赖；noExternal 中包名或正则匹配的依赖继续内联。外置入口从原消费方解析，保留嵌套版本及 import/require 条件导出，避免优化器缓存目录改变其解析结果。 外置模块通过 Node 原生加载，保留其 namespace 身份、模块缓存及 live bindings，不依赖默认导出探测。
+
+Vite 优先对命中规则的 importer 应用重定向，其他请求仍由 Vite 自己解析，包括用户配置的 `resolve.alias`。预构建缓存随生效规则和已安装 provider 的变更失效。开发服务器会监听分析涉及的项目和 linked workspace 清单。
+
+入口实际使用的嵌套 peer 与要求不符时，可能报告 `PEER_PROVIDER_MISMATCH`，即使宿主另有一个兼容版本。入口和相关 peer 请求已经共用兼容的本地实例时，可以直接使用原生解析。`TRANSITIVE_PEER_CONFLICT` 提示已配置入口漏写的 peer 在其直接子依赖处存在版本冲突，供补充入口或修正声明。
 
 ### 查看某次解析的原因
 
@@ -215,14 +244,14 @@ Vite 的隐式 projectRoot 使用最终配置的 root，支持其他 config 钩�
 
 ### 兼容性与验证
 
-- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 在客户端冷启动预构建、SSR 构建和 SSR 开发模式（ESM / CommonJS）中的版本及实例身份，CI 覆盖 Vite 4.0.0、5、6、7、8。
+- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 的客户端冷启动预构建（含全局 `resolve.alias`）、SSR 构建和 SSR 开发模式（ESM / CommonJS），CI 覆盖 Vite 4.0.0、5、6、7、8。
 - Vite 4.0 的原生 SSR 预构建在混用 Vue 2 的 ESM / CommonJS 入口时会产生独立实例，插件也受此限制；此场景建议使用 Vite 5 或更新版本。包的条件导出由 Vite 解析，插件不强制合并本来就不同的导出入口。
 - Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
 - 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
 - workspace 根目录通过 dependencies、devDependencies 或 optionalDependencies 声明的 alias 均可离线复用，前提是从宿主实际可见的安装包名正确、版本满足目标 peer。本地同名目录遮蔽根 alias 时，按本地实际身份与版本判断，不直接复用被遮蔽的根安装。
 - workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。
-- 同一个 alias 被多个消费方共享时，会检查各方的有效 peer provider，包含使用宿主版本的消费方及 include/exclude 覆盖。provider 不一致会报告 AMBIGUOUS_IMPORTER，strict=true 时拒绝初始化；不声明该 peer 的消费方不会被误判为冲突。
-- 普通共享包若声明了相关 peer，且配置入口为同一物理实例带来不同的有效 provider，会产生 SHARED_PEER_CONTEXT 告警。它只检查已配置入口可达的安装图，尊重显式 include/exclude；不扫描图外消费者，也不自动复制包。宽泛的 peer 范围不能证明业务一定出错，因此该告警不会使 strict=true 初始化失败；需要跨运行时共享的包应明确配置解析范围，或隔离安装实例。
+- 消费方与 alias 都声明同一个 peer 时，已重定向的 provider 参与选版和最终校验。alias 与实际重定向的 provider 不兼容时报告 `ALIAS_PEER_UNSATISFIED`，严格模式下拒绝初始化。多个消费方需要不同的兼容 provider 时，会报告 `AMBIGUOUS_IMPORTER`。校验按实际导入路径应用 include/exclude 规则。
+- 普通共享包若声明了相关 peer，且配置入口为同一物理实例带来不同的有效 provider，会产生 SHARED_PEER_CONTEXT 告警。它检查已配置入口可达的安装图，包括宿主直连依赖与重定向子树共用同一物理实例的情形。显式 include/exclude 仍然生效。宽泛的 peer 范围不能证明业务一定出错，因此该告警不会使 strict=true 初始化失败；需要跨运行时共享的包应明确配置解析范围，或隔离安装实例。
 - linked/workspace 包的重定向请求从宿主工程解析，根请求与子路径均保留打包器的 exports 和 import/require 条件。Webpack watch 会监听分析涉及的包清单，重定向改变时重新解析相关模块，并保留无关模块缓存。
 - 当前未提供 Yarn PnP 的完整适配，也未实现私有 registry 的 scope 路由与认证配置继承。
 - 多版本运行时共存仍需要合适的挂载/更新/卸载桥接；本插件不承担 SFC 编译器转换、跨版本组件协议或 CSS 隔离。
@@ -308,15 +337,17 @@ depsConflictResolverVitePlugin({
 
     // 自定义模块解析
     beforeResolve: (source, importer) => {
-      // 返回新的模块名或 null 跳过
+      // 返回 undefined 时继续执行默认重定向规则
       if (source === 'special-module') {
         return 'custom-alias';
       }
-      return null;
+      return undefined;
     },
   },
 });
 ```
+
+`beforeResolve` 返回字符串时使用其指定的请求，返回 `null` 时交回打包器正常解析，返回 `undefined` 时继续应用自动重定向。
 
 `onInstallComplete` 在安装尝试结束后触发，参数只包含确认成功安装或复用的映射；完整安装结果通过 `getInstallResult()` 获取，未解决条件通过 `getDiagnostics()` 获取。
 

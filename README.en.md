@@ -11,10 +11,10 @@ A Webpack and Vite plugin that automatically resolves peer dependency conflicts 
 ## Features
 
 - **Recursive Dependency Analysis**: Deep traversal of the entire dependency tree, including nested sub-dependencies, while preserving nested instances by their installed paths
-- **Smart Conflict Detection**: Automatically identifies peer dependency version conflicts against the host project
+- **Smart Conflict Detection**: Identifies peer dependency conflicts using the host version and the installed providers visible to configured packages
 - **Automatic Alias Installation**: Creates aliases for conflicting dependencies and installs the appropriate versions
 - **Module Resolution Redirection**: At build time, redirects module imports from conflicting libraries to their aliased versions
-- **Remote Version Querying**: Fetches version lists from the npm registry and intelligently selects the best version
+- **Remote Version Querying**: Uses version and peer metadata from the npm registry to select compatible candidates
 - **Webpack & Vite Support**: Provides plugin implementations for both build tools
 
 ## Use Case
@@ -117,7 +117,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 | Option             | Type                                     | Default                           | Description                                                                                                                                                                                                                                                                                                                                                                                |
 | ------------------ | ---------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `dependencies`     | `string[]`                               | -                                 | **Required.** List of package names to analyze                                                                                                                                                                                                                                                                                                                                             |
+| `dependencies`     | `string[]`                               | -                                 | Package names to analyze. Required by the build plugins and `createResolver`. See Diagnose, Prepare, and Build Offline for CLI package selection.                                                                                                                                                                                                                                          |
 | `projectRoot`      | `string`                                 | Vite root / Webpack context / cwd | Project root directory path                                                                                                                                                                                                                                                                                                                                                                |
 | `autoInstall`      | `boolean`                                | `true`                            | Whether to auto-install missing aliased dependencies                                                                                                                                                                                                                                                                                                                                       |
 | `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'`    | `'auto'`                          | Package manager type. `'auto'` detects automatically                                                                                                                                                                                                                                                                                                                                       |
@@ -127,7 +127,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 | `strict`           | `boolean`                                | `false`                           | Reject unresolved required dependencies, failed installation, or ambiguous requests                                                                                                                                                                                                                                                                                                        |
 | `aliasPrefix`      | `string`                                 | `'aliased-'`                      | Prefix for generated alias names                                                                                                                                                                                                                                                                                                                                                           |
 | `excludeRedirects` | `Record<string, string[]>`               | `{}`                              | Exclude specific packages from the redirect list. Keys are original package names, values are importer package names to exclude. Example: `{ vue: ['vue-demi', 'pinia'] }`                                                                                                                                                                                                                 |
-| `includeRedirects` | `Record<string, string[]>`               | `{}`                              | Force specific packages by name into the redirect list. Applied before `excludeRedirects`. Does not trigger new alias creation or traverse subtrees. Example: `{ vue: ['legacy-helper'] }`                                                                                                                                                                                                 |
+| `includeRedirects` | `Record<string, string[]>`               | `{}`                              | Force specific packages by name into the redirect list. `excludeRedirects` wins if both match. Does not trigger new alias creation or traverse subtrees. Example: `{ vue: ['legacy-helper'] }`                                                                                                                                                                                             |
 | `peerOverrides`    | `Record<string, Record<string, string>>` | `{}`                              | Override declared `peerDependencies` ranges for specific packages. Keys accept `<name>` or `<name>@<semverRange>` (matching prereleases; precedence: name-only < range < exact version). Useful when an upstream package declares an overly broad range (e.g., `>=2.5.0`), omits a peer, or coexists across multiple major versions. Example: `{ '@rili/ui@1.x': { vue: '>=2.5.17 <3' } }` |
 
 ### Vite Plugin Exclusive Options
@@ -150,34 +150,59 @@ The plugin supports automatic detection of the package manager and registry:
 
 **Registry Detection Priority:**
 
-1. Project-level `.npmrc` file
-2. User-level `~/.npmrc` file
-3. User-level `.pnpmrc` for pnpm or `.yarnrc.yml` in yarn projects
+1. `npm_config_registry` and `NPM_CONFIG_REGISTRY` environment variables (Yarn checks `YARN_NPM_REGISTRY_SERVER` first)
+2. Project configuration (Yarn checks `.yarnrc.yml` before `.npmrc`)
+3. User-level `.npmrc` and pnpm's `.pnpmrc`
 4. Falls back to `https://registry.npmjs.org`
 
-An explicit `registry` option overrides this detection. The resolver uses it for remote version queries, and the package manager uses the same registry when installing aliases.
+Version queries use the detected registry. Alias installation inherits the package manager's own configuration. An explicit `registry` applies to both version queries and installation.
 
 ## Diagnose, Prepare, and Build Offline
 
-Inspect conflicts, explicitly prepare aliases, then validate the installed environment in CI:
+You can pass package names directly to the CLI. To share `peerOverrides`, an alias prefix, or redirect scopes with your build plugin, extract the options into a module in your project. This example uses `tools/legacy-deps.cjs`.
 
-```bash
-pnpm exec deps-conflict-resolver doctor legacy-lib --json
-pnpm exec deps-conflict-resolver prepare legacy-lib
-pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
+```js
+// tools/legacy-deps.cjs
+module.exports = {
+  dependencies: ['legacy-lib'],
+  peerOverrides: { 'legacy-lib': { vue: '^2' } },
+};
 ```
 
-doctor never installs packages. Without package names it scans dependencies and installed optionalDependencies, skipping npm alias declarations. Optional packages omitted for the current platform are not reported as missing; explicitly selected packages are still checked for existence. prepare requires explicit package names and updates the manifest and lockfile through the project's package manager. --json emits a schemaVersion=1 report containing planned aliases, active aliases, diagnostics, and installation outcomes.
+Pass `--config` to import that object. The CLI accepts JSON, an ESM `export default`, or a CommonJS `module.exports`. Options set to `undefined` are treated as omitted. Positional package names and CLI flags override the corresponding options from the file. Relative paths passed in `--config`, `--root`, or `projectRoot` are resolved from the CLI's working directory. To anchor `projectRoot` to the module, build an absolute path with `require('node:path').resolve(__dirname, '..')` in the module.
 
-Commit the manifest and lockfile produced by prepare. In CI, run your package manager's frozen installation first, then use:
+```bash
+pnpm exec deps-conflict-resolver doctor --config ./tools/legacy-deps.cjs --json
+pnpm exec deps-conflict-resolver prepare --config ./tools/legacy-deps.cjs --strict
+pnpm exec deps-conflict-resolver doctor --config ./tools/legacy-deps.cjs --offline --strict --json
+```
 
-```typescript
-depsConflictResolverVitePlugin({
-  dependencies: ['legacy-lib'],
-  offline: true,
-  strict: true,
-  ssr: 'auto',
-});
+`doctor` analyzes the installed tree. When neither source selects package names, it scans the project's `dependencies` and installed `optionalDependencies`, skipping npm aliases. `prepare` takes package names from either source and uses the package manager to update the manifest and lockfile in online mode. `prepare --strict` stops before installing if analysis finds a blocking error. `--json` emits a version 1 report containing planned aliases, active aliases, diagnostics, and installation outcomes.
+
+Commit the manifest and lockfile produced by `prepare`. Run a frozen install in CI. When npm prepared the aliases, use `npm ci --legacy-peer-deps` to match the installation flags. Then build in offline strict mode. [npm ci](https://docs.npmjs.com/cli/v10/commands/npm-ci/#description)
+
+Import the same options object in Vite or Webpack and add any build-specific settings there.
+
+```js
+// vite.config.mjs
+import { depsConflictResolverVitePlugin } from 'deps-conflict-resolver/vite';
+import legacyDeps from './tools/legacy-deps.cjs';
+
+export default {
+  plugins: [
+    depsConflictResolverVitePlugin({ ...legacyDeps, offline: true, strict: true, ssr: 'auto' }),
+  ],
+};
+```
+
+```js
+// webpack.config.cjs
+const { DepsConflictResolverWebpackPlugin } = require('deps-conflict-resolver/webpack');
+const legacyDeps = require('./tools/legacy-deps.cjs');
+
+module.exports = {
+  plugins: [new DepsConflictResolverWebpackPlugin({ ...legacyDeps, offline: true, strict: true })],
+};
 ```
 
 offline=true prohibits registry queries and package-manager installation, including when autoInstall=true is also supplied. Missing verified aliases produce OFFLINE_ALIAS_MISSING. strict=true rejects unresolved required dependencies, installation failures, and ambiguous runtime requests. Automatic installation and permissive handling remain the defaults. autoInstall=false alone does not prohibit registry queries.
@@ -187,6 +212,10 @@ Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal. D
 Development pre-bundling uses active aliases, direct consumers, and includeRedirects as entries, then follows actual import / require requests instead of eagerly loading every declared dependency. Explicit ssr.external and SSR optimizeDeps.exclude settings, including environments.ssr settings, take precedence over generated configuration. Externals are also forwarded to the SSR optimizer. Consumers explicitly excluded from automatic handling require manual resolution configuration.
 
 ssr.external=true (Vite 5+) also applies inside pre-bundled entries; dependencies matching noExternal package names or patterns remain bundled. External entry points resolve from their original consumer, preserving nested versions and import/require conditions instead of resolving from the optimizer cache directory. Native external loading preserves namespace identity, Node's module cache and live bindings without guessing default exports.
+
+Vite applies scoped redirects before global aliases for matching importers. Other requests follow Vite's configured aliases and resolution. Optimizer caches are invalidated when active rules or installed providers change. The development server watches the project and linked workspace manifests used by analysis.
+
+`PEER_PROVIDER_MISMATCH` reports a nested provider that shadows a compatible host version. An entry can use its installed provider when the affected peer requests already share that compatible instance. `TRANSITIVE_PEER_CONFLICT` points out incompatible peers of direct children when the selected entry omits the declaration.
 
 ### Explain a Resolution
 
@@ -215,14 +244,14 @@ Run `pnpm bench:scale` to measure repeated ranges, multiple importers and packag
 
 ### Compatibility and Verification
 
-- Vite 4–7 use an esbuild optimizer adapter; Vite 8 uses native Rolldown hooks. The compatibility script checks actual Vue 2 / Vue 3 versions and instance identities during client cold optimization, SSR build, and SSR development with both ESM and CommonJS. CI covers Vite 4.0.0, 5, 6, 7, and 8.
+- Vite 4–7 use an esbuild optimizer adapter. Vite 8 uses native Rolldown hooks. The compatibility script checks actual Vue 2 / Vue 3 versions and instance identities during client cold optimization, SSR build, and SSR development with both ESM and CommonJS. It also verifies client cold optimization with a global `resolve.alias`. CI covers Vite 4.0.0, 5, 6, 7, and 8.
 - Native Vite 4.0 SSR pre-bundling creates separate Vue 2 instances when ESM and CommonJS entries are mixed; the plugin shares this limitation. Use Vite 5 or newer for that scenario. Vite resolves conditional exports; the plugin does not force distinct export entry points into one implementation.
 - Webpack 5 uses beforeResolve. Initialization failures remain permissive by default; strict=true propagates failures to the compiler.
 - Installed optionalDependencies participate in the runtime graph. The existing optional-peer policy is unchanged.
 - Installed aliases declared in workspace-root dependencies, devDependencies, or optionalDependencies can be reused offline when the installation visible from the host has the correct package name and satisfies the target peer. A local directory shadowing a root alias is checked by its own actual identity and version; the hidden root installation is not selected instead.
 - Workspace real paths and node_modules links both match. Multiple aliases for the same physical importer produce AMBIGUOUS_IMPORTER rather than a name-based arbitrary choice; strict=true rejects the request.
-- Shared aliases validate every consumer's effective peer provider, including host-satisfied consumers and include/exclude overrides. Different providers produce AMBIGUOUS_IMPORTER and strict=true rejects initialization. Consumers that do not declare that peer are not treated as conflicting.
-- Ordinary shared packages declaring a relevant peer emit SHARED_PEER_CONTEXT when configured entries bring different effective providers to one physical instance. This check covers the installed graph reachable from configured entries, respects explicit include/exclude choices, and neither scans outside consumers nor duplicates packages. A broad peer range cannot establish that application behavior is invalid, so this advisory does not reject strict initialization. Configure the intended redirect scope or isolate package instances when crossing runtime contexts.
+- When a consumer and an alias declare the same peer, the redirected provider informs version selection and final validation. An incompatible provider produces `ALIAS_PEER_UNSATISFIED` and strict mode rejects initialization. Multiple consumers requiring different compatible providers produce `AMBIGUOUS_IMPORTER`. Validation applies include/exclude rules to the actual importer paths.
+- Ordinary shared packages declaring a relevant peer emit SHARED_PEER_CONTEXT when configured entries bring different effective providers to one physical instance. The check covers the installed graph reachable from configured entries, including direct host dependencies that share a physical instance with a redirected subtree. Explicit include/exclude choices remain in effect. A broad peer range cannot establish that application behavior is invalid, so this advisory does not reject strict initialization. Configure the intended redirect scope or isolate package instances when crossing runtime contexts.
 - Redirects from linked/workspace packages resolve from the host while preserving the bundler's exports and import/require conditions for roots and subpaths. Webpack watch tracks consulted package manifests and re-resolves affected modules when redirects change, retaining unrelated module caches.
 - Full Yarn PnP support and private-registry scope/authentication inheritance are not implemented.
 - Coexisting framework versions still require suitable mount/update/unmount bridges. SFC compiler conversion, cross-version component protocols, and CSS isolation are outside this plugin's scope.
@@ -308,15 +337,17 @@ depsConflictResolverVitePlugin({
 
     // Custom module resolution
     beforeResolve: (source, importer) => {
-      // Return a new module name, or null to skip
+      // Return undefined to continue with the default redirect rules
       if (source === 'special-module') {
         return 'custom-alias';
       }
-      return null;
+      return undefined;
     },
   },
 });
 ```
+
+`beforeResolve` can return a replacement request. Returning `null` leaves the request to the bundler, and returning `undefined` continues with the automatic redirect rules.
 
 `onInstallComplete` runs after an installation attempt and receives only confirmed installed or reused mappings. Use `getInstallResult()` for complete outcomes and `getDiagnostics()` for unresolved conditions.
 

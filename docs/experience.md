@@ -10,7 +10,7 @@
 
 **问题**：早期版本在查找可复用的已有别名时，会尝试满足所有 peer 依赖范围（包括已被主工程满足的范围）。例如主工程用 `vue@3.x`，某个库要求 `vue@^2.5.0`，另一个库要求 `vue@^3.0.0`（已被满足）。旧逻辑会把 `['^2.5.0', '^3.0.0']` 全部传入匹配，导致已有的 `aliased-vue2`（版本 2.7.16）无法满足 `^3.0.0`，返回 null，最终重复创建别名。
 
-**方案**：将范围拆分为 `conflictingRanges` 和 `satisfiedRanges`，只用冲突范围去查找已有别名。
+**方案**：用需要重定向的冲突范围筛选已有别名，并检查候选自身的 peer 依赖。当候选和消费方共享同一个被重定向的 peer 时，候选须兼容消费方实际使用的 provider。
 
 **教训**：复用已有资源时，约束条件应只包含真正需要解决的部分，而不是全部需求。
 
@@ -78,11 +78,11 @@
 
 ## 包管理器兼容性
 
-### 9. npm install 需要 `--legacy-peer-deps` 避免卡死
+### 9. npm 安装和冻结重装需要使用一致的 peer 选项
 
-**问题**：在安装别名依赖时，npm 的 peer 依赖检查可能因为版本冲突而无限等待或报错退出，导致安装流程卡死。
+**问题**：宿主与旧包的 peer 范围可能互斥，普通 npm 安装会因冲突报错。用 `--legacy-peer-deps` 生成锁文件后，冻结重装也需要沿用该选项。
 
-**方案**：始终传递 `--legacy-peer-deps` 跳过 peer 依赖检查。安装逻辑本身就是为了解决冲突，不需要 npm 再做一次检查。
+**方案**：别名安装时传递 `--legacy-peer-deps`。在 npm 项目中运行 `prepare` 后，CI 使用 `npm ci --legacy-peer-deps`，再以 `offline: true` 和 `strict: true` 构建。
 
 ### 10. 安装进程需要有边界的超时和信号升级机制
 
@@ -109,7 +109,9 @@
 2. lock 文件存在性（`pnpm-lock.yaml` / `yarn.lock` / `package-lock.json`）
 3. 默认 npm
 
-Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 用户 `~/.npmrc` → pnpm 用户 `.pnpmrc`/yarn `.yarnrc.yml` → 默认 `registry.npmjs.org`。解析器的版本查询和包管理器 alias 安装都使用解析后的同一 registry。
+在 workspace 根目录安装别名时，pnpm 使用 `-w`，Yarn Classic 使用 `-W`。用包管理器声明或实际运行版本区分 Yarn Classic 和现代 Yarn。
+
+显式 `registry` 同时用于版本查询和别名安装。省略时，安装继承包管理器自身的配置，版本查询依次检查环境变量、项目级配置（Yarn 优先读取 `.yarnrc.yml`）、用户级配置，再回退到 npm 公共源。
 
 ---
 
@@ -119,14 +121,14 @@ Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 
 
 **问题**：Webpack 有多个阶段可以拦截模块解析（resolve hook、normalModuleFactory、compilation）。选择不当的阶段会导致拦截时机过晚或需要复杂的 resolve 链处理。
 
-**方案**：使用 `normalModuleFactory` 的 `resolve` hook，在模块工厂创建阶段就拦截请求，直接修改 request 字段。
+**方案**：在 `normalModuleFactory.hooks.beforeResolve` 修改 `resolveData.request`，把后续入口和条件导出的解析交给 Webpack。
 
 **额外处理**：
 
 - watch 模式通过 `watchRun` hook 先失效旧 generation，再等待新一轮分析完成
-- 初始化失败不应阻塞 Webpack 编译（记录错误并继续构建，该 generation 不应用 alias），后续 watch 周期可以重试
+- 默认记录初始化错误并继续编译，该 generation 不应用 alias，后续 watch 周期可以重试
 - Webpack `done` hook 中的错误不应抛出
-- 核心 resolver 与 Vite 插件仍把初始化错误交给调用方；fail-open 是 Webpack 插件的边界，不是所有入口的默认行为
+- Webpack 开启 `strict` 时将初始化错误交给编译器。核心 resolver 与 Vite 插件将初始化错误交给调用方
 
 ### 13. Vite 插件需要处理 esbuild 版本差异
 
@@ -182,7 +184,7 @@ Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 
 
 **问题**：入口开启 debug 模式后，子模块各自创建的 logger 实例仍然使用默认 INFO 级别，导致关键调试信息不输出。
 
-**方案**：logger 使用模块级可变的全局级别变量，所有 logger 实例共享。debug=true 应设置 ALL，在添加调试信息时保留 warn/error；仅设置 DEBUG 会意外隐藏其他级别。命令行 JSON 报告会关闭库日志，避免污染输出。
+**方案**：子模块共享默认日志级别。`debug: true` 启用全部日志，并保留 warn/error。CLI 通过 `AsyncLocalStorage` 只静音本次准备调用的日志，保留 JSON 输出完整性和同进程其他调用的日志。
 
 ### 21. semver 操作必须 try/catch
 
