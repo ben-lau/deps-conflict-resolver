@@ -67,6 +67,7 @@ import { createDirectoryScopeMatcher } from './scope-paths';
 
 const logger = createLogger('dependency-analyzer');
 const MAX_PEER_PLAN_ATTEMPTS = 64;
+const MAX_PEER_REGISTRY_LOOKUPS = 8;
 
 function peerPlanKey(plans: PlannedAlias[]): string {
   return JSON.stringify(plans.map(({ mapping }) => [mapping.aliasName, mapping.resolvedVersion]));
@@ -985,7 +986,7 @@ export class DependencyAnalyzer {
   private async searchPeerPlans(
     start: PlannedAlias[],
     initialLinks: AliasPeerLinks,
-    versionsByPackage: ReadonlyMap<string, string[]>,
+    versionsByPackage: Map<string, string[]>,
     allConflictPackageNames: string[],
     link: (plans: PlannedAlias[]) => Promise<AliasPeerLinks>,
   ): Promise<{ plans: PlannedAlias[]; links: AliasPeerLinks } | undefined> {
@@ -995,12 +996,45 @@ export class DependencyAnalyzer {
         .filter(({ severity }) => severity === 'error')
         .map(({ message }) => message),
     );
-    const pending = [{ plans: start, links: initialLinks }];
-    for (const { plans, links } of pending) {
+    type SearchState = { plans: PlannedAlias[]; links: AliasPeerLinks };
+    const pending: SearchState[] = [{ plans: start, links: initialLinks }];
+    const needsVersions = new Map<string, Set<SearchState>>();
+    const unavailableVersions = new Set<string>();
+    const canFetch = this.options.autoInstall && !this.options.offline;
+    let registryLookups = 0;
+    while (pending.length > 0 || needsVersions.size > 0) {
+      const state = pending.shift();
+      if (!state) {
+        // Exhaust installed and already-fetched candidates before asking for
+        // additional versions. Revisit only the states waiting on this peer.
+        const [name, waiting] = needsVersions.entries().next().value!;
+        needsVersions.delete(name);
+        if (registryLookups >= MAX_PEER_REGISTRY_LOOKUPS) {
+          this.reportPeerSearchLimit(name, 'registry lookup');
+          return undefined;
+        }
+        registryLookups++;
+        let versions: string[] = [];
+        try {
+          versions = await this.registryClient.fetchAllVersions(name, this.options.registry);
+        } catch {
+          unavailableVersions.add(name);
+        }
+        versionsByPackage.set(name, versions);
+        if (versions.length > 0) pending.push(...waiting);
+        continue;
+      }
+      const { plans, links } = state;
       const conflicts = plans.filter(({ mapping }) =>
         links.conflictingAliases.has(mapping.aliasName),
       );
       for (const plan of conflicts) {
+        const name = plan.mapping.originalName;
+        if (canFetch && !versionsByPackage.has(name)) {
+          const waiting = needsVersions.get(name) ?? new Set<SearchState>();
+          waiting.add(state);
+          needsVersions.set(name, waiting);
+        }
         for (const alternative of this.peerPlanAlternatives(plan, plans, versionsByPackage)) {
           const next = this.rebuildAliasPlans(
             plans,
@@ -1010,13 +1044,7 @@ export class DependencyAnalyzer {
           const key = peerPlanKey(next);
           if (seen.has(key)) continue;
           if (seen.size > MAX_PEER_PLAN_ATTEMPTS) {
-            this.diagnostics.push({
-              code: 'ALIAS_SEARCH_LIMIT',
-              severity: 'warning',
-              packageName: plan.mapping.originalName,
-              message:
-                'Peer alias search reached its candidate limit; narrow the peer ranges with peerOverrides or prepare an explicit provider.',
-            });
+            this.reportPeerSearchLimit(name, 'candidate');
             return undefined;
           }
           seen.add(key);
@@ -1035,7 +1063,27 @@ export class DependencyAnalyzer {
         }
       }
     }
+    for (const packageName of unavailableVersions) {
+      this.diagnostics.push({
+        code: 'ALIAS_METADATA_UNAVAILABLE',
+        severity: 'warning',
+        packageName,
+        message: 'Could not retrieve alternative peer alias versions for ' + packageName,
+      });
+    }
     return undefined;
+  }
+
+  private reportPeerSearchLimit(packageName: string, limit: 'candidate' | 'registry lookup'): void {
+    this.diagnostics.push({
+      code: 'ALIAS_SEARCH_LIMIT',
+      severity: 'warning',
+      packageName,
+      message:
+        'Peer alias search reached its ' +
+        limit +
+        ' limit; narrow the peer ranges with peerOverrides or prepare an explicit provider.',
+    });
   }
 
   private *peerPlanAlternatives(
@@ -1805,9 +1853,9 @@ export class DependencyAnalyzer {
           : planned.all.some(({ requiredRange }) => satisfies(version, requiredRange)),
       );
       if (installed.some(({ version }) => satisfies(version, range))) continue;
-      if (shared.length > 0 && installed.length > 0) return 'consumer-mismatch';
       if (
         this.options.offline ||
+        (shared.length > 0 && installed.length > 0) ||
         !planned.all.some(({ requiredRange }) => rangesIntersect(requiredRange, range))
       )
         compatibility = 'unresolved';

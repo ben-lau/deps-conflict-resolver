@@ -240,15 +240,17 @@ export async function planAliasPeerLinks(
         });
         continue;
       }
-      let candidates = redirectAllowed
+      const plannedProviders = redirectAllowed
         ? mappings.filter(
             (mapping) =>
               mapping !== importer &&
               mapping.originalName === peerName &&
-              mapping.originalName === name &&
-              satisfies(mapping.resolvedVersion, range),
+              mapping.originalName === name,
           )
         : [];
+      let candidates = plannedProviders.filter((mapping) =>
+        satisfies(mapping.resolvedVersion, range),
+      );
       const sharedContexts = candidates.filter((candidate) =>
         providerAliases.has(candidate.aliasName),
       );
@@ -289,6 +291,12 @@ export async function planAliasPeerLinks(
       }
 
       if (conflicts.size > 0) continue;
+      // Independent entry packages can require a common provider even when
+      // the consumers of this alias never redirect this peer themselves.
+      if (!pendingInstallation && plannedProviders.length > 0) {
+        conflictingAliases.add(importer.aliasName);
+        for (const provider of plannedProviders) conflictingAliases.add(provider.aliasName);
+      }
       diagnostics.push({
         code: 'ALIAS_PEER_UNSATISFIED',
         severity: pendingInstallation ? 'warning' : 'error',

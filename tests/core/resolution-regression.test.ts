@@ -15,6 +15,7 @@ import { resolveConfig } from 'vite';
 import { createRequire } from 'node:module';
 import { createResolver } from '../../src/core/resolver';
 import { createDependencyAnalyzer } from '../../src/core/dependency-analyzer';
+import * as packageManager from '../../src/core/package-manager-adapter';
 import { ResolutionError } from '../../src/core/resolution-error';
 import { mockRegistry } from '../support/registry';
 import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
@@ -513,6 +514,88 @@ describe('diagnostics and deterministic offline operation', () => {
     expect(resolver.getDiagnostics().map(({ code }) => code)).toEqual(['ALIAS_NOT_INSTALLED']);
     expect(fetch.mock.calls.map(([request]) => requestPath(request))).toEqual(['/runtime']);
   });
+
+  it.each([
+    ['installed', true],
+    ['registry', true],
+    ['registry', false],
+  ] as const)(
+    'reconsiders a %s alias provider across peer contexts (split=%s)',
+    async (source, split) => {
+      const dependencies = {
+        legacy: '1.0.0',
+        ...(split && { 'runtime-consumer': '1.0.0' }),
+        renderer: '2.0.0',
+        renderer1: 'npm:renderer@1.0.0',
+        runtime: '3.0.0',
+        runtime27: 'npm:runtime@2.7.16',
+        ...(source === 'installed' && { runtime26: 'npm:runtime@2.6.14' }),
+      };
+      const root = project({ dependencies });
+      const legacy = pkg(root, 'legacy', {
+        peerDependencies: { renderer: '^1', ...(!split && { runtime: '^2' }) },
+      });
+      const runtimeConsumer = split
+        ? pkg(root, 'runtime-consumer', { peerDependencies: { runtime: '^2' } })
+        : legacy;
+      const renderer = pkg(root, 'renderer1', {
+        name: 'renderer',
+        peerDependencies: { runtime: '~2.6.0' },
+      });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      pkg(root, 'runtime27', { name: 'runtime', version: '2.7.16' });
+      const runtime26 = { name: 'runtime', version: '2.6.14' };
+      if (source === 'installed') pkg(root, 'runtime26', runtime26);
+      const fetch = mockRegistry(
+        runtime26,
+        { name: 'runtime', version: '2.7.16' },
+        {
+          name: 'renderer',
+          version: '1.0.0',
+          peerDependencies: { runtime: '~2.6.0' },
+        },
+      );
+      const install = vi.fn(async ([spec]: string[]) => {
+        const alias = spec!.slice(0, spec!.indexOf('@npm:'));
+        pkg(root, alias, runtime26);
+        writeFileSync(
+          join(root, 'package.json'),
+          JSON.stringify({
+            name: 'host',
+            dependencies: { ...dependencies, [alias]: 'npm:runtime@2.6.14' },
+          }),
+        );
+        return { success: true, exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      });
+      vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({ install });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, split ? ['legacy', 'runtime-consumer'] : ['legacy']),
+        offline: source === 'installed',
+        autoInstall: source === 'registry',
+        strict: true,
+      });
+      const alias = resolver.resolveModule('runtime', join(runtimeConsumer, 'index.js'));
+      expect(alias).toBeTruthy();
+      expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe(alias);
+      expect(resolver.getAnalysisResult()?.aliasMappings).toContainEqual(
+        expect.objectContaining({
+          aliasName: alias,
+          resolvedVersion: '2.6.14',
+        }),
+      );
+      expect(resolver.getDiagnostics()).toEqual([]);
+      const requests = fetch.mock.calls.map(([request]) => requestPath(request));
+      if (source === 'registry') {
+        expect(install.mock.calls).toEqual([[[alias + '@npm:runtime@2.6.14']]]);
+        expect(requests.filter((request) => request === '/runtime')).toEqual(['/runtime']);
+      } else {
+        expect(install).not.toHaveBeenCalled();
+        expect(requests).toEqual([]);
+      }
+    },
+  );
 
   it('rejects an alias whose peers conflict with its only consumer redirect in strict mode', async () => {
     const root = project({
