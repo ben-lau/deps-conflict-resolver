@@ -29,6 +29,10 @@ import {
   createAliasInstallSpec,
 } from '../utils/semver';
 import { parseNpmAlias } from '../utils/version-spec';
+import {
+  findInvalidPeerOverrideKeys,
+  resolvePeerOverridesForPackage,
+} from '../utils/peer-overrides';
 import { clearNpmRegistryCache } from './npm-registry';
 import { npmRegistryClient, type RegistryClient } from './registry-client';
 import {
@@ -303,6 +307,12 @@ export class DependencyAnalyzer {
     logger.info('Starting dependency analysis...');
     this.watchFiles.clear();
     this.watchFiles.add(join(this.options.projectRoot, 'package.json'));
+
+    for (const invalidKey of findInvalidPeerOverrideKeys(this.options.peerOverrides)) {
+      logger.warn(
+        `Ignoring invalid peerOverrides selector "${invalidKey}": expected "<packageName>" or "<packageName>@<validSemverRange>"`,
+      );
+    }
 
     try {
       // 0. 解析 catalog: 协议的依赖版本
@@ -617,12 +627,24 @@ export class DependencyAnalyzer {
   private collectFirstLevelPeerDependencies(): Map<string, DependencyPath[]> {
     const peerDepsMap = new Map<string, DependencyPath[]>();
     const collectPeers = (
-      manifest: Pick<PackageJson, 'peerDependencies' | 'peerDependenciesMeta'>,
+      manifest: Pick<PackageJson, 'name' | 'version' | 'peerDependencies' | 'peerDependenciesMeta'>,
       path: string[],
       packagePath?: string,
     ) => {
-      for (const [peerName, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
-        if (manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
+      const packageName = path.at(-1);
+      const overrides = resolvePeerOverridesForPackage(
+        this.options.peerOverrides,
+        { packageName, manifestName: manifest.name },
+        manifest.version,
+      );
+      const mergedPeers: Record<string, string> = {
+        ...manifest.peerDependencies,
+        ...overrides,
+      };
+
+      for (const [peerName, peerRange] of Object.entries(mergedPeers)) {
+        const isOverridden = overrides !== undefined && Object.hasOwn(overrides, peerName);
+        if (!isOverridden && manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
 
         const existing = peerDepsMap.get(peerName) ?? [];
         existing.push({
@@ -1492,13 +1514,24 @@ export class DependencyAnalyzer {
    * 不应被纳入 Vue 2 别名重定向范围，也不应沿它向下传播该别名规则。
    */
   private isDescendantIncompatibleWithAlias(
-    manifest: Pick<PackageJson, 'dependencies' | 'peerDependencies'> | null | undefined,
+    manifest:
+      | Pick<PackageJson, 'name' | 'version' | 'dependencies' | 'peerDependencies'>
+      | null
+      | undefined,
     target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
+    descendantName?: string,
+    descendantVersion?: string,
   ): boolean {
-    if (!manifest || !target?.hostVersion) return false;
+    if (!target?.hostVersion) return false;
+    const overrides = resolvePeerOverridesForPackage(
+      this.options.peerOverrides,
+      { packageName: descendantName, manifestName: manifest?.name },
+      descendantVersion ?? manifest?.version,
+    );
     const rawRange =
-      manifest.peerDependencies?.[target.packageName] ??
-      manifest.dependencies?.[target.packageName];
+      overrides?.[target.packageName] ??
+      manifest?.peerDependencies?.[target.packageName] ??
+      manifest?.dependencies?.[target.packageName];
     if (!rawRange) return false;
     const range =
       this.workspaceDetector.resolveVersionSpec(target.packageName, rawRange) ?? rawRange;
@@ -1536,7 +1569,12 @@ export class DependencyAnalyzer {
 
       if (
         !rootSet.has(node.id) &&
-        this.isDescendantIncompatibleWithAlias(readPackageJsonCached(node.packagePath), target)
+        this.isDescendantIncompatibleWithAlias(
+          readPackageJsonCached(node.packagePath),
+          target,
+          node.name,
+          node.version,
+        )
       ) {
         logger.debug(
           `Skipping descendant ${node.name}@${node.version} (${node.packagePath}): declared ${target!.packageName} requirement matches host ${target!.hostVersion} but not alias ${target!.aliasVersion}`,
@@ -1599,7 +1637,10 @@ export class DependencyAnalyzer {
         }
         visited.add(name);
 
-        if (!rootPackages?.has(name) && this.isDescendantIncompatibleWithAlias(analyzed, target)) {
+        if (
+          !rootPackages?.has(name) &&
+          this.isDescendantIncompatibleWithAlias(analyzed, target, name)
+        ) {
           continue;
         }
 
@@ -1634,7 +1675,10 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      if (!rootPackages?.has(name) && this.isDescendantIncompatibleWithAlias(pkgJson, target)) {
+      if (
+        !rootPackages?.has(name) &&
+        this.isDescendantIncompatibleWithAlias(pkgJson, target, name)
+      ) {
         continue;
       }
 

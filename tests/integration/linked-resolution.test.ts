@@ -163,8 +163,18 @@ function workspaceFixture(): string {
   return app;
 }
 
-async function bundle(app: string, tool: 'webpack' | 'vite'): Promise<unknown> {
-  const options = { projectRoot: app, dependencies: ['legacy'], offline: true, strict: true };
+async function bundle(
+  app: string,
+  tool: 'webpack' | 'vite',
+  extraOptions: Partial<{ peerOverrides: Record<string, Record<string, string>> }> = {},
+): Promise<unknown> {
+  const options = {
+    projectRoot: app,
+    dependencies: ['legacy'],
+    offline: true,
+    strict: true,
+    ...extraOptions,
+  };
   const outDir = join(app, 'dist');
   if (tool === 'vite') {
     await build({
@@ -289,6 +299,122 @@ describe.each(['webpack', 'vite'] as const)('linked aliases in %s', (tool) => {
     expect(await bundle(app, tool)).toEqual({
       legacy: '2.6.14',
       icons: ['3.5.0', '3.5.0'],
+      host: '3.5.0',
+    });
+  });
+
+  it('bundles a broad-peer package and its full physical subtree via peerOverrides', async () => {
+    const app = realpathSync(mkdtempSync(join(tmpdir(), 'deps-peer-override-')));
+    roots.push(app);
+    json(app, {
+      name: 'app',
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.6.14' },
+    });
+    const modules = join(app, 'node_modules');
+    const writePkg = (directory: string, manifest: object, code: string) => {
+      json(directory, { type: 'module', main: './index.js', ...manifest });
+      writeFileSync(join(directory, 'index.js'), code);
+    };
+    writePkg(join(modules, 'vue'), { name: 'vue', version: '3.5.0' }, 'export const v = "3.5.0";');
+    writePkg(
+      join(modules, 'vue2'),
+      { name: 'vue', version: '2.6.14' },
+      'export const v = "2.6.14";',
+    );
+    writePkg(
+      join(modules, 'broad-child'),
+      { name: 'broad-child', version: '1.0.0', peerDependencies: { vue: '>=2.5.0' } },
+      'import { v } from "vue"; export const child = v;',
+    );
+    writePkg(
+      join(modules, 'legacy'),
+      {
+        name: 'legacy',
+        version: '1.0.0',
+        dependencies: { 'broad-child': '1.0.0' },
+        peerDependencies: { vue: '>=2.5.17' },
+      },
+      'import { v } from "vue"; import { child } from "broad-child"; export const result = { root: v, child };',
+    );
+    writeFileSync(
+      join(app, 'entry.mjs'),
+      'import { result } from "legacy"; import { v as host } from "vue"; export const version = { ...result, host };',
+    );
+    writeFileSync(join(app, 'entry.cjs'), 'module.exports = require("./entry.mjs").version;');
+
+    expect(await bundle(app, tool, { peerOverrides: { legacy: { vue: '>=2.5.17 <3' } } })).toEqual({
+      root: '2.6.14',
+      child: '2.6.14',
+      host: '3.5.0',
+    });
+  });
+
+  it('bundles only the version matched by name@range peerOverrides when multiple majors coexist', async () => {
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'deps-versioned-peer-override-')));
+    roots.push(workspace);
+    json(workspace, { name: 'ws', private: true, workspaces: ['packages/*'] });
+    const app = join(workspace, 'packages', 'app');
+    const legacyShell = join(workspace, 'packages', 'legacy-shell');
+    json(app, {
+      name: 'app',
+      dependencies: {
+        legacy: '2.0.0',
+        'legacy-shell': 'workspace:*',
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.6.14',
+      },
+    });
+    json(legacyShell, {
+      name: 'legacy-shell',
+      version: '1.0.0',
+      type: 'module',
+      main: './index.js',
+      dependencies: { legacy: '1.2.0-beta.1' },
+    });
+    writeFileSync(
+      join(legacyShell, 'index.js'),
+      'import { version as v1 } from "legacy"; export const shellLegacy = v1;',
+    );
+    mkdirSync(join(app, 'node_modules'), { recursive: true });
+    symlinkSync(legacyShell, join(app, 'node_modules', 'legacy-shell'), 'dir');
+
+    const writePkg = (directory: string, manifest: object, code: string) => {
+      json(directory, { type: 'module', main: './index.js', ...manifest });
+      writeFileSync(join(directory, 'index.js'), code);
+    };
+    writePkg(
+      join(app, 'node_modules', 'vue'),
+      { name: 'vue', version: '3.5.0' },
+      'export const v = "3.5.0";',
+    );
+    writePkg(
+      join(app, 'node_modules', 'vue2'),
+      { name: 'vue', version: '2.6.14' },
+      'export const v = "2.6.14";',
+    );
+    writePkg(
+      join(app, 'node_modules', 'legacy'),
+      { name: 'legacy', version: '2.0.0', peerDependencies: { vue: '>=2.5.17' } },
+      'import { v } from "vue"; export const version = v;',
+    );
+    writePkg(
+      join(legacyShell, 'node_modules', 'legacy'),
+      { name: 'legacy', version: '1.2.0-beta.1', peerDependencies: { vue: '>=2.5.17' } },
+      'import { v } from "vue"; export const version = v;',
+    );
+    writeFileSync(
+      join(app, 'entry.mjs'),
+      'import { version as modern } from "legacy"; import { shellLegacy as old } from "legacy-shell"; import { v as host } from "vue"; export const version = { modern, old, host };',
+    );
+    writeFileSync(join(app, 'entry.cjs'), 'module.exports = require("./entry.mjs").version;');
+
+    expect(
+      await bundle(app, tool, {
+        peerOverrides: { 'legacy@1.x': { vue: '>=2.5.17 <3' } },
+      }),
+    ).toEqual({
+      modern: '3.5.0',
+      old: '2.6.14',
       host: '3.5.0',
     });
   });

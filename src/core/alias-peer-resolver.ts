@@ -8,6 +8,7 @@ import type {
   ResolverDiagnostic,
 } from '../types';
 import { findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { resolvePeerOverridesForPackage } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
 import { createWorkspaceDetector } from './workspace-detector';
 import type { RegistryClient } from './registry-client';
@@ -105,8 +106,19 @@ export async function linkAliasPeers(
     // nested providers. Do not reject an install that can supply those peers.
     const pendingInstallation = !installedPath && options.autoInstall && importer.installSpec;
 
-    for (const [peerName, range] of Object.entries(manifest.peerDependencies ?? {})) {
-      if (manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
+    const peerOverrides = resolvePeerOverridesForPackage(
+      options.peerOverrides,
+      { packageName: importer.originalName, manifestName: manifest.name },
+      manifest.version ?? importer.resolvedVersion,
+    );
+    const mergedPeers: Record<string, string> = {
+      ...manifest.peerDependencies,
+      ...peerOverrides,
+    };
+
+    for (const [peerName, range] of Object.entries(mergedPeers)) {
+      const isOverridden = peerOverrides !== undefined && Object.hasOwn(peerOverrides, peerName);
+      if (!isOverridden && manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
       // A shared physical alias cannot change runtime according to its caller.
       // Include consumers satisfied by the host; they have no alias mapping.
       const providers = new Map<string, string[]>();

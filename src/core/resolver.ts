@@ -126,6 +126,7 @@ export class DepsConflictResolver {
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
       excludeRedirects: userOptions.excludeRedirects ?? {},
       includeRedirects: userOptions.includeRedirects ?? {},
+      peerOverrides: userOptions.peerOverrides ?? {},
     };
   }
 

@@ -4,6 +4,7 @@ import type { AliasMapping, PackageJson, ResolvedOptions, ResolverDiagnostic } f
 import type { InstalledDependencyGraph } from './dependency-graph';
 import { AliasManager } from './alias-manager';
 import { findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { resolvePeerOverridesForPackage } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
 
 interface Provider {
@@ -78,8 +79,13 @@ export function validateSharedPeerContexts(
       const node = graph.nodes.get(nodeId);
       if (!node) continue;
       const manifest = readManifest(node.packagePath);
-      const range = manifest?.peerDependencies?.[peer];
-      if (!range || manifest?.peerDependenciesMeta?.[peer]?.optional) continue;
+      const overrideRange = resolvePeerOverridesForPackage(
+        options.peerOverrides,
+        { packageName: node.name, manifestName: manifest?.name },
+        manifest?.version ?? node.version,
+      )?.[peer];
+      const range = overrideRange ?? manifest?.peerDependencies?.[peer];
+      if (!range || (!overrideRange && manifest?.peerDependenciesMeta?.[peer]?.optional)) continue;
       const decision = resolver.explainResolution(
         peer,
         join(node.packagePath, '__peer_context__.js'),
@@ -120,11 +126,16 @@ export function validateSharedPeerContexts(
       )
         continue;
       const manifest = readManifest(node.packagePath);
-      const range = manifest?.peerDependencies?.[peer];
+      const overrideRange = resolvePeerOverridesForPackage(
+        options.peerOverrides,
+        { packageName: node.name, manifestName: manifest?.name },
+        manifest?.version ?? node.version,
+      )?.[peer];
+      const range = overrideRange ?? manifest?.peerDependencies?.[peer];
       if (range && !satisfies(context.provider.version, range)) continue;
       if (
         range &&
-        !manifest?.peerDependenciesMeta?.[peer]?.optional &&
+        (overrideRange !== undefined || !manifest?.peerDependenciesMeta?.[peer]?.optional) &&
         !aliasPaths.has(node.packagePath) &&
         !options.includeRedirects[peer]?.includes(node.name)
       ) {

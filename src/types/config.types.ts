@@ -70,6 +70,16 @@ export interface DepsConflictResolverOptions {
    * @example { vue: ['@rili/ui', '@kmt/meeting-setting'] }
    */
   includeRedirects?: Record<string, string[]>;
+
+  /**
+   * 覆写指定依赖包声明的 peerDependencies 版本范围
+   * 键支持 `<包名>` 或 `<包名>@<semver范围>`（含 scoped 包，如 `'@rili/ui@1.x'`），
+   * 值为 `{ peer包名: 版本范围 }` 映射；优先级：纯包名 < 版本范围 < 精确版本（按 peer 粒度合并）
+   * 适用于上游包 peerDependencies 过宽（如 ">=2.5.0" 漏写上限）或缺失，
+   * 导致无法自动检出冲突并接管其整棵物理依赖子树的场景
+   * @example { '@rili/ui@1.x': { vue: '>=2.5.17 <3' } }
+   */
+  peerOverrides?: Record<string, Record<string, string>>;
 }
 
 /**
@@ -77,10 +87,11 @@ export interface DepsConflictResolverOptions {
  * 注意：packageManager 和 registry 在解析后会是具体的值，不会是 'auto'
  */
 export interface ResolvedOptions extends Required<
-  Omit<DepsConflictResolverOptions, 'offline' | 'strict'>
+  Omit<DepsConflictResolverOptions, 'offline' | 'strict' | 'peerOverrides'>
 > {
   offline?: boolean;
   strict?: boolean;
+  peerOverrides?: Record<string, Record<string, string>>;
   /**
    * 解析后的包管理器类型（已自动检测或用户指定）
    */

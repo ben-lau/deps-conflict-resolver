@@ -523,6 +523,197 @@ describe('resolution correctness with installed packages', () => {
     expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue26');
   });
 
+  it('applies peerOverrides to trigger conflict resolution and redirect the full physical subtree', async () => {
+    const root = project({
+      dependencies: { 'broad-legacy': '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.6.14' },
+    });
+    const broad = pkg(root, 'broad-legacy', {
+      dependencies: { 'legacy-child': '1.0.0', 'modern-icons': '1.0.0' },
+      peerDependencies: { vue: '>=2.5.17' },
+    });
+    const child = pkg(root, 'legacy-child', {
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    const modernIcons = pkg(root, 'modern-icons', {
+      peerDependencies: { vue: '3.x' },
+    });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.6.14' });
+
+    // Without peerOverrides, vue@3.5.0 satisfies >=2.5.17 so no conflict is detected.
+    const withoutOverride = await createResolver({
+      ...baseOptions(root, ['broad-legacy']),
+      offline: true,
+      strict: true,
+    });
+    expect(withoutOverride.getAnalysisResult()?.aliasMappings).toEqual([]);
+
+    // With peerOverrides, conflict detection and path-scoped subtree collection run normally,
+    // while still skipping host-only descendants like modern-icons.
+    const withOverride = await createResolver({
+      ...baseOptions(root, ['broad-legacy']),
+      peerOverrides: { 'broad-legacy': { vue: '>=2.5.17 <3' } },
+      offline: true,
+      strict: true,
+    });
+    expect(withOverride.resolveModule('vue', join(broad, 'index.js'))).toBe('vue2');
+    expect(withOverride.resolveModule('vue', join(child, 'index.js'))).toBe('vue2');
+    expect(withOverride.resolveModule('vue', join(modernIcons, 'index.js'))).toBeNull();
+    expect(withOverride.resolveModule('vue', join(root, 'src/index.js'))).toBeNull();
+  });
+
+  it('allows peerOverrides to promote optional or omitted peers without ambiguity across multiple aliases', async () => {
+    const root = project({
+      dependencies: {
+        'optional-legacy': '1.0.0',
+        'omitted-legacy': '1.0.0',
+        vue: '3.5.0',
+        vue26: 'npm:vue@2.6.14',
+        vue27: 'npm:vue@2.7.16',
+      },
+    });
+    const optionalLegacy = pkg(root, 'optional-legacy', {
+      peerDependencies: { vue: '>=2.5.0' },
+      peerDependenciesMeta: { vue: { optional: true } },
+    });
+    const omittedLegacy = pkg(root, 'omitted-legacy', {});
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue26', { name: 'vue', version: '2.6.14' });
+    pkg(root, 'vue27', { name: 'vue', version: '2.7.16' });
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['optional-legacy', 'omitted-legacy']),
+      peerOverrides: {
+        'optional-legacy': { vue: '^2.6.0 <2.7.0' },
+        'omitted-legacy': { vue: '^2.7.0' },
+      },
+      offline: true,
+      strict: true,
+    });
+    expect(resolver.resolveModule('vue', join(optionalLegacy, 'index.js'))).toBe('vue26');
+    expect(resolver.resolveModule('vue', join(omittedLegacy, 'index.js'))).toBe('vue27');
+  });
+
+  it('scopes versioned peerOverrides to matching package majors without redirecting newer coexisting versions', async () => {
+    const workspace = project({
+      name: 'ws-versioned-peer-overrides',
+      workspaces: ['packages/*'],
+    });
+    const app = join(workspace, 'packages', 'app');
+    const legacyBridge = join(workspace, 'packages', 'legacy-bridge');
+    mkdirSync(join(app, 'node_modules'), { recursive: true });
+    mkdirSync(legacyBridge, { recursive: true });
+    writeFileSync(
+      join(app, 'package.json'),
+      JSON.stringify({
+        name: 'app',
+        version: '1.0.0',
+        dependencies: {
+          '@scope/ui': '2.1.0',
+          'legacy-bridge': 'workspace:*',
+          vue: '3.5.0',
+          vue2: 'npm:vue@2.6.14',
+        },
+      }),
+    );
+    writeFileSync(
+      join(legacyBridge, 'package.json'),
+      JSON.stringify({
+        name: 'legacy-bridge',
+        version: '1.0.0',
+        dependencies: { '@scope/ui': '1.16.220-feat-kso.417' },
+      }),
+    );
+    symlinkSync(legacyBridge, join(app, 'node_modules', 'legacy-bridge'), 'dir');
+
+    const uiV2 = pkg(app, '@scope/ui', {
+      version: '2.1.0',
+      dependencies: { 'ui-helper': '2.0.0' },
+      peerDependencies: { vue: '>=2.5.17' },
+    });
+    const uiV2Helper = pkg(uiV2, 'ui-helper', {
+      version: '2.0.0',
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    const uiV1 = pkg(legacyBridge, '@scope/ui', {
+      version: '1.16.220-feat-kso.417',
+      dependencies: { 'ui-helper': '1.0.0' },
+      peerDependencies: { vue: '>=2.5.17' },
+    });
+    const uiV1Helper = pkg(uiV1, 'ui-helper', {
+      version: '1.0.0',
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    pkg(app, 'vue', { version: '3.5.0' });
+    pkg(app, 'vue2', { name: 'vue', version: '2.6.14' });
+
+    const resolver = await createResolver({
+      ...baseOptions(app, ['@scope/ui']),
+      peerOverrides: {
+        '@scope/ui@1.x': { vue: '>=2.5.17 <3' },
+      },
+      offline: true,
+      strict: true,
+    });
+
+    expect(resolver.resolveModule('vue', join(uiV1, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(uiV1Helper, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(uiV2, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(uiV2Helper, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(app, 'src/index.js'))).toBeNull();
+  });
+
+  it('applies versioned peerOverrides to descendant pruning and installed alias peer linking', async () => {
+    const root = project({
+      dependencies: {
+        legacy: '1.0.0',
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.6.14',
+        'vue-router': '4.5.0',
+        router3: 'npm:vue-router@3.6.5',
+      },
+    });
+    const legacy = pkg(root, 'legacy', {
+      dependencies: { 'child-v1': '1.0.0', 'child-v2': '2.0.0' },
+      peerDependencies: { vue: '^2.6.0', 'vue-router': '^3.6.0' },
+    });
+    const childV1 = pkg(root, 'child-v1', {
+      name: 'shared-child',
+      version: '1.2.0',
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    const childV2 = pkg(root, 'child-v2', {
+      name: 'shared-child',
+      version: '2.0.0',
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.6.14' });
+    pkg(root, 'vue-router', { version: '4.5.0' });
+    const router3 = pkg(root, 'router3', {
+      name: 'vue-router',
+      version: '3.6.5',
+      // Overly broad peer on the alias package itself: without peerOverrides,
+      // linkAliasPeers would accept host vue@3.5.0 instead of linking vue2.
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['legacy']),
+      peerOverrides: {
+        'shared-child@2.x': { vue: '^3.0.0' },
+        'vue-router@3.x': { vue: '^2.6.0' },
+      },
+      offline: true,
+      strict: true,
+    });
+
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(childV1, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(childV2, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(router3, 'index.js'))).toBe('vue2');
+  });
+
   it('skips host-only descendants that conflict with the selected alias while preserving compatible and shared subtrees', async () => {
     const root = project({
       dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.6.14' },

@@ -115,19 +115,20 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 ## 配置选项
 
-| 选项               | 类型                                  | 默认值                            | 说明                                                                                                                                                                                  |
-| ------------------ | ------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dependencies`     | `string[]`                            | -                                 | **必填**，需要分析的依赖包名列表                                                                                                                                                      |
-| `projectRoot`      | `string`                              | Vite root / Webpack context / cwd | 项目根目录路径                                                                                                                                                                        |
-| `autoInstall`      | `boolean`                             | `true`                            | 是否自动安装缺失的别名依赖                                                                                                                                                            |
-| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`                          | 包管理器类型，`'auto'` 自动检测                                                                                                                                                       |
-| `registry`         | `string`                              | 自动检测                          | NPM 注册表地址；显式指定时同时用于版本查询和别名安装                                                                                                                                  |
-| `debug`            | `boolean`                             | `false`                           | 是否启用调试日志                                                                                                                                                                      |
-| `offline`          | `boolean`                             | `false`                           | 仅复用已验证的本地 alias；禁止网络查询及安装                                                                                                                                          |
-| `strict`           | `boolean`                             | `false`                           | 未解决的必要依赖、安装失败或实际解析歧义会报错                                                                                                                                        |
-| `aliasPrefix`      | `string`                              | `'aliased-'`                      | 别名前缀                                                                                                                                                                              |
-| `excludeRedirects` | `Record<string, string[]>`            | `{}`                              | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                        |
-| `includeRedirects` | `Record<string, string[]>`            | `{}`                              | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。适用于 semver 范围写得过宽（如 `>=2.5.0`）但运行时仍依赖旧版本的包。示例：`{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
+| 选项               | 类型                                     | 默认值                            | 说明                                                                                                                                                                                                                                                                                                 |
+| ------------------ | ---------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dependencies`     | `string[]`                               | -                                 | **必填**，需要分析的依赖包名列表                                                                                                                                                                                                                                                                     |
+| `projectRoot`      | `string`                                 | Vite root / Webpack context / cwd | 项目根目录路径                                                                                                                                                                                                                                                                                       |
+| `autoInstall`      | `boolean`                                | `true`                            | 是否自动安装缺失的别名依赖                                                                                                                                                                                                                                                                           |
+| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'`    | `'auto'`                          | 包管理器类型，`'auto'` 自动检测                                                                                                                                                                                                                                                                      |
+| `registry`         | `string`                                 | 自动检测                          | NPM 注册表地址；显式指定时同时用于版本查询和别名安装                                                                                                                                                                                                                                                 |
+| `debug`            | `boolean`                                | `false`                           | 是否启用调试日志                                                                                                                                                                                                                                                                                     |
+| `offline`          | `boolean`                                | `false`                           | 仅复用已验证的本地 alias；禁止网络查询及安装                                                                                                                                                                                                                                                         |
+| `strict`           | `boolean`                                | `false`                           | 未解决的必要依赖、安装失败或实际解析歧义会报错                                                                                                                                                                                                                                                       |
+| `aliasPrefix`      | `string`                                 | `'aliased-'`                      | 别名前缀                                                                                                                                                                                                                                                                                             |
+| `excludeRedirects` | `Record<string, string[]>`               | `{}`                              | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                                                                                                                                       |
+| `includeRedirects` | `Record<string, string[]>`               | `{}`                              | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。仅作用于指定包名本身，不触发新冲突或不遍历子树。示例：`{ vue: ['legacy-helper'] }`                                                                                                                                                       |
+| `peerOverrides`    | `Record<string, Record<string, string>>` | `{}`                              | 覆写指定依赖包声明的 `peerDependencies` 范围，键支持 `<包名>` 或 `<包名>@<semver范围>`（含 prerelease 匹配，优先级：纯包名 < 版本范围 < 精确版本）。适用于上游包 peer 范围写得过宽（如 `>=2.5.0`）或缺失、或同包多版本共存时精准接管目标版本子树。示例：`{ '@rili/ui@1.x': { vue: '>=2.5.17 <3' } }` |
 
 ### Vite 插件专属选项
 
@@ -281,7 +282,8 @@ import Vue from 'vue'; // → 解析到 vue (3.x)
 - **重定向范围**：冲突 peer 的声明包及其 `dependencies`/`peerDependencies` 会递归加入重定向候选列表；冲突目标包自身（如 `vue`、`vue-router`），以及明确声明仅兼容宿主版本而不兼容目标别名的子依赖（如 Vue 2 依赖树中触达的 `peerDependencies: { vue: "3.x" }` 包及其专有子树）会自动跳过，避免主工程或宿主生态包被误重定向。
 - **嵌套版本**：依赖图以规范化的实际安装目录为节点，并从所属包目录解析子依赖。同名但不同版本的嵌套实例会保留为不同节点，生成的重定向规则优先按 importer 路径匹配；因此 `excludeRedirects` 也会作用于具体实例及其子树，而不是简单按包名全局去重。
 - **`excludeRedirects`**：从重定向候选列表中剔除指定包，适用于运行时实际使用宿主 Vue 3 版本的共享包（如 `vue-demi`、`pinia`）。
-- **`includeRedirects`**：将指定包强制加入重定向列表，适用于 semver 范围写得过宽（如 `vue: ">=2.5.0"` 同时满足 Vue 2/3），但运行时仍需要使用旧版本的包。`includeRedirects` 在 `excludeRedirects` 之前应用。
+- **`includeRedirects`**：按包名将指定包强制加入重定向列表。`includeRedirects` 在 `excludeRedirects` 之前应用，不会触发新的别名安装，也不会自动展开子依赖树。
+- **`peerOverrides`**：覆写指定依赖包声明的 `peerDependencies` 范围（覆盖同名声明、取消其 `optional` 跳过，或补充缺失声明）。键支持 `<包名>` 或 `<包名>@<semver范围>`（如 `'@rili/ui@1.x'`，版本范围匹配包含 prerelease 标签，避免同包多版本共存时误伤已升级到宿主版本的新主版本；多个选择器命中时按 `纯包名 < 版本范围 < 精确版本` 逐 peer 合并）。被覆写的入口包会正常参与冲突检测、别名复用/安装，并按物理路径自动接管其整棵依赖子树（同时仍自动跳过仅兼容宿主版本的子包）。
 - **别名安装与复用**：只为“主工程已声明且版本冲突”的依赖自动安装别名；未声明的 peer 依赖只输出警告，不自动安装。已安装且身份/版本匹配的 local 或 workspace alias 会复用（无需 registry 和安装）；声明但尚未安装的 workspace alias 不算可复用。已有目录身份或版本不匹配时会报告 alias collision，并保持原目录不变，不原地覆盖。
 - **Registry**：`registry` 显式配置同时约束远程版本查询和包管理器安装；未配置时才按项目/用户配置自动检测。
 - **初始化失败策略**：核心 `createResolver()` 与 Vite 插件会把初始化错误交给调用方；Webpack 插件保持 fail-open，初始化或模块解析失败只记录错误并继续编译（该轮不会应用 alias）。Webpack watch 每次 `watchRun` 会先失效旧 generation，再等待新分析；新一轮失败时仍可在后续 watch 周期重试。
@@ -318,17 +320,23 @@ depsConflictResolverVitePlugin({
 
 `onInstallComplete` 在安装尝试结束后触发，参数只包含确认成功安装或复用的映射；完整安装结果通过 `getInstallResult()` 获取，未解决条件通过 `getDiagnostics()` 获取。
 
-### 精细控制重定向范围（includeRedirects + excludeRedirects）
+### 精细控制重定向范围（peerOverrides + includeRedirects + excludeRedirects）
 
-当项目同时包含 Vue 2 依赖和 Vue 3 依赖时，自动检测可能无法准确区分。可以用这两个选项手动调节：
+当上游包把 `peerDependencies` 写得过宽（例如 `vue: ">=2.5.17"`，导致宿主 Vue 3 也满足）时，优先使用 `peerOverrides` 修正它的 peer 约束，这样它会自动参与冲突检测并接管整棵物理依赖子树，无需逐个枚举子包：
 
 ```typescript
 new DepsConflictResolverWebpackPlugin({
   dependencies: ['@uikit/vue-finder', '@rili/ui'],
 
-  // 强制将这些包（semver 范围过宽，但实际需要 Vue 2）加入重定向列表
+  // 修正上游包过宽的 peerDependencies 范围，自动接管 @rili/ui@1.x 及其物理依赖子树
+  // 支持按 `<包名>` 或 `<包名>@<semver范围>` 精准匹配，避免影响同包已支持 Vue 3 的 2.x 版本
+  peerOverrides: {
+    '@rili/ui@1.x': { vue: '>=2.5.17 <3' },
+  },
+
+  // 必要时仍可按包名强制补充单个包
   includeRedirects: {
-    vue: ['@rili/ui', '@kmt/meeting-setting'],
+    vue: ['legacy-helper'],
   },
 
   // 从重定向列表中排除这些包（它们在运行时使用宿主提供的 Vue 3）
