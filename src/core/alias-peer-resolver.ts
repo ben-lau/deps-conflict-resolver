@@ -115,7 +115,11 @@ export async function linkAliasPeers(
           if (!request) continue;
           let directory: string | null = options.projectRoot;
           for (const name of request.path) {
-            directory = findPackagePath(name, directory);
+            const packageDirectory = findPackagePath(name, directory);
+            // Exports may hide package.json, making lookup return a symlink.
+            // Normalize the existing directory before constructing a probe ID
+            // that does not exist and therefore cannot be realpathed itself.
+            directory = packageDirectory ? actualPath(packageDirectory) : null;
             if (!directory) break;
           }
           if (!directory) continue;
