@@ -59,8 +59,8 @@ export function validateSharedPeerContexts(
   const originals = new Set(installedMappings.map((mapping) => mapping.originalName));
   const requests: Array<[string, string[]]> = [];
   for (const instances of graph.rootRequests.values()) {
-    for (const [nodeId, paths] of instances) {
-      for (const requestPath of paths) requests.push([nodeId, requestPath]);
+    for (const [nodeId, rootRequests] of instances) {
+      for (const { path } of rootRequests) requests.push([nodeId, path]);
     }
   }
 

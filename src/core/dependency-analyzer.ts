@@ -38,6 +38,7 @@ import { clearNpmRegistryCache } from './npm-registry';
 import { npmRegistryClient, type RegistryClient } from './registry-client';
 import {
   buildInstalledDependencyGraph,
+  collectWorkspaceEntryNames,
   type InstalledDependencyGraph,
   type InstalledPackageNode,
 } from './dependency-graph';
@@ -661,10 +662,10 @@ export class DependencyAnalyzer {
 
     if (this.dependencyGraph?.roots.length) {
       for (const instances of this.dependencyGraph.rootRequests.values()) {
-        for (const [packagePath, paths] of instances) {
+        for (const [packagePath, requests] of instances) {
           const manifest = readPackageJsonCached(packagePath);
           if (!manifest) continue;
-          for (const path of paths) {
+          for (const { path } of requests) {
             collectPeers(manifest, path, packagePath);
           }
         }
@@ -1329,6 +1330,9 @@ export class DependencyAnalyzer {
   ): AliasMapping {
     // usedBy 包含声明 peerDependency 的包路径
     const usedBy = group.map((r) => r.path.join('>'));
+    const workspaceEntryNames = this.dependencyGraph
+      ? collectWorkspaceEntryNames(this.dependencyGraph, group)
+      : [];
 
     const rootIds = group.flatMap(({ packagePath }) => (packagePath ? [packagePath] : []));
     const target = {
@@ -1367,6 +1371,7 @@ export class DependencyAnalyzer {
       installSpec,
       resolvedVersion: version,
       usedBy,
+      ...(workspaceEntryNames.length > 0 ? { workspaceEntryNames } : {}),
       allDependents,
       ...(importerPaths ? { importerPaths } : {}),
       ...(excludedImporterPaths.length > 0 ? { excludedImporterPaths } : {}),

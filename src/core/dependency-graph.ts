@@ -1,4 +1,5 @@
 import { isAbsolute, join, relative, sep } from 'node:path';
+import type { DependencyPath } from '../types';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 
@@ -17,8 +18,19 @@ export interface InstalledPackageNode {
 export interface InstalledDependencyGraph {
   nodes: Map<string, InstalledPackageNode>;
   roots: string[];
-  /** Configured name -> physical package directory -> reachable dependency paths from the host. */
-  rootRequests: Map<string, Map<string, string[][]>>;
+  /** Configured name -> physical package directory -> requests from reachable owners. */
+  rootRequests: Map<string, Map<string, RootRequest[]>>;
+  workspaceParents: Map<string, WorkspaceLink[]>;
+}
+
+interface RootRequest {
+  path: string[];
+  ownerPath: string;
+}
+
+interface WorkspaceLink {
+  from: string;
+  name: string;
 }
 
 interface PackageRequest {
@@ -33,20 +45,20 @@ function findRootRequests(
   projectRoot: string,
   workspaceRoot: string | null,
   watchFiles?: Set<string>,
-): PackageRequest[] {
+): { requests: PackageRequest[]; workspaceParents: Map<string, WorkspaceLink[]> } {
   const names = new Set(packageNames.filter(Boolean));
+  const workspaceParents = new Map<string, WorkspaceLink[]>();
   const requests: PackageRequest[] = [...names].map((name) => ({
     name,
     baseDir: projectRoot,
     parentId: null,
     rootPath: [name],
   }));
-  if (!workspaceRoot || names.size === 0) return requests;
+  if (!workspaceRoot || names.size === 0) return { requests, workspaceParents };
 
   const workspace = canonicalPath(workspaceRoot);
-  const pending: Array<{ directory: string; path: string[] }> = [
-    { directory: canonicalPath(projectRoot), path: [] },
-  ];
+  const host = canonicalPath(projectRoot);
+  const pending: Array<{ directory: string; path: string[] }> = [{ directory: host, path: [] }];
   const visited = new Set<string>();
   for (let index = 0; index < pending.length; index++) {
     const { directory, path } = pending[index]!;
@@ -69,16 +81,56 @@ function findRootRequests(
       // Follow installed workspace links. Explicit workspace dependencies can
       // also be injected copies under node_modules.
       const location = relative(workspace, dependency);
+      if (dependency === host) continue;
       if (isAbsolute(location) || location === '..' || location.startsWith('..' + sep)) continue;
       const workspaceSpec = typeof spec === 'string' && spec.startsWith('workspace:');
       if (location.split(sep).includes('node_modules') && !workspaceSpec) {
         continue;
       }
+      const parents = workspaceParents.get(dependency) ?? [];
+      parents.push({ from: directory, name });
+      workspaceParents.set(dependency, parents);
       pending.push({ directory: dependency, path: requestPath });
     }
   }
 
-  return requests;
+  return { requests, workspaceParents };
+}
+
+/** Find all workspace imports that can reach one of the selected entry owners. */
+export function collectWorkspaceEntryNames(
+  graph: InstalledDependencyGraph,
+  requests: readonly DependencyPath[],
+): string[] {
+  if (graph.workspaceParents.size === 0) return [];
+
+  const pending: string[] = [];
+  const seenRequests = new Set<RootRequest[]>();
+  for (const { packagePath, path } of requests) {
+    const name = path.at(-1);
+    if (!name || !packagePath) continue;
+    const owners = graph.rootRequests.get(name)?.get(packagePath);
+    if (!owners || seenRequests.has(owners)) continue;
+    seenRequests.add(owners);
+    for (const { ownerPath } of owners) {
+      pending.push(ownerPath);
+    }
+  }
+
+  // A physical package can have many incoming routes. Keep their edge names
+  // without enumerating paths or replacing the representative paths in usedBy.
+  const names = new Set<string>();
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    if (visited.has(directory)) continue;
+    visited.add(directory);
+    for (const { from, name } of graph.workspaceParents.get(directory) ?? []) {
+      names.add(name);
+      pending.push(from);
+    }
+  }
+  return [...names];
 }
 
 /**
@@ -95,8 +147,13 @@ export function buildInstalledDependencyGraph(
 ): InstalledDependencyGraph {
   const nodes = new Map<string, InstalledPackageNode>();
   const roots = new Set<string>();
-  const rootRequests = new Map<string, Map<string, string[][]>>();
-  const requests = findRootRequests(packageNames, projectRoot, workspaceRoot, watchFiles);
+  const rootRequests = new Map<string, Map<string, RootRequest[]>>();
+  const { requests, workspaceParents } = findRootRequests(
+    packageNames,
+    projectRoot,
+    workspaceRoot,
+    watchFiles,
+  );
   const stack: PackageRequest[] = [];
   for (let index = requests.length - 1; index >= 0; index--) stack.push(requests[index]!);
 
@@ -113,13 +170,10 @@ export function buildInstalledDependencyGraph(
     if (!existingNode && !packageJson) continue;
     if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);
     if (item.rootPath) {
-      const instances = rootRequests.get(item.name) ?? new Map<string, string[][]>();
-      const paths = instances.get(normalizedPath) ?? [];
-      const serialized = item.rootPath.join('\0');
-      if (!paths.some((existing) => existing.join('\0') === serialized)) {
-        paths.push(item.rootPath);
-      }
-      instances.set(normalizedPath, paths);
+      const instances = rootRequests.get(item.name) ?? new Map<string, RootRequest[]>();
+      const owners = instances.get(normalizedPath) ?? [];
+      owners.push({ path: item.rootPath, ownerPath: item.baseDir });
+      instances.set(normalizedPath, owners);
       rootRequests.set(item.name, instances);
       roots.add(normalizedPath);
       if (existingNode) existingNode.parentId = null;
@@ -160,5 +214,5 @@ export function buildInstalledDependencyGraph(
     }
   }
 
-  return { nodes, roots: [...roots], rootRequests };
+  return { nodes, roots: [...roots], rootRequests, workspaceParents };
 }

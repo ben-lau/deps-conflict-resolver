@@ -465,3 +465,77 @@ it('formats workspace entry paths cleanly for Vite SSR auto configuration', asyn
   );
   expect(config.ssr.optimizeDeps?.include).not.toContain('shared-ui');
 });
+
+it('bundles every SSR entry through an injected shared workspace package', async () => {
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'deps-ssr-workspace-')));
+  roots.push(workspace);
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'packages: [apps/*, packages/*]\n');
+  const app = join(workspace, 'apps/host');
+  const packages = new Map<string, string>();
+  const entries = [
+    ['left', { shared: 'workspace:*' }, 'export { default } from "shared";'],
+    ['right', { shared: 'workspace:*' }, 'export { default } from "shared";'],
+    ['shared', { legacy: '1.0.0' }, 'export { default } from "legacy";'],
+  ] as const;
+  for (const [name, dependencies, code] of entries) {
+    const directory = join(workspace, 'node_modules/.pnpm', name, 'node_modules', name);
+    json(directory, { name, version: '1.0.0', type: 'module', main: 'index.js', dependencies });
+    writeFileSync(join(directory, 'index.js'), code);
+    packages.set(name, directory);
+  }
+  const legacy = join(workspace, 'node_modules/.pnpm/legacy/node_modules/legacy');
+  json(legacy, {
+    name: 'legacy',
+    version: '1.0.0',
+    type: 'module',
+    main: 'index.js',
+    peerDependencies: { vue: '^2' },
+  });
+  writeFileSync(join(legacy, 'index.js'), 'export { version as default } from "vue";');
+  packages.set('legacy', legacy);
+  function link(owner: string, name: string): void {
+    const modules = join(owner, 'node_modules');
+    mkdirSync(modules, { recursive: true });
+    symlinkSync(packages.get(name)!, join(modules, name), 'junction');
+  }
+  link(app, 'left');
+  link(app, 'right');
+  link(packages.get('left')!, 'shared');
+  link(packages.get('right')!, 'shared');
+  link(packages.get('shared')!, 'legacy');
+  json(app, {
+    name: 'host',
+    dependencies: {
+      left: 'workspace:*',
+      right: 'workspace:*',
+      vue: '3.5.0',
+      vue2: 'npm:vue@2.7.16',
+    },
+  });
+  for (const [name, version] of [
+    ['vue', '3.5.0'],
+    ['vue2', '2.7.16'],
+  ] as const) {
+    const directory = join(workspace, 'node_modules', name);
+    json(directory, { name: 'vue', version, type: 'module', main: 'index.js' });
+    writeFileSync(
+      join(directory, 'index.js'),
+      `export const version = ${JSON.stringify(version)};`,
+    );
+  }
+  const entry = join(app, 'entry.mjs');
+  writeFileSync(
+    entry,
+    'import left from "left"; import right from "right"; export const versions = [left, right];',
+  );
+
+  await build({
+    root: app,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [vitePlugin({ dependencies: ['legacy'], ssr: 'auto', offline: true, strict: true })],
+    build: { ssr: entry, rollupOptions: { output: { entryFileNames: 'entry.mjs' } } },
+  });
+  const result = await import(pathToFileURL(join(app, 'dist/entry.mjs')).href);
+  expect(result.versions).toEqual(['2.7.16', '2.7.16']);
+});

@@ -538,6 +538,7 @@ export class DepsConflictResolver {
         mapping.aliasName,
         mapping.resolvedVersion,
         [...mapping.usedBy].sort(),
+        mapping.workspaceEntryNames ? [...mapping.workspaceEntryNames].sort() : null,
         [...mapping.allDependents].sort(),
         mapping.importerPaths ? [...mapping.importerPaths].sort() : null,
         mapping.excludedImporterPaths ? [...mapping.excludedImporterPaths].sort() : null,

@@ -30,6 +30,9 @@ export interface AliasMapping {
    */
   usedBy: string[];
 
+  /** Workspace package request names on all routes to the alias's entry owners. */
+  workspaceEntryNames?: string[];
+
   /**
    * 所有需要重定向的依赖包名列表
    * 包含 usedBy 中包的所有运行时子依赖（dependencies + peerDependencies 递归）

@@ -159,6 +159,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       for (const name of [
         ...mapping.allDependents,
         ...usedBySegments,
+        ...(mapping.workspaceEntryNames ?? []),
         ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
       ]) {
         if (!excluded.has(name)) ssrPackages.add(name);
