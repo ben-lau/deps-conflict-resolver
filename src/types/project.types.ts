@@ -36,6 +36,7 @@ export interface NpmPackageInfo {
 export interface PackageJson {
   name?: string;
   version?: string;
+  type?: 'module' | 'commonjs';
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;

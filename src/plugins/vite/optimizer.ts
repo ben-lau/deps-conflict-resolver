@@ -11,6 +11,59 @@ export interface OptimizerOptions {
   rolldownOptions?: { plugins: Plugin[] };
 }
 
+export interface SsrExternalPolicy {
+  isExternal: (packageName: string) => boolean;
+  resolve: (source: string, importer: string, isRequire: boolean) => Promise<string | undefined>;
+}
+
+async function externalId(
+  policy: SsrExternalPolicy,
+  source: string,
+  importer: string,
+  isRequire: boolean,
+): Promise<string | null> {
+  // Leave paths, private imports, protocols and virtual IDs to their normal
+  // resolvers. Only installed Node-compatible package entries are externalized.
+  if (!/^[\w@]/.test(source) || source.includes(':')) return null;
+  const request = source.split(/[?#]/, 1)[0] ?? '';
+  const parts = request.split('/');
+  const packageName = request.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!;
+  if (!policy.isExternal(packageName)) return null;
+  return (await policy.resolve(source, importer, isRequire)) ?? null;
+}
+
+function esbuildExternalPlugin(policy: SsrExternalPolicy): EsbuildPlugin {
+  return {
+    name: 'deps-conflict-resolver-ssr-external',
+    setup(build) {
+      build.onResolve({ filter: /^[\w@]/ }, async (args) => {
+        if (!args.importer || args.kind === 'entry-point') return null;
+        const id = await externalId(
+          policy,
+          args.path,
+          args.importer,
+          args.kind.startsWith('require'),
+        );
+        return id ? { path: id, external: true } : null;
+      });
+    },
+  };
+}
+
+function rolldownExternalPlugin(policy: SsrExternalPolicy): Plugin {
+  return {
+    name: 'deps-conflict-resolver-ssr-external',
+    async resolveId(source, importer, options) {
+      if (!importer || options.isEntry) return null;
+      const kind = (options as typeof options & { kind?: string }).kind;
+      const isRequire =
+        kind?.startsWith('require') ?? options.custom?.['node-resolve']?.isRequire === true;
+      const id = await externalId(policy, source, importer, isRequire);
+      return id ? { id, external: true } : null;
+    },
+  };
+}
+
 function esbuildPlugin(resolver: DepsConflictResolver, projectRoot: string): EsbuildPlugin {
   return {
     name: 'deps-conflict-resolver-esbuild',
@@ -66,9 +119,26 @@ export function createOptimizerOptions(
   resolver: DepsConflictResolver,
   projectRoot: string,
   viteVersion: string,
+  ssrExternal?: SsrExternalPolicy,
 ): OptimizerOptions {
   const include = [...new Set(resolver.getAliasPathMappings().map((mapping) => mapping.aliasName))];
   return Number.parseInt(viteVersion, 10) >= 8
-    ? { include, rolldownOptions: { plugins: [rolldownPlugin(resolver, projectRoot)] } }
-    : { include, esbuildOptions: { plugins: [esbuildPlugin(resolver, projectRoot)] } };
+    ? {
+        include,
+        rolldownOptions: {
+          plugins: [
+            rolldownPlugin(resolver, projectRoot),
+            ...(ssrExternal ? [rolldownExternalPlugin(ssrExternal)] : []),
+          ],
+        },
+      }
+    : {
+        include,
+        esbuildOptions: {
+          plugins: [
+            esbuildPlugin(resolver, projectRoot),
+            ...(ssrExternal ? [esbuildExternalPlugin(ssrExternal)] : []),
+          ],
+        },
+      };
 }
