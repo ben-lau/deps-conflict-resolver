@@ -408,6 +408,18 @@ This project uses [release-please](https://github.com/googleapis/release-please)
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 
+### Testing preview packages
+
+After all CI checks pass, branch pushes and pull requests produce temporary packages through [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new), without publishing to npm. Ordinary PR comments contain commit-specific install commands; the pending Release PR offers both `@main` and a fixed SHA. When there is no Release PR, find the command in the CI run summary or on the [preview page](https://pkg.pr.new/~/ben-lau/deps-conflict-resolver). To try the latest `main` preview:
+
+```bash
+pnpm add -D https://pkg.pr.new/ben-lau/deps-conflict-resolver/deps-conflict-resolver@main
+```
+
+`@main` points to the most recent successful preview: it may still be an older version when CI for a new commit has failed or is running, so check that the commit's CI succeeded. For reproducible testing, use a fixed SHA link and update the lockfile when changing previews; the lockfile can retain an earlier resolution. Each push covers the branch's latest commit; failed or canceled checks do not trigger that run's preview. A push to a branch with an open PR in this repository triggers separate branch and PR CI runs, each deciding whether to publish. A passing branch run can therefore publish a preview for the same SHA even if the PR checks fail. PR CI checks the simulated merge with the target branch, whereas the preview builds the PR head to match the SHA link. Previews expire; restore a regular release after testing.
+
+With npm 12, enable `--allow-remote=root` when installing a preview URL and on subsequent installs.
+
 ## License
 
 MIT
