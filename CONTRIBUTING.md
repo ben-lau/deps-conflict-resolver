@@ -138,7 +138,6 @@ src/
     dependency-analyzer.ts  # Recursive dependency tree analysis
     environment-detector.ts # Package manager & registry detection
     registry-client.ts      # npm registry versions and selected manifests
-    npm-registry.ts         # Legacy internal helper
     package-installer.ts    # Alias installation
     resolver.ts             # Main DepsConflictResolver class
     workspace-detector.ts   # pnpm workspace detection

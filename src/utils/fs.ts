@@ -187,7 +187,7 @@ export function findPackagePath(
   cache?: FileSystemCache,
 ): string | null {
   const caches = getCaches(cache);
-  const { packagePathCache, requireCache } = caches;
+  const { packagePathCache, requireCache, metrics } = caches;
   const cacheKey = `${baseDir}\0${packageName}`;
   const cached = packagePathCache.get(cacheKey);
   if (cached !== undefined) {
@@ -213,7 +213,12 @@ export function findPackagePath(
       let visible = findSelfPackagePath(packageName, baseDir, caches);
       if (!visible) {
         for (const directory of lookupPaths) {
-          visible = findPackageInLookupDirectory(directory, metadataRequest, lookupDirectories);
+          visible = findPackageInLookupDirectory(
+            directory,
+            metadataRequest,
+            lookupDirectories,
+            metrics,
+          );
           if (visible) break;
         }
       }
@@ -233,7 +238,7 @@ export function findPackagePath(
   } catch {
     // 如果 require.resolve 失败，回退到手动查找
     // 这处理了一些边缘情况，比如包没有正确导出 package.json
-    const resolved = findPackagePathFallback(metadataRequest, baseDir, lookupDirectories);
+    const resolved = findPackagePathFallback(metadataRequest, baseDir, lookupDirectories, metrics);
     packagePathCache.set(cacheKey, resolved);
     return resolved;
   }
@@ -262,13 +267,15 @@ function findSelfPackagePath(
 function findPackagePathFallback(
   metadataRequest: string,
   baseDir: string,
-  lookupDirectories?: LookupDirectoryCache,
+  lookupDirectories: LookupDirectoryCache | undefined,
+  metrics: PreparationMetrics | undefined,
 ): string | null {
   for (const dir of iterateParentDirs(baseDir)) {
     const candidate = findPackageInLookupDirectory(
       join(dir, 'node_modules'),
       metadataRequest,
       lookupDirectories,
+      metrics,
     );
     if (candidate) return candidate;
   }
@@ -279,9 +286,9 @@ function findPackagePathFallback(
 function findPackageInLookupDirectory(
   directory: string,
   request: string,
-  lookupDirectories?: LookupDirectoryCache,
+  lookupDirectories: LookupDirectoryCache | undefined,
+  metrics: PreparationMetrics | undefined,
 ): string | null {
-  const metrics = cacheScope.getStore()?.metrics;
   if (lookupDirectories) {
     let exists = lookupDirectories.get(directory);
     if (exists === undefined) {

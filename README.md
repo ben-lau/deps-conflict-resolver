@@ -155,7 +155,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 3. 用户级 `.npmrc` 和 pnpm 的 `.pnpmrc`
 4. 默认使用 `https://registry.npmjs.org`
 
-版本查询使用自动检测的结果，别名安装继承包管理器自己的配置。显式设置 `registry` 时，版本查询和别名安装都使用该设置。
+版本查询使用自动检测的结果，别名安装继承包管理器自己的配置。显式设置 `registry` 时，版本查询和别名安装优先使用该设置。使用现代 Yarn 时，如目标 scope 的 `npmRegistryServer` 与显式地址冲突，安装前需先将两者对齐。
 
 ## 诊断、准备与离线构建
 
@@ -221,9 +221,9 @@ pnpm exec deps-conflict-resolver doctor --config ./legacy-deps.json --offline --
 
 配置 `onAnalysisComplete` 时，每次准备都会重新分析，以便回调观察当次结果。
 
-`doctor --timings` 和核心 `getTimings()` 报告各阶段耗时，包括读写锁等待、依赖图、Registry、安装和计划校验。阶段可以重叠。文件探针计数来自分析过程，计划校验时间另列。Vite 的 `debug: true` 也会输出实际执行的预构建耗时与缓存键。
+`doctor --timings`、`prepare --timings` 和核心 `getTimings()` 报告各阶段耗时。分析、依赖图和 Registry 阶段可能重叠。文件探针计数来自分析过程，计划校验和写入耗时另列。`prepare --offline --write-plan` 通常只分析一次，在线安装后的计划仍需离线复查。超出计划大小或输入上限时，可以继续使用普通离线分析。`prepare --json` 的 `planFailure` 字段会报告原因。Vite 的 `debug: true` 也会输出实际执行的预构建耗时与缓存键。
 
-`doctor` 会给出诊断对应的下一步，已安装且版本不兼容的可选 peer 以告警显示。使用 `doctor --source-hints` 可以查看 Vue 2 编译特征提示和待确认的 `peerOverrides` 配置。`init` 也会输出这些提示。在线元数据查询使用 `.npmrc` 中的 `@scope:registry` 及对应主机和路径下的 `_authToken`，支持环境变量插值。
+`doctor` 会给出诊断对应的下一步，并报告配置入口和直接依赖可见的版本不兼容的可选 peer。使用 `doctor --source-hints` 可以查看 Vue 2 编译特征提示和待确认的 `peerOverrides` 配置。`init` 也会输出这些提示。如果只有源码线索，`init` 会给出待确认的入口和配置示例，确认后再保存使用。在线元数据查询支持 `.npmrc` 中的 `@scope:registry` 及对应主机和路径下的 `_authToken`，支持环境变量插值。
 
 Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal，开发时也将它们加入 SSR 预构建并使用相同的 alias 解析规则，使 CommonJS 的 require 和 ESM 的 import 都能重定向。默认 ssr='manual'，由使用者配置。已有 noExternal=true 和 SSR 预构建配置会合并保留。显式 ssr.external 仍遵循 Vite 自身的优先级；需要自动重定向时，应避免同时外置这些包或禁用 SSR 预构建。
 
@@ -233,7 +233,7 @@ ssr.external=true（Vite 5+）也作用于预构建入口内部的依赖；noExt
 
 Vite 优先对命中规则的 importer 应用重定向，其他请求仍由 Vite 自己解析，包括用户配置的 `resolve.alias`。预构建缓存随生效规则和已安装 provider 的变更失效。开发服务器会监听分析涉及的项目和 linked workspace 清单。
 
-`vite build --watch` 会随依赖输入刷新规则，并重新解析受影响的模块。如果 `ssr: 'auto'` 生成的外置策略发生变化，Vite 会提示重启 watch。自定义 `beforeResolve` 的返回值从原 importer 解析，插件生成的别名从宿主工程解析。
+`vite build --watch` 会随依赖输入刷新规则，并重新解析受影响的模块。生成的 `ssr: 'auto'` 外置策略变化时需要重启。Vite 8 的原生解析器可能在软链替换后继续使用旧路径，因此同名已启用别名变更物理路径时也会提示重启。自定义 `beforeResolve` 的返回值从原 importer 解析，插件生成的别名从宿主工程解析。
 
 入口实际使用的嵌套 peer 与要求不符时，可能报告 `PEER_PROVIDER_MISMATCH`，即使宿主另有一个兼容版本。入口和相关 peer 请求已经共用兼容的本地实例时，可以直接使用原生解析。`TRANSITIVE_PEER_CONFLICT` 提示已配置入口漏写的 peer 在其直接子依赖处存在版本冲突，供补充入口或修正声明。
 
@@ -267,13 +267,13 @@ Vite 的隐式 projectRoot 使用最终配置的 root，支持其他 config 钩�
 - Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 的客户端冷启动预构建（含全局 `resolve.alias`）、SSR 构建和 SSR 开发模式（ESM / CommonJS）。CI 在 Vite 4.0.0、5、6、7、8 上运行 strict 和默认过滤两种模式。
 - Vite 4.0 的原生 SSR 预构建在混用 Vue 2 的 ESM / CommonJS 入口时会产生独立实例，插件也受此限制；此场景建议使用 Vite 5 或更新版本。包的条件导出由 Vite 解析，插件不强制合并本来就不同的导出入口。
 - Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
-- 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
+- 已安装的 optionalDependencies 会参与运行时依赖图。可选 peer 的版本不兼容只会产生告警。
 - workspace 根目录通过 dependencies、devDependencies 或 optionalDependencies 声明的 alias 均可离线复用，前提是从宿主实际可见的安装包名正确、版本满足目标 peer。本地同名目录遮蔽根 alias 时，按本地实际身份与版本判断，不直接复用被遮蔽的根安装。
 - workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。
 - 消费方与 alias 都声明同一个 peer 时，已重定向的 provider 参与选版和最终校验。alias 与实际重定向的 provider 不兼容时报告 `ALIAS_PEER_UNSATISFIED`，严格模式下拒绝初始化。多个消费方需要不同的兼容 provider 时，会报告 `AMBIGUOUS_IMPORTER`。校验按实际导入路径应用 include/exclude 规则。
 - 普通共享包若声明了相关 peer，且配置入口为同一物理实例带来不同的有效 provider，会产生 SHARED_PEER_CONTEXT 告警。它检查已配置入口可达的安装图，包括宿主直连依赖与重定向子树共用同一物理实例的情形。显式 include/exclude 仍然生效。宽泛的 peer 范围不能证明业务一定出错，因此该告警不会使 strict=true 初始化失败；需要跨运行时共享的包应明确配置解析范围，或隔离安装实例。
 - linked/workspace 包的重定向请求从宿主工程解析，根请求与子路径均保留打包器的 exports 和 import/require 条件。Webpack watch 会监听分析涉及的包清单，重定向改变时重新解析相关模块，并保留无关模块缓存。
-- 当前未提供 Yarn PnP 的完整适配，也未实现私有 registry 的 scope 路由与认证配置继承。
+- 当前支持标准 node_modules 安装布局。Yarn PnP 仍缺少完整适配。
 - 多版本运行时共存仍需要合适的挂载/更新/卸载桥接；本插件不承担 SFC 编译器转换、跨版本组件协议或 CSS 隔离。
 
 ## 工作原理

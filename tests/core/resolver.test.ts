@@ -29,11 +29,7 @@ vi.mock('../../src/core/project-preparation', () => ({
 // 创建 mock EnvironmentDetector 实例
 const mockEnvironmentDetector = {
   getDetectionResult: vi.fn(),
-  getRegistry: vi.fn(),
   getRegistryForPackageManager: vi.fn(),
-  getPackageManager: vi.fn(),
-  reset: vi.fn(),
-  setProjectRoot: vi.fn(),
 };
 
 vi.mock('../../src/core/environment-detector', () => ({

@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'path';
 import {
   clearPackageJsonCache,
+  createFileSystemCache,
   fileExists,
   readPackageJsonCached,
   findProjectRoot,
   findPackagePath,
 } from '../../src/utils/fs';
+import { PreparationMetrics } from '../../src/utils/preparation-metrics';
 import { existsSync, readFileSync, statSync, type Stats } from 'fs';
 import { createRequire } from 'module';
 
@@ -177,9 +179,12 @@ describe('fs utils', () => {
             ? present
             : undefined,
         );
-        expect(findPackagePath('@scope/provider', '/project')).toBe(
+        const metrics = new PreparationMetrics();
+        const cache = createFileSystemCache(metrics);
+        expect(findPackagePath('@scope/provider', '/project', cache)).toBe(
           exists ? '/global/@scope/provider' : null,
         );
+        expect(metrics.counts.lookupProbes).toBe(2);
       },
     );
 

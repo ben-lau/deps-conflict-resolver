@@ -14,37 +14,12 @@ const logger = createLogger('environment-detector');
  * 负责检测项目使用的包管理器和 registry
  */
 export class EnvironmentDetector {
-  private projectRoot: string;
   private detectionResult: PackageManagerDetectionResult | null = null;
-  private registryCache: string | null = null;
 
-  constructor(projectRoot: string) {
-    this.projectRoot = projectRoot;
-  }
+  constructor(private readonly projectRoot: string) {}
 
   /**
-   * 获取检测到的包管理器类型
-   */
-  getPackageManager(): PackageManagerType {
-    const result = this.detect();
-    return result.packageManager;
-  }
-
-  /**
-   * 获取检测到的 registry
-   */
-  async getRegistry(): Promise<string> {
-    if (this.registryCache) {
-      return this.registryCache;
-    }
-
-    const result = this.detect();
-    this.registryCache = await this.detectRegistry(result.packageManager);
-    return this.registryCache;
-  }
-
-  /**
-   * 获取指定包管理器的 registry（兼容旧 API）
+   * 获取指定包管理器的 registry
    */
   async getRegistryForPackageManager(packageManager: PackageManagerType): Promise<string> {
     return this.detectRegistry(packageManager);
@@ -55,22 +30,6 @@ export class EnvironmentDetector {
    */
   getDetectionResult(): PackageManagerDetectionResult {
     return this.detect();
-  }
-
-  /**
-   * 重置缓存，强制重新检测
-   */
-  reset(): void {
-    this.detectionResult = null;
-    this.registryCache = null;
-  }
-
-  /**
-   * 更新项目根目录
-   */
-  setProjectRoot(projectRoot: string): void {
-    this.projectRoot = projectRoot;
-    this.reset();
   }
 
   /**
