@@ -82,6 +82,58 @@ afterEach(() => {
 });
 
 describe('project preparation and published rules', () => {
+  it('reports a failed explicit refresh and refuses to resolve to a removed alias', async () => {
+    const { root, options, install, fetch } = fixture();
+    const alias = join(root, 'node_modules/vue2');
+    const importer = join(root, 'node_modules/a/index.js');
+    manifest(root, { name: 'host', dependencies: { a: '1', vue: '3', vue2: 'npm:vue@2.6.14' } });
+    manifest(alias, { name: 'vue', version: '2.6.14' });
+    const resolver = await createResolver({ ...options, offline: true });
+    expect(resolver.resolveModule('vue', importer)).toBe('vue2');
+
+    rmSync(alias, { recursive: true });
+    const missing = expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING' });
+    await expect(resolver.installDependencies()).rejects.toMatchObject({
+      diagnostics: expect.arrayContaining([missing]),
+      preparation: { diagnostics: expect.arrayContaining([missing]), installation: null },
+    });
+    expect(resolver.getDiagnostics()).toContainEqual(missing);
+    expect(() => resolver.resolveModule('vue', importer)).toThrow('OFFLINE_ALIAS_MISSING');
+
+    manifest(alias, { name: 'vue', version: '2.6.14' });
+    await resolver.installDependencies();
+    expect(resolver.getDiagnostics()).toEqual([]);
+    expect(resolver.resolveModule('vue', importer)).toBe('vue2');
+    expect(install).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('drops resolved installation diagnostics after another resolver repairs the project', async () => {
+    const { root, options, install } = fixture();
+    const reader = await createResolver({ ...options, autoInstall: false, strict: false });
+    expect(reader.getDiagnostics()).toContainEqual(
+      expect.objectContaining({ code: 'ALIAS_NOT_INSTALLED' }),
+    );
+    const importer = join(root, 'node_modules/a/index.js');
+    expect(reader.resolveModule('vue', importer)).toBeNull();
+
+    const perform = install.getMockImplementation()!;
+    install.mockImplementation(async (specs) => {
+      const result = await perform(specs);
+      manifest(join(root, 'node_modules/a'), {
+        name: 'a',
+        version: '1.0.0',
+        peerDependencies: { vue: '^3' },
+      });
+      return result;
+    });
+    await createResolver({ ...options, dependencies: ['b'] });
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(reader.getDiagnostics()).toEqual([]);
+    expect(reader.resolveModule('vue', importer)).toBeNull();
+    expect(reader.getInstallResult()).toBeNull();
+  });
+
   it('invalidates a build guard when an offline refresh changes redirects without a writer', async () => {
     const { root, options, install } = fixture();
     manifest(root, { name: 'host', dependencies: { a: '1', vue: '3', vue2: 'npm:vue@2.6.14' } });

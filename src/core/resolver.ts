@@ -760,7 +760,7 @@ export class DepsConflictResolver {
   }
 
   private async prepareInstallation(): Promise<void> {
-    if (!this.draft.analysis || !this.installer || !this.preparation) {
+    if ((!this.initialized && !this.draft.analysis) || !this.installer || !this.preparation) {
       throw new Error('Resolver not initialized. Call initialize() first.');
     }
     this.preparing = true;
@@ -771,13 +771,26 @@ export class DepsConflictResolver {
           try {
             const registryClient = new NpmRegistryClient(this.metrics, this.options);
             this.watch.snapshot = undefined;
+            this.draft = { ...emptyDraft(), installation: this.draft.installation };
             this.draft.analysis = await this.analyzeCurrent({ clearCache: false, registryClient });
-            this.draft.installDiagnostics = [];
             this.assertResolved();
             if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
             this.observeSnapshot();
             if (this.watch.files) this.recordWatchFiles();
+          } catch (error) {
+            this.draft.activeMappings = [];
+            this.draft.matcher = null;
+            if (!(error instanceof ResolutionError && error.preparation)) {
+              this.draft.installDiagnostics.push({
+                code: 'PROJECT_STATE_CHANGED',
+                severity: 'error',
+                packageName: this.options.dependencies.join(', '),
+                message: 'Could not prepare dependency rules: ' + String(error),
+              });
+            }
+            this.captureSnapshot(true);
+            throw error;
           } finally {
             clearPackageJsonCache();
           }
@@ -969,7 +982,7 @@ export class DepsConflictResolver {
               ' is installed';
           }
         }
-        this.draft.analysis = analysis;
+        this.draft = { ...emptyDraft(), analysis, installation: this.draft.installation };
         this.setActiveAliasMappings(
           analysis.aliasMappings.filter((mapping) => !mapping.installSpec),
         );
@@ -989,7 +1002,7 @@ export class DepsConflictResolver {
         if (generation !== this.snapshotGeneration) return;
         this.initialReplanNeeded = false;
         invalidated = true;
-        this.setActiveAliasMappings([]);
+        this.draft = { ...emptyDraft(), installation: this.draft.installation };
         this.draft.installDiagnostics.push({
           code: 'PROJECT_STATE_CHANGED',
           severity: 'error',
@@ -1059,7 +1072,7 @@ export class DepsConflictResolver {
       revision: this.preparation!.revision,
       signature: this.describeSnapshot(providers),
       providers: versions,
-      error: errors.length ? new ResolutionError(errors) : null,
+      error: errors.length ? new ResolutionError(structuredClone(errors)) : null,
       invalidated,
     };
   }
@@ -1194,7 +1207,7 @@ export class DepsConflictResolver {
     mappings: AliasMapping[],
     blockedAliasNames: Iterable<string> = [],
   ): void {
-    if (!this.draft.matcher || !this.draft.analysis) {
+    if (!this.draft.analysis) {
       return;
     }
 
@@ -1236,7 +1249,7 @@ export class DepsConflictResolver {
     this.draft.activeMappings = activeMappings;
     // A writer can refresh another resolver. Compile into an unpublished
     // matcher so the previous generation keeps its complete set of rules.
-    if (this.draft.matcher === this.published?.rules.matcher) {
+    if (!this.draft.matcher || this.draft.matcher === this.published?.rules.matcher) {
       this.draft.matcher = createAliasManager(this.options, this.fileSystemCache);
     }
     this.draft.matcher.initFromAnalysisResult({
@@ -1271,11 +1284,9 @@ export class DepsConflictResolver {
 
   private redirect(request: string, importer?: string): ModuleRedirect | null {
     const matcher = this.published?.rules.matcher;
-    if (!this.initialized || !matcher) {
+    if (!this.initialized || !this.snapshotCurrent() || !matcher) {
       return null;
     }
-
-    if (!this.snapshotCurrent()) return null;
 
     // 检查钩子
     if (this.hooks.beforeResolve) {
@@ -1295,11 +1306,10 @@ export class DepsConflictResolver {
    */
   getAliasPathMappings(): AliasPathMapping[] {
     const matcher = this.published?.rules.matcher;
-    if (!this.initialized || !matcher) {
+    if (!this.initialized || !this.snapshotCurrent() || !matcher) {
       return [];
     }
 
-    if (!this.snapshotCurrent()) return [];
     return matcher.getAliasPathMappings();
   }
 
@@ -1365,17 +1375,18 @@ export class DepsConflictResolver {
   }
 
   private assertResolved(): void {
-    if (this.options.strict) {
-      const errors = this.generationDiagnostics().filter(
-        (diagnostic) => diagnostic.severity === 'error',
-      );
-      if (errors.length > 0)
-        throw new ResolutionError(errors, {
-          aliases: this.draft.analysis?.aliasMappings ?? [],
-          diagnostics: this.getDiagnostics(),
-          installation: this.getInstallResult(),
-        });
-    }
+    if (!this.options.strict) return;
+    const diagnostics = this.generationDiagnostics();
+    if (!diagnostics.some(({ severity }) => severity === 'error')) return;
+    const preparation = structuredClone({
+      aliases: this.draft.analysis?.aliasMappings ?? [],
+      diagnostics,
+      installation: this.draft.installation,
+    });
+    throw new ResolutionError(
+      preparation.diagnostics.filter(({ severity }) => severity === 'error'),
+      preparation,
+    );
   }
 
   /** Explain a request; skipHook permits side-effect-free cache validation. */
@@ -1385,7 +1396,7 @@ export class DepsConflictResolver {
     options: { skipHook?: boolean } = {},
   ): ResolutionExplanation {
     const matcher = this.published?.rules.matcher;
-    if (!this.initialized || !matcher) {
+    if (!this.initialized || !this.snapshotCurrent() || !matcher) {
       return {
         request,
         importer,
@@ -1395,15 +1406,6 @@ export class DepsConflictResolver {
         matchedPaths: [],
       };
     }
-    if (!this.snapshotCurrent())
-      return {
-        request,
-        importer,
-        resolved: null,
-        reason: 'inactive',
-        aliases: [],
-        matchedPaths: [],
-      };
     if (!options.skipHook && this.hooks.beforeResolve) {
       const resolved = this.hooks.beforeResolve(request, importer);
       if (resolved !== undefined) {
