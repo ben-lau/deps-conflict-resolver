@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -13,7 +14,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { build, createLogger, optimizeDeps, resolveConfig, type Plugin } from 'vite';
+import { build, createBuilder, createLogger, optimizeDeps, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
 import {
@@ -159,6 +160,113 @@ describe('Vite final configuration', () => {
         clearTimeout(timeout);
         clearTimeout(edit);
         await watcher.close();
+      }
+    },
+    6000,
+  );
+
+  it.each(['shared environments', 'custom callback'] as const)(
+    'refreshes cached watch resolutions with %s',
+    async (mode) => {
+      const root = fixture('2.7.16');
+      const legacy = join(root, 'legacy');
+      const linked = join(root, 'node_modules/legacy');
+      renameSync(linked, legacy);
+      symlinkSync(legacy, linked, 'junction');
+      const manifest = join(legacy, 'package.json');
+      const writeManifest = (vue: string, target?: string) =>
+        writeFileSync(
+          manifest,
+          JSON.stringify({
+            name: 'legacy',
+            type: 'module',
+            version: '1.0.0',
+            main: 'index.js',
+            peerDependencies: { vue },
+            target,
+          }),
+        );
+      writeManifest('^3');
+      writeFileSync(join(legacy, 'first.js'), 'export const version = "first";');
+      writeFileSync(join(legacy, 'second.js'), 'export const version = "second";');
+      let target = './first.js';
+      const hooks: PluginHooks | undefined =
+        mode === 'custom callback'
+          ? {
+              onAnalysisComplete() {
+                target =
+                  (JSON.parse(readFileSync(manifest, 'utf8')) as { target?: string }).target ??
+                  './first.js';
+              },
+              beforeResolve(request, importer) {
+                if (request === 'vue' && importer?.startsWith(legacy)) return target;
+                return undefined;
+              },
+            }
+          : undefined;
+      const environmentBuild = (name: string, buildDelay: number) => ({
+        outDir: join(root, name),
+        lib: {
+          entry: join(root, 'entry.js'),
+          formats: ['cjs' as const],
+          fileName: () => 'runtime.cjs',
+        },
+        watch: { buildDelay, chokidar: { usePolling: true, interval: 30 } },
+      });
+      const builder = await createBuilder({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [plugin({ dependencies: ['legacy'], offline: true, strict: true, hooks })],
+        builder: { sharedConfigBuild: true, sharedPlugins: true },
+        build: environmentBuild('unused', 20),
+        environments: {
+          left: { consumer: 'client', build: environmentBuild('left', 20) },
+          right: { consumer: 'client', build: environmentBuild('right', 230) },
+        },
+      });
+      const names = mode === 'shared environments' ? ['left', 'right'] : ['left'];
+      const versions = names.map(() => [] as string[]);
+      const watchers: Array<Extract<Awaited<ReturnType<typeof build>>, { close: unknown }>> = [];
+      const require = createRequire(import.meta.url);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let edit: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Incomplete watch rebuilds: ' + JSON.stringify(versions))),
+            4000,
+          );
+          void Promise.all(
+            names.map(async (name, index) => {
+              const watcher = await builder.build(builder.environments[name]!);
+              if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
+              watchers.push(watcher);
+              watcher.on('event', (event) => {
+                if (event.code === 'ERROR') return reject(event.error);
+                if (event.code !== 'END') return undefined;
+                const output = join(root, name, 'runtime.cjs');
+                delete require.cache[output];
+                const values = versions[index]!;
+                values.push((require(output) as { version: string }).version);
+                if (!edit && versions.every((entry) => entry.length > 0)) {
+                  edit = setTimeout(() => {
+                    if (mode === 'shared environments') writeManifest('^2');
+                    else writeManifest('^3', './second.js');
+                  }, 100);
+                }
+                if (versions.every((entry) => entry.length > 1)) resolve();
+                return undefined;
+              });
+            }),
+          ).catch(reject);
+        });
+        const expected = mode === 'shared environments' ? ['3.0.0', '2.7.16'] : ['first', 'second'];
+        for (const actual of versions) expect(actual).toEqual(expected);
+      } finally {
+        clearTimeout(edit);
+        clearTimeout(timeout);
+        await Promise.all(watchers.map((watcher) => watcher.close()));
       }
     },
     6000,

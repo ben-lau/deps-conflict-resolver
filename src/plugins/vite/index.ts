@@ -48,11 +48,18 @@ function ssrSettings(config: ResolvedConfig) {
 interface BuildWatch {
   first: boolean;
   fingerprint: string;
-  rulesChanged: boolean;
+  environments: Map<object, EnvironmentWatch>;
+  refreshing?: Promise<boolean>;
   files: Set<string>;
   modified: Set<string>;
   removed: Set<string>;
   verifySsrPolicy?: () => void;
+}
+
+interface EnvironmentWatch {
+  published?: string;
+  fingerprint: string;
+  rulesChanged: boolean;
 }
 
 /**
@@ -369,14 +376,18 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         resolverHooks,
       );
       resolver = active;
-      if (config.command === 'build' && config.build?.watch) {
+      if (
+        config.command === 'build' &&
+        (config.build?.watch ||
+          Object.values(config.environments ?? {}).some((environment) => environment.build?.watch))
+      ) {
         await withViteLogger(config, Boolean(options.debug), () =>
           getResolverBuild(active).refreshForWatch({}),
         );
         watch = {
           first: true,
           fingerprint: active.getResolutionFingerprint(),
-          rulesChanged: false,
+          environments: new Map(),
           files: new Set(),
           modified: new Set(),
           removed: new Set(),
@@ -519,19 +530,23 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         return;
       }
       const session = watch;
-      const { first, modified, removed } = session;
-      session.first = false;
-      session.modified = new Set();
-      session.removed = new Set();
       try {
-        if (!first || modified.size || removed.size) {
-          await withViteLogger(configured, Boolean(options.debug), () =>
-            build.refreshForWatch({ modifiedFiles: modified, removedFiles: removed }),
-          );
+        if (!session.refreshing) {
+          const { first, modified, removed } = session;
+          session.first = false;
+          session.modified = new Set();
+          session.removed = new Set();
+          if (!first || modified.size || removed.size) {
+            session.refreshing = withViteLogger(configured, Boolean(options.debug), () =>
+              build.refreshForWatch({ modifiedFiles: modified, removedFiles: removed }),
+            ).finally(() => {
+              session.refreshing = undefined;
+            });
+          }
         }
+        await session.refreshing;
         const fingerprint = active.getResolutionFingerprint();
-        session.rulesChanged = fingerprint !== session.fingerprint;
-        if (session.rulesChanged) {
+        if (fingerprint !== session.fingerprint) {
           const { packageCache } = configured as ResolvedConfig & {
             packageCache?: Map<unknown, unknown>;
           };
@@ -541,6 +556,14 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           withViteLogger(configured, Boolean(options.debug), () => session.verifySsrPolicy?.());
         }
         session.fingerprint = fingerprint;
+        // Each environment has its own module cache. A custom redirect can
+        // change the resolution without changing the dependency plan.
+        const published = session.environments.get(environment)?.published;
+        session.environments.set(environment, {
+          published,
+          fingerprint,
+          rulesChanged: hasResolveHook || published !== fingerprint,
+        });
         if (filterRequests) requestFilter = aliasRequestFilter(active.getAliasPathMappings());
         if (resolverOptions.strict) verifyBuild.set(environment, build.guardGeneration());
       } finally {
@@ -556,10 +579,16 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         if (configured) verifyBuild.get(this.environment ?? configured)?.();
       },
     },
+    writeBundle() {
+      if (!configured || !this.meta.watchMode) return;
+      const state = watch?.environments.get(this.environment ?? configured);
+      if (state) state.published = state.fingerprint;
+    },
     ...(viteMajor < 8
       ? ({
           shouldTransformCachedModule() {
-            return watch?.rulesChanged ? true : null;
+            const environment = this.environment ?? configured;
+            return environment && watch?.environments.get(environment)?.rulesChanged ? true : null;
           },
         } satisfies Partial<Plugin>)
       : {}),
@@ -577,7 +606,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       return null;
     },
     closeWatcher() {
-      if (watch && resolver) getResolverBuild(resolver).closeWatch();
+      if (!watch || !resolver || !configured) return;
+      watch.environments.delete(this.environment ?? configured);
+      if (watch.environments.size === 0) getResolverBuild(resolver).closeWatch();
     },
     resolveId: {
       // Vite's alias plugin precedes user plugins ordered by enforce.
