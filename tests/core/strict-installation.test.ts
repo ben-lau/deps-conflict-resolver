@@ -65,6 +65,168 @@ afterEach(() => {
 });
 
 describe('strict peer validation across installation', () => {
+  it.each([false, true])(
+    'does not publish a reused alias reconciled to a different version: strict=%s',
+    async (strict) => {
+      const { root, install } = fixture(true);
+      writePackage(root, {
+        name: 'host',
+        dependencies: {
+          consumer: '1.0.0',
+          renderer: '2.0.0',
+          runtime: '2.0.0',
+          vue: '3.0.0',
+          vue2: 'npm:vue@2.7.16',
+        },
+      });
+      writePackage(join(root, 'node_modules/consumer'), {
+        name: 'consumer',
+        version: '1.0.0',
+        peerDependencies: { renderer: '^1', vue: '2.6.14' },
+      });
+      writePackage(join(root, 'node_modules/vue'), { name: 'vue', version: '3.0.0' });
+      writePackage(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.6.14' });
+      const performInstall = install.getMockImplementation()!;
+      install.mockImplementation(async (specs) => {
+        const result = await performInstall(specs);
+        writePackage(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.7.16' });
+        return result;
+      });
+      const onInstallComplete = vi.fn();
+      const initializing = createResolver(
+        {
+          projectRoot: root,
+          dependencies: ['consumer'],
+          packageManager: 'npm',
+          autoInstall: true,
+          strict,
+        },
+        { onInstallComplete },
+      );
+      if (strict) {
+        await expect(initializing).rejects.toMatchObject({
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: 'ALIAS_INSTALL_FAILED', aliases: ['vue2'] }),
+          ]),
+        });
+      } else {
+        const resolver = await initializing;
+        expect(resolver.getInstallResult()).toMatchObject({
+          success: false,
+          reused: [],
+          failed: ['vue2'],
+        });
+        expect(resolver.getAliasPathMappings().map((mapping) => mapping.aliasName)).toEqual([
+          'aliased-renderer1',
+        ]);
+        expect(
+          resolver.resolveModule('vue', join(root, 'node_modules/consumer/index.js')),
+        ).toBeNull();
+      }
+      expect(
+        onInstallComplete.mock.calls[0]![0].map(
+          (mapping: { aliasName: string }) => mapping.aliasName,
+        ),
+      ).toEqual(['aliased-renderer1']);
+    },
+  );
+
+  it('checks shared contexts after installation has supplied a new alias', async () => {
+    const { root, install } = fixture(true);
+    writePackage(root, {
+      name: 'host',
+      dependencies: { consumer: '1.0.0', modern: '1.0.0', renderer: '2.0.0', runtime: '2.0.0' },
+    });
+    writePackage(join(root, 'node_modules/consumer'), {
+      name: 'consumer',
+      version: '1.0.0',
+      peerDependencies: { renderer: '^1' },
+      dependencies: { shared: '1.0.0' },
+    });
+    writePackage(join(root, 'node_modules/modern'), {
+      name: 'modern',
+      version: '1.0.0',
+      peerDependencies: { renderer: '^2' },
+      dependencies: { shared: '1.0.0' },
+    });
+    writePackage(join(root, 'node_modules/shared'), {
+      name: 'shared',
+      version: '1.0.0',
+      peerDependencies: { renderer: '>=1' },
+    });
+    const resolver = await createResolver({
+      projectRoot: root,
+      dependencies: ['consumer', 'modern'],
+      packageManager: 'npm',
+      autoInstall: true,
+      strict: true,
+    });
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(resolver.getDiagnostics()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'SHARED_PEER_CONTEXT', severity: 'warning' }),
+      ]),
+    );
+  });
+
+  it('does not allow invalidation while a manual installation is pending', async () => {
+    const { root, install } = fixture(true);
+    const resolver = await createResolver({
+      projectRoot: root,
+      dependencies: ['consumer'],
+      packageManager: 'npm',
+      autoInstall: false,
+    });
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const performInstall = install.getMockImplementation()!;
+    install.mockImplementation(async (specs) => {
+      await pending;
+      return performInstall(specs);
+    });
+    const installing = resolver.installDependencies();
+    try {
+      expect(() => resolver.invalidate()).toThrow(
+        'Cannot invalidate while installation is in progress',
+      );
+    } finally {
+      release();
+      await installing.catch(() => undefined);
+    }
+    expect(resolver.getAliasPathMappings()).toHaveLength(1);
+    resolver.invalidate();
+    await resolver.initialize();
+    await resolver.installDependencies();
+    expect(resolver.getAliasPathMappings()).toHaveLength(1);
+  });
+
+  it('shares a pending manual installation between concurrent callers', async () => {
+    const { root, install } = fixture(true);
+    const resolver = await createResolver({
+      projectRoot: root,
+      dependencies: ['consumer'],
+      packageManager: 'npm',
+      autoInstall: false,
+    });
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const performInstall = install.getMockImplementation()!;
+    install.mockImplementation(async (specs) => {
+      await pending;
+      return performInstall(specs);
+    });
+    const first = resolver.installDependencies();
+    const second = resolver.installDependencies();
+    release();
+    await Promise.all([first, second]);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(resolver.getInstallResult()?.success).toBe(true);
+  });
+
   it('allows installation to supply the selected alias own compatible nested peer', async () => {
     const { root, install } = fixture(true);
     const resolver = await createResolver({

@@ -18,8 +18,10 @@ import { createAliasManager, AliasManager } from './alias-manager';
 import { createPackageInstaller, PackageInstaller } from './package-installer';
 import { ResolutionError } from './resolution-error';
 import { linkAliasPeers } from './alias-peer-resolver';
+import { buildInstalledDependencyGraph } from './dependency-graph';
+import { validateSharedPeerContexts } from './shared-peer-contexts';
 import { npmRegistryClient } from './registry-client';
-import { resolve as resolvePath } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 
 const logger = createLogger('resolver');
 
@@ -49,6 +51,7 @@ export class DepsConflictResolver {
   private analysisResult: AnalysisResult | null = null;
   private initialized = false;
   private initializationPromise: Promise<void> | null = null;
+  private installationPromise: Promise<void> | null = null;
   private installResult: InstallReport | null = null;
   private installDiagnostics: ResolverDiagnostic[] = [];
 
@@ -143,6 +146,9 @@ export class DepsConflictResolver {
   invalidate(): void {
     if (this.initializationPromise && !this.initialized) {
       throw new Error('Cannot invalidate while initialization is in progress');
+    }
+    if (this.installationPromise) {
+      throw new Error('Cannot invalidate while installation is in progress');
     }
 
     this.initialized = false;
@@ -241,6 +247,7 @@ export class DepsConflictResolver {
           '. Inspect getDiagnostics() or run doctor for details.',
       );
     }
+    this.logSharedPeerWarnings();
 
     // 分析器在初始化完成后不再使用，释放以允许 GC 回收其内部状态
     this.analyzer = null;
@@ -279,7 +286,13 @@ export class DepsConflictResolver {
    *
    * 这样可以避免"什么依赖都自动安装"的问题，用户可以根据警告自行决定是否安装缺失的依赖
    */
-  async installDependencies(): Promise<void> {
+  installDependencies(): Promise<void> {
+    return (this.installationPromise ??= this.installGeneration().finally(() => {
+      this.installationPromise = null;
+    }));
+  }
+
+  private async installGeneration(): Promise<void> {
     if (!this.analysisResult || !this.installer) {
       throw new Error('Resolver not initialized. Call initialize() first.');
     }
@@ -331,13 +344,34 @@ export class DepsConflictResolver {
             : undefined;
       return !owners?.some((name) => completedNames.has(name));
     });
+    const watchFiles = new Set(this.analysisResult.watchFiles);
     await linkAliasPeers(
       completedMappings,
       { ...this.options, offline: true },
       npmRegistryClient,
       this.installDiagnostics,
       this.analysisResult.peerConflicts,
+      watchFiles,
     );
+    if ((aliasResult.installed?.length ?? 0) > 0 || (aliasResult.failed?.length ?? 0) > 0) {
+      this.analysisResult.diagnostics = this.analysisResult.diagnostics?.filter(
+        (diagnostic) => diagnostic.code !== 'SHARED_PEER_CONTEXT',
+      );
+      const graph = buildInstalledDependencyGraph(
+        this.options.dependencies,
+        this.options.projectRoot,
+      );
+      for (const node of graph.nodes.values())
+        watchFiles.add(join(node.packagePath, 'package.json'));
+      validateSharedPeerContexts(
+        graph,
+        completedMappings,
+        this.options,
+        this.installDiagnostics,
+        watchFiles,
+      );
+    }
+    this.analysisResult.watchFiles = [...watchFiles];
     this.setActiveAliasMappings(completedMappings, aliasResult.failed ?? []);
 
     if (!aliasResult.success) {
@@ -355,6 +389,14 @@ export class DepsConflictResolver {
       );
     }
     this.assertResolved();
+    if (this.initialized) this.logSharedPeerWarnings();
+  }
+
+  private logSharedPeerWarnings(): void {
+    for (const diagnostic of this.getDiagnostics()) {
+      if (diagnostic.code === 'SHARED_PEER_CONTEXT')
+        logger.warn(`[${diagnostic.code}] ${diagnostic.message}`);
+    }
   }
 
   /**
@@ -525,8 +567,12 @@ export class DepsConflictResolver {
     }
   }
 
-  /** Explain a request without exposing or mutating cached runtime decisions. */
-  explainResolution(request: string, importer?: string): ResolutionExplanation {
+  /** Explain a request; skipHook permits side-effect-free cache validation. */
+  explainResolution(
+    request: string,
+    importer?: string,
+    options: { skipHook?: boolean } = {},
+  ): ResolutionExplanation {
     if (!this.initialized || !this.aliasManager) {
       return {
         request,
@@ -537,7 +583,7 @@ export class DepsConflictResolver {
         matchedPaths: [],
       };
     }
-    if (this.hooks.beforeResolve) {
+    if (!options.skipHook && this.hooks.beforeResolve) {
       const resolved = this.hooks.beforeResolve(request, importer);
       if (resolved !== undefined) {
         return { request, importer, resolved, reason: 'hook', aliases: [], matchedPaths: [] };
