@@ -13,7 +13,7 @@ import { satisfies } from '../utils/semver';
 import { matchesProvider, resolveDependencyRequirement } from '../utils/version-spec';
 import { createWorkspaceDetector } from './workspace-detector';
 import type { RegistryClient } from './registry-client';
-import { AliasManager } from './alias-manager';
+import { createDirectoryScopeMatcher } from './scope-paths';
 
 export interface PlannedAlias {
   mapping: AliasMapping;
@@ -64,7 +64,7 @@ export function createConsumerPeerLookup(
   );
   const mappings = plans.map(({ mapping }) => mapping);
   const aliases = new Map(mappings.map((mapping) => [mapping.aliasName, mapping]));
-  let resolver: AliasManager | undefined;
+  let matchDirectory: ReturnType<typeof createDirectoryScopeMatcher> | undefined;
 
   return ({ mapping, consumers }, peerName) => {
     const requests = requestsByPeer.get(peerName);
@@ -74,19 +74,10 @@ export function createConsumerPeerLookup(
       if (!requests.some((request) => samePeerConsumer(owner, request))) continue;
       const directory = peerConsumerDirectory(owner, options.projectRoot);
       if (!directory) continue;
-      if (!resolver) {
-        resolver = new AliasManager({ ...options, strict: false });
-        resolver.initFromAnalysisResult({
-          aliasMappings: mappings,
-          peerConflicts: [...conflicts],
-          analyzedDependencies: new Map(),
-          missingFirstLevelPeers: [],
-        });
-      }
-      const probe = join(directory, '__peer_context__.js');
-      const alias = resolver.explainResolution(mapping.originalName, probe);
+      matchDirectory ??= createDirectoryScopeMatcher(mappings, options);
+      const alias = matchDirectory(mapping.originalName, directory);
       if (alias.reason === 'excluded' || !alias.aliases.includes(mapping.aliasName)) continue;
-      const peer = resolver.explainResolution(peerName, probe);
+      const peer = matchDirectory(peerName, directory);
       const redirects =
         peer.reason === 'redirected' || peer.reason === 'ambiguous'
           ? peer.aliases.map((name) => aliases.get(name)!)

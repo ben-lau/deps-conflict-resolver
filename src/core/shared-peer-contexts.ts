@@ -5,7 +5,7 @@ import {
   type InstalledDependencyGraph,
   type InstalledPackageNode,
 } from './dependency-graph';
-import { AliasManager } from './alias-manager';
+import { createDirectoryScopeMatcher } from './scope-paths';
 import { createWorkspaceDetector, type WorkspaceDetector } from './workspace-detector';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { getEffectivePeerDependencies } from '../utils/peer-overrides';
@@ -36,7 +36,7 @@ interface PeerValidation {
   aliasPaths: ReadonlySet<string>;
   originals: ReadonlySet<string>;
   readManifest: (directory: string) => PackageJson | null;
-  getResolver: () => AliasManager;
+  getMatcher: () => ReturnType<typeof createDirectoryScopeMatcher>;
 }
 
 function matchesPackageName(node: InstalledPackageNode, names: readonly string[] = []): boolean {
@@ -104,19 +104,9 @@ export function validateSharedPeerContexts(
     }
   }
 
-  let resolver: AliasManager | null = null;
-  const getResolver = (): AliasManager => {
-    if (!resolver) {
-      resolver = new AliasManager({ ...options, strict: false });
-      resolver.initFromAnalysisResult({
-        aliasMappings: installedMappings,
-        analyzedDependencies: new Map(),
-        peerConflicts: [],
-        missingFirstLevelPeers: [],
-      });
-    }
-    return resolver;
-  };
+  let matchDirectory: ReturnType<typeof createDirectoryScopeMatcher> | undefined;
+  const getMatcher = () =>
+    (matchDirectory ??= createDirectoryScopeMatcher(installedMappings, options));
 
   const installationPending =
     options.autoInstall && !options.offline && mappings.some((mapping) => mapping.installSpec);
@@ -129,7 +119,7 @@ export function validateSharedPeerContexts(
     aliasPaths,
     originals,
     readManifest,
-    getResolver,
+    getMatcher,
   };
   if (!installationPending) {
     validateDescendantProviders(validation, installedMappings, inheritedMismatchesByAlias);
@@ -187,7 +177,7 @@ function validateHostConsumers(
   host: string,
   consumers: Array<{ node: InstalledPackageNode; request: string }>,
 ): void {
-  const { graph, options, diagnostics, detector, aliases, originals, getResolver } = validation;
+  const { graph, options, diagnostics, detector, aliases, originals, getMatcher } = validation;
   for (const { node, request } of consumers) {
     const requirements =
       node.peerDependenciesByName.get(request) ??
@@ -201,10 +191,7 @@ function validateHostConsumers(
       const { range, name } = resolveDependencyRequirement(peer, requirement.range, detector);
       if (!natural || natural.manifest.name !== name || !satisfies(natural.version, range))
         continue;
-      const { resolved } = getResolver().explainResolution(
-        peer,
-        join(node.packagePath, '__peer_context__.js'),
-      );
+      const { resolved } = getMatcher()(peer, node.packagePath);
       const alias = resolved ? aliases.get(resolved) : undefined;
       if (!alias || alias.path === natural.id) continue;
       const mapping = mappings.find(({ aliasName }) => aliasName === resolved);
@@ -225,7 +212,7 @@ function validateDescendantProviders(
   installedMappings: readonly AliasMapping[],
   inheritedMismatchesByAlias: ReadonlyMap<string, readonly string[]> | undefined,
 ): void {
-  const { graph, options, diagnostics, detector, aliases, getResolver } = validation;
+  const { graph, options, diagnostics, detector, aliases, getMatcher } = validation;
   const pathsByPeer = new Map<string, Map<string, 'pruned' | 'inherited'>>();
   for (const mapping of installedMappings) {
     const inherited = inheritedMismatchesByAlias?.get(mapping.aliasName) ?? [];
@@ -266,7 +253,7 @@ function validateDescendantProviders(
         requirements.every(({ range }) => satisfies(naturalVersion, range));
       if (naturalMatches && singleAlias && kind === 'pruned') continue;
 
-      const decision = getResolver().explainResolution(peer, join(path, '__peer_context__.js'));
+      const decision = getMatcher()(peer, path);
       if (decision.reason === 'excluded' || decision.reason === 'ambiguous') continue;
       const provider = decision.resolved ? aliases.get(decision.resolved) : undefined;
       if (
@@ -296,7 +283,7 @@ function validateConfiguredImporterAliases(
   peer: string,
   candidateRoots: ConfiguredPeerRequest[],
 ): void {
-  const { diagnostics, aliases, getResolver } = validation;
+  const { diagnostics, aliases, getMatcher } = validation;
   const requestsByPath = new Map<string, typeof candidateRoots>();
   for (const request of candidateRoots) {
     const matching = requestsByPath.get(request.packagePath) ?? [];
@@ -308,7 +295,7 @@ function validateConfiguredImporterAliases(
     const ranges = new Set(matching.map(({ range }) => range).filter(isValidRange));
     if (names.size < 2) continue;
 
-    const decision = getResolver().explainResolution(peer, join(path, '__peer_context__.js'));
+    const decision = getMatcher()(peer, path);
     const provider = decision.resolved ? aliases.get(decision.resolved) : undefined;
     if (
       decision.reason !== 'ambiguous' &&
@@ -373,13 +360,10 @@ function validateSharedContexts(
     }
   }
 
-  const activeResolver = validation.getResolver();
+  const match = validation.getMatcher();
   const roots: Array<{ nodeId: string; consumer: string; provider: Provider }> = [];
   for (const { nodeId, packagePath, requestPath, range } of candidateRoots) {
-    const decision = activeResolver.explainResolution(
-      peer,
-      join(packagePath, '__peer_context__.js'),
-    );
+    const decision = match(peer, packagePath);
     if (decision.reason === 'ambiguous') continue;
     let provider = decision.resolved ? aliases.get(decision.resolved) : undefined;
     if (!decision.resolved) {
@@ -412,8 +396,7 @@ function validateSharedContexts(
     if (
       hasExclusions &&
       aliasPaths.has(context.provider.path) &&
-      activeResolver.explainResolution(peer, join(node.packagePath, '__peer_context__.js'))
-        .reason === 'excluded'
+      match(peer, node.packagePath).reason === 'excluded'
     )
       continue;
     const requirements = getInstalledDependencyRequirements(node, peer, detector);

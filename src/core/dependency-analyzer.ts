@@ -64,7 +64,7 @@ import {
 } from './alias-peer-resolver';
 import { validateSharedPeerContexts } from './shared-peer-contexts';
 import { validateInstalledPeerProviders } from './installed-peer-providers';
-import { AliasManager } from './alias-manager';
+import { createDirectoryScopeMatcher } from './scope-paths';
 
 const logger = createLogger('dependency-analyzer');
 const MAX_PEER_PLAN_ATTEMPTS = 64;
@@ -1305,9 +1305,8 @@ export class DependencyAnalyzer {
     // All conflicting roots are potential scopes before their versions have
     // been selected. Only explicit exclusions can rule out a root this early.
     const paths = requests.flatMap(({ packagePath }) => (packagePath ? [packagePath] : []));
-    const matcher = new AliasManager({ ...this.options, strict: false });
-    matcher.initFromAnalysisResult({
-      aliasMappings: [
+    const matchDirectory = createDirectoryScopeMatcher(
+      [
         {
           originalName: packageName,
           aliasName: packageName,
@@ -1318,17 +1317,11 @@ export class DependencyAnalyzer {
           ...(paths.length > 0 && { importerPaths: paths }),
         },
       ],
-      analyzedDependencies: new Map(),
-      peerConflicts: [],
-      missingFirstLevelPeers: [],
-    });
+      this.options,
+    );
     return requests.filter((request) => {
       const directory = peerConsumerDirectory(request, this.options.projectRoot);
-      return (
-        !directory ||
-        matcher.explainResolution(packageName, join(directory, '__peer_context__.js')).reason !==
-          'excluded'
-      );
+      return !directory || matchDirectory(packageName, directory).reason !== 'excluded';
     });
   }
 
@@ -1858,22 +1851,11 @@ export class DependencyAnalyzer {
       ]),
     );
     const coveredPaths = new Set(mappings.flatMap((mapping) => mapping.importerPaths ?? []));
-    let resolver: AliasManager | undefined;
+    let matchDirectory: ReturnType<typeof createDirectoryScopeMatcher> | undefined;
     return (path, requirements) => {
       if (!coveredPaths.has(path)) return false;
-      if (!resolver) {
-        resolver = new AliasManager({ ...this.options, strict: false });
-        resolver.initFromAnalysisResult({
-          aliasMappings: mappings,
-          peerConflicts: [],
-          analyzedDependencies: new Map(),
-          missingFirstLevelPeers: [],
-        });
-      }
-      const { reason, aliases } = resolver.explainResolution(
-        packageName,
-        join(path, '__peer_context__.js'),
-      );
+      matchDirectory ??= createDirectoryScopeMatcher(mappings, this.options);
+      const { reason, aliases } = matchDirectory(packageName, path);
       if (reason !== 'redirected' && reason !== 'ambiguous') return false;
       // A tie still shows which compatible aliases can reach this path.
       return aliases.some((alias) => {

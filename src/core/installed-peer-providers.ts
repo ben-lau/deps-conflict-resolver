@@ -1,8 +1,7 @@
-import { join } from 'node:path';
 import type { AliasMapping, PeerConflict, ResolvedOptions, ResolverDiagnostic } from '../types';
 import { isValidVersion, satisfies } from '../utils/semver';
 import { resolveDependencyRequirement, type VersionSpecResolver } from '../utils/version-spec';
-import { AliasManager } from './alias-manager';
+import { createDirectoryScopeMatcher } from './scope-paths';
 import type { InstalledDependencyGraph, InstalledPackageNode } from './dependency-graph';
 
 type ResolveAlias = (peer: string, importerPath: string) => AliasMapping | undefined;
@@ -19,22 +18,11 @@ export function validateInstalledPeerProviders(
   const candidates = mappings.filter(({ installSpec }) => !installSpec || options.autoInstall);
   const originals = new Set(candidates.map(({ originalName }) => originalName));
   const byAlias = new Map(candidates.map((mapping) => [mapping.aliasName, mapping]));
-  let matcher: AliasManager | undefined;
+  let matcher: ReturnType<typeof createDirectoryScopeMatcher> | undefined;
   const resolveAlias: ResolveAlias = (peer, importerPath) => {
     if (!originals.has(peer)) return undefined;
-    if (!matcher) {
-      matcher = new AliasManager({ ...options, strict: false });
-      matcher.initFromAnalysisResult({
-        aliasMappings: candidates,
-        analyzedDependencies: new Map(),
-        peerConflicts: [],
-        missingFirstLevelPeers: [],
-      });
-    }
-    const alias = matcher.explainResolution(
-      peer,
-      join(importerPath, '__peer_context__.js'),
-    ).resolved;
+    matcher ??= createDirectoryScopeMatcher(candidates, options);
+    const { resolved: alias } = matcher(peer, importerPath);
     return alias ? byAlias.get(alias) : undefined;
   };
 
