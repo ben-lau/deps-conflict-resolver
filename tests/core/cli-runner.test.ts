@@ -90,6 +90,68 @@ describe('doctor and prepare commands', () => {
     expect(JSON.parse(stdout).diagnostics).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING' })]),
     );
+    expect(JSON.parse(stdout).actions).toContainEqual(
+      expect.objectContaining({
+        code: 'OFFLINE_ALIAS_MISSING',
+        message: expect.stringContaining('prepare --strict --write-plan'),
+      }),
+    );
+  });
+
+  it('guides init with a minimal offline configuration and only writes a new file on request', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const config = join(root, 'legacy-deps.json');
+    expect(await runCli(['init', '--root', root, '--json'], output)).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      suggestedConfig: { dependencies: ['legacy'] },
+      installation: null,
+    });
+    stdout = '';
+    expect(await runCli(['init', '--root', root, '--write-config', config], output)).toBe(0);
+    expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ dependencies: ['legacy'] });
+    expect(await runCli(['init', '--root', root, '--write-config', config], output)).toBe(1);
+    expect(stderr).toContain('EEXIST');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('suggests a Vue peer override for a broad declaration without changing the plan', async () => {
+    writeFileSync(
+      join(root, 'node_modules/legacy/package.json'),
+      JSON.stringify({ name: 'legacy', version: '1.0.0', peerDependencies: { vue: '>=2' } }),
+    );
+    writeFileSync(join(root, 'node_modules/legacy/index.js'), 'export default Vue.extend({});');
+    expect(
+      await runCli(
+        ['doctor', 'legacy', '--root', root, '--offline', '--source-hints', '--json'],
+        output,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      aliases: [],
+      diagnostics: [],
+      sourceHints: [
+        { packageName: 'legacy', config: { peerOverrides: { 'legacy@1.0.0': { vue: '^2' } } } },
+      ],
+    });
+  });
+
+  it('warns when a visible optional peer is incompatible and passes in strict mode', async () => {
+    writeFileSync(
+      join(root, 'node_modules/legacy/package.json'),
+      JSON.stringify({
+        name: 'legacy',
+        version: '1.0.0',
+        peerDependencies: { vue: '^2' },
+        peerDependenciesMeta: { vue: { optional: true } },
+      }),
+    );
+    expect(
+      await runCli(['doctor', 'legacy', '--root', root, '--offline', '--strict', '--json'], output),
+    ).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      aliases: [],
+      diagnostics: [{ code: 'OPTIONAL_PEER_MISMATCH', severity: 'warning', packageName: 'vue' }],
+    });
   });
 
   it('reports measured analysis and filesystem work without probing a registry offline', async () => {

@@ -1,9 +1,11 @@
-import { resolve } from 'node:path';
+import { extname, resolve } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import { DepsConflictResolver, getResolverBuild } from './resolver';
 import { findPackagePath, findProjectRoot, readPackageJsonCached } from '../utils/fs';
 import { LogLevel, withLogLevel } from '../utils/logger';
 import { ResolutionError } from './resolution-error';
 import { loadCliConfig } from './cli-config';
+import { diagnoseNextSteps, findSourceHints, suggestEntryPackages } from './cli-advice';
 import type { DepsConflictResolverOptions } from '../types';
 
 interface CliOutput {
@@ -12,9 +14,10 @@ interface CliOutput {
 }
 
 const HELP = [
-  'Usage: deps-conflict-resolver <doctor|prepare> [packages...] [options]',
+  'Usage: deps-conflict-resolver <doctor|init|prepare> [packages...] [options]',
   '',
   'doctor   Analyze without installing; scans runtime dependencies when none are selected.',
+  'init     Preview a minimal resolver config from installed packages, offline.',
   'prepare  Analyze and install verified aliases for the listed packages.',
   '',
   'Options:',
@@ -27,6 +30,8 @@ const HELP = [
   '  --json                        Emit a machine-readable report',
   '  --timings                     Include preparation durations and filesystem counts',
   '  --write-plan                  Save a verified offline plan (prepare only)',
+  '  --source-hints                Check for Vue 2 patterns in installed entries (doctor)',
+  '  --write-config <file.json>    Write the proposed JSON configuration (init only)',
   '  --help                        Show this help',
   '',
 ].join('\n');
@@ -51,16 +56,23 @@ export async function runCli(
       return 0;
     }
     const [command, ...args] = argv;
-    if (command !== 'doctor' && command !== 'prepare') {
+    if (command !== 'doctor' && command !== 'init' && command !== 'prepare') {
       throw new Error('Unknown command: ' + command + '\n' + HELP);
     }
     if (writePlan && command !== 'prepare') throw new Error('--write-plan requires prepare');
     const overrides: Partial<DepsConflictResolverOptions> = {};
     let configFile: string | undefined;
+    let outputConfig: string | undefined;
+    let sourceHints = command === 'init';
     const packages: string[] = [];
     for (let index = 0; index < args.length; index++) {
       const arg = args[index]!;
       if (arg === '--json' || arg === '--timings' || arg === '--write-plan') continue;
+      if (arg === '--source-hints') {
+        if (command === 'prepare') throw new Error('--source-hints requires doctor or init');
+        sourceHints = true;
+        continue;
+      }
       if (arg === '--offline') {
         overrides.offline = true;
         continue;
@@ -73,14 +85,19 @@ export async function runCli(
         arg === '--config' ||
         arg === '--root' ||
         arg === '--registry' ||
-        arg === '--package-manager'
+        arg === '--package-manager' ||
+        arg === '--write-config'
       ) {
         const value = args[++index];
         if (!value || value.startsWith('--')) throw new Error('Missing value for ' + arg);
         if (arg === '--config') configFile = value;
         else if (arg === '--root') overrides.projectRoot = value;
         else if (arg === '--registry') overrides.registry = value;
-        else {
+        else if (arg === '--write-config') {
+          if (command !== 'init' || extname(value) !== '.json')
+            throw new Error('--write-config requires init and a .json output path');
+          outputConfig = resolve(value);
+        } else {
           if (!['auto', 'npm', 'pnpm', 'yarn'].includes(value))
             throw new Error('Unsupported package manager: ' + value);
           overrides.packageManager = value as DepsConflictResolverOptions['packageManager'];
@@ -123,6 +140,7 @@ export async function runCli(
       projectRoot,
       dependencies,
       debug: false,
+      ...(command === 'init' && { offline: true }),
       strict: command === 'prepare' && strictMode,
       autoInstall: command === 'prepare',
       preparedPlan: false,
@@ -136,6 +154,25 @@ export async function runCli(
       failure = error.preparation;
     }
     const diagnostics = failure?.diagnostics ?? resolver.getDiagnostics();
+    const analysis = getResolverBuild(resolver).snapshot().analysis;
+    const suggestedConfig =
+      command === 'init'
+        ? {
+            dependencies: selectedPackages
+              ? dependencies
+              : suggestEntryPackages(analysis!, dependencies),
+            ...(options.aliasPrefix !== undefined && { aliasPrefix: options.aliasPrefix }),
+            ...(options.peerOverrides && { peerOverrides: options.peerOverrides }),
+            ...(options.includeRedirects && { includeRedirects: options.includeRedirects }),
+            ...(options.excludeRedirects && { excludeRedirects: options.excludeRedirects }),
+          }
+        : undefined;
+    if (outputConfig && suggestedConfig) {
+      await writeFile(outputConfig, JSON.stringify(suggestedConfig, null, 2) + '\n', {
+        flag: 'wx',
+      });
+    }
+    const hints = sourceHints ? await findSourceHints(projectRoot, dependencies) : [];
     let preparedPlan: string | undefined;
     if (writePlan && !diagnostics.some(({ severity }) => severity === 'error')) {
       try {
@@ -154,12 +191,16 @@ export async function runCli(
       projectRoot,
       packageManager: resolver.getOptions().packageManager,
       dependencies,
-      aliases: failure?.aliases ?? resolver.getAnalysisResult()!.aliasMappings,
+      aliases: failure?.aliases ?? analysis!.aliasMappings,
       activeAliases: failure ? [] : resolver.getAliasPathMappings(),
       diagnostics,
+      actions: diagnoseNextSteps(diagnostics),
       installation: failure ? failure.installation : resolver.getInstallResult(),
       ...(timings && { timings: resolver.getTimings() }),
       ...(preparedPlan && { preparedPlan }),
+      ...(sourceHints && { sourceHints: hints }),
+      ...(suggestedConfig && { suggestedConfig }),
+      ...(outputConfig && { configFile: outputConfig }),
     };
     if (json) {
       output.stdout(JSON.stringify(report, null, 2) + '\n');
@@ -188,6 +229,26 @@ export async function runCli(
       }
       for (const diagnostic of diagnostics) {
         output.stdout('  [' + diagnostic.code + '] ' + diagnostic.message + '\n');
+      }
+      for (const action of report.actions) {
+        output.stdout(
+          '  ' + action.packageName + ' [' + action.code + '] ' + action.message + '\n',
+        );
+      }
+      for (const hint of hints) {
+        output.stdout('  ' + hint.packageName + ' ' + hint.message + '\n');
+        output.stdout(JSON.stringify(hint.config, null, 2) + '\n');
+      }
+      if (suggestedConfig) {
+        if (outputConfig) output.stdout('Wrote resolver options to ' + outputConfig + '\n');
+        else
+          output.stdout(
+            'Suggested resolver options\n' + JSON.stringify(suggestedConfig, null, 2) + '\n',
+          );
+        if (suggestedConfig.dependencies.length > 0)
+          output.stdout(
+            'Run deps-conflict-resolver prepare --config <options.json> --strict --write-plan, then import the same options in the bundler with preparedPlan: true and strict: true.\n',
+          );
       }
       if (report.timings) output.stdout(JSON.stringify(report.timings, null, 2) + '\n');
       if (preparedPlan) output.stdout('Saved dependency plan to ' + preparedPlan + '\n');

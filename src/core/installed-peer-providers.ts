@@ -1,5 +1,5 @@
 import type { AliasMapping, PeerConflict, ResolvedOptions, ResolverDiagnostic } from '../types';
-import { isValidVersion, satisfies } from '../utils/semver';
+import { isValidRange, isValidVersion, satisfies } from '../utils/semver';
 import { resolveDependencyRequirement, type VersionSpecResolver } from '../utils/version-spec';
 import { createDirectoryScopeMatcher } from './scope-paths';
 import type { InstalledDependencyGraph, InstalledPackageNode } from './dependency-graph';
@@ -28,6 +28,43 @@ export function validateInstalledPeerProviders(
 
   validateShadowedHostPeers(graph, conflicts, detector, diagnostics, resolveAlias);
   validateDirectTransitivePeers(graph, detector, diagnostics, resolveAlias);
+  validateOptionalPeers(graph, detector, diagnostics, resolveAlias);
+}
+
+function validateOptionalPeers(
+  graph: InstalledDependencyGraph,
+  detector: VersionSpecResolver,
+  diagnostics: ResolverDiagnostic[],
+  resolveAlias: ResolveAlias,
+): void {
+  const reported = new Set<string>();
+  for (const node of graph.nodes.values()) {
+    for (const [requester, peers] of node.peerDependenciesByName) {
+      for (const [peer, entry] of peers) {
+        if (!entry.optional) continue;
+        const actual = installedProvider(graph, node, peer);
+        const alias = resolveAlias(peer, node.packagePath);
+        const activeAlias = alias?.installSpec === '' ? alias : undefined;
+        const version = activeAlias?.resolvedVersion ?? actual?.version;
+        if (!version || !isValidVersion(version)) continue;
+        const name = activeAlias?.originalName ?? actual?.manifest.name;
+        const expected = resolveDependencyRequirement(peer, entry.range, detector);
+        if (!isValidRange(expected.range)) continue;
+        if (name === expected.name && satisfies(version, expected.range)) continue;
+        const key = JSON.stringify([node.id, peer, expected.name, expected.range]);
+        if (reported.has(key)) continue;
+        reported.add(key);
+        diagnostics.push({
+          code: 'OPTIONAL_PEER_MISMATCH',
+          severity: 'warning',
+          packageName: peer,
+          requestedBy: [requester],
+          importerPaths: [node.packagePath],
+          message: `${requester} optionally requires ${expected.name}@${expected.range} but resolves to ${name ?? '(unnamed package)'}@${version}`,
+        });
+      }
+    }
+  }
 }
 
 function installedProvider(
