@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -90,6 +90,132 @@ function nativeDependency(root: string, imported = false, subpath = false): void
 }
 
 describe('SSR alias resolution', () => {
+  it.each([
+    { commonjs: false, location: 'root', pattern: false },
+    { commonjs: true, location: 'root', pattern: false },
+    { commonjs: false, location: 'nested', pattern: false },
+    { commonjs: true, location: 'nested', pattern: false },
+    { commonjs: false, location: 'subpath', pattern: true },
+    { commonjs: true, location: 'subpath', pattern: true },
+    { commonjs: false, location: 'esm-only', pattern: true },
+    { commonjs: false, location: 'named-only', pattern: true },
+    { commonjs: false, location: 'named-only-js', pattern: true },
+    { commonjs: false, location: 'nested-dual-main', pattern: false },
+  ])(
+    'applies external=true to nested SSR requests: $commonjs, $location, pattern=$pattern',
+    async ({ commonjs, location, pattern }) => {
+      const { root } = fixture(commonjs);
+      nativeDependency(root);
+      const legacy = join(root, 'node_modules/legacy');
+      let native = join(root, 'node_modules/native-addon');
+      const namedOnly = location === 'named-only' || location === 'named-only-js';
+      if (
+        ['nested', 'esm-only', 'named-only', 'named-only-js', 'nested-dual-main'].includes(location)
+      ) {
+        const directory = join(legacy, 'node_modules/native-addon');
+        mkdirSync(join(legacy, 'node_modules'), { recursive: true });
+        renameSync(native, directory);
+        native = directory;
+      }
+      if (location === 'esm-only' || namedOnly) {
+        const esmEntry = location === 'named-only-js' ? './index.js' : './index.mjs';
+        writeFileSync(
+          join(native, 'package.json'),
+          JSON.stringify({
+            name: 'native-addon',
+            version: '1.0.0',
+            type: 'module',
+            exports: { '.': { import: esmEntry } },
+          }),
+        );
+        writeFileSync(
+          join(native, esmEntry),
+          (namedOnly ? 'export const ready = true;' : 'export default { ready: true };') +
+            'export const load = () => import("./binding.node");',
+        );
+      }
+      if (location === 'nested-dual-main') {
+        writeFileSync(
+          join(native, 'package.json'),
+          JSON.stringify({
+            name: 'native-addon',
+            version: '1.0.0',
+            main: './index.js',
+            module: './wrong.js',
+          }),
+        );
+        writeFileSync(join(native, 'wrong.js'), 'throw new Error("Wrong Node entry");');
+      }
+      const allowed = join(legacy, 'node_modules/allowed-helper');
+      mkdirSync(allowed, { recursive: true });
+      writeFileSync(
+        join(allowed, 'package.json'),
+        JSON.stringify({ name: 'allowed-helper', version: '1.0.0', main: './index.ts' }),
+      );
+      writeFileSync(join(allowed, 'index.ts'), 'export const allowed: boolean = true;');
+      const source = 'native-addon' + (location === 'subpath' ? '/feature.js' : '');
+      const file = join(legacy, 'index.js');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8') +
+          (commonjs
+            ? `\nexports.nativeReady = require(${JSON.stringify(source)}).ready; exports.allowed = require("allowed-helper").allowed;`
+            : `\nimport ${namedOnly ? '* as native' : 'native'} from ${JSON.stringify(source)}; export const nativeReady = native.ready; export const hasDefault = "default" in native; export { allowed } from "allowed-helper";`),
+      );
+      const entry = join(root, 'entry.js');
+      writeFileSync(
+        entry,
+        readFileSync(entry, 'utf8') +
+          '\nexport { nativeReady, allowed } from "legacy";' +
+          (namedOnly ? '\nexport { hasDefault } from "legacy";' : ''),
+      );
+      let metadata: string | undefined;
+      for (let pass = 0; pass < (location === 'esm-only' ? 2 : 1); pass++) {
+        const server = await createServer({
+          root,
+          configFile: false,
+          logLevel: 'silent',
+          server: { middlewareMode: true, hmr: false },
+          ssr: {
+            external: true,
+            noExternal: pattern
+              ? /^(legacy|vue2?|allowed-helper)$/
+              : ['legacy', 'vue2', 'vue', 'allowed-helper'],
+            optimizeDeps: { include: ['vue'] },
+          },
+          plugins: [
+            depsConflictResolverVitePlugin({
+              dependencies: ['legacy'],
+              offline: true,
+              strict: true,
+              ssr: 'auto',
+            }),
+          ],
+        });
+        try {
+          const result = await server.ssrLoadModule('/entry.js');
+          expect(result.nativeReady).toBe(true);
+          expect(result.allowed).toBe(true);
+          if (namedOnly) expect(result.hasDefault).toBe(false);
+          expect(result.runtimeVersion).toBe('2.7.16');
+          expect(result.hostVersion).toBe('3.0.0');
+          expect(result.shared).toBe(true);
+          expect(result.isolated).toBe(true);
+          if (location === 'esm-only') {
+            const current = readFileSync(
+              join(server.config.cacheDir, 'deps_ssr/_metadata.json'),
+              'utf8',
+            );
+            if (metadata) expect(current).toBe(metadata);
+            metadata = current;
+          }
+        } finally {
+          await server.close();
+        }
+      }
+    },
+  );
+
   it.each(['unused', 'external', 'exclude'])(
     'avoids forcing an unused native dependency into SSR pre-bundling: %s',
     async (mode) => {

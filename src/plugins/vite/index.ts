@@ -3,7 +3,8 @@ import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, version as viteVersion } from 'vite';
-import { createOptimizerOptions } from './optimizer';
+import { createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
+import { createSsrExternalPolicy } from './ssr-external';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
 import { join, resolve as resolvePath } from 'node:path';
@@ -82,6 +83,9 @@ export interface VitePluginOptions extends PluginConfig {
 export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plugin {
   let resolver: DepsConflictResolver | null = null;
   let isEnabled = true;
+  let resolveSsrExternal: SsrExternalPolicy['resolve'] | undefined;
+  let ssrExternalEnabled = false;
+  let isSsrExternal: SsrExternalPolicy['isExternal'] | undefined;
 
   const {
     enableInDev = true,
@@ -107,6 +111,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     async config(config, { command }): Promise<UserConfig | null | void> {
       // 根据模式决定是否启用
       isEnabled = (command === 'serve' && enableInDev) || (command === 'build' && enableInBuild);
+      ssrExternalEnabled = false;
+      resolveSsrExternal = undefined;
+      isSsrExternal = undefined;
 
       if (!isEnabled) {
         logger.info(`Plugin disabled for ${command} mode`);
@@ -205,6 +212,18 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
 
       // 创建 esbuild 插件用于预构建阶段的别名解析
       const optimizeDeps = createOptimizerOptions(resolver, projectRoot, viteVersion);
+      ssrExternalEnabled =
+        ssr === 'auto' && command === 'serve' && external === true && manualNoExternal !== true;
+      isSsrExternal = (packageName) => !keepsInternal(packageName);
+      const ssrOptimizeDeps = ssrExternalEnabled
+        ? createOptimizerOptions(resolver, projectRoot, viteVersion, {
+            isExternal: (packageName) => !keepsInternal(packageName),
+            resolve: (source, importer, isRequire) => {
+              if (!resolveSsrExternal) throw new Error('SSR external resolver is not initialized');
+              return resolveSsrExternal(source, importer, isRequire);
+            },
+          })
+        : optimizeDeps;
       const [viteMajor, viteMinor] = viteVersion.split('.').map(Number);
       const legacySsrOptimizer = viteMajor! < 5 || (viteMajor === 5 && viteMinor === 0);
 
@@ -223,7 +242,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
                         ...(legacySsrOptimizer && ssrOptimizer.disabled === undefined
                           ? { disabled: false as const }
                           : {}),
-                        ...optimizeDeps,
+                        ...ssrOptimizeDeps,
                         include: [...ssrOptimizerPackages].filter(allowsSsrOptimization),
                         // Vite's SSR optimizer is a separate bundler; forward
                         // explicit externals so nested imports stay external too.
@@ -239,6 +258,15 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         },
         optimizeDeps,
       };
+    },
+
+    configResolved(config) {
+      if (!ssrExternalEnabled) return;
+      resolveSsrExternal = createSsrExternalPolicy(
+        config,
+        resolver!.getOptions().projectRoot,
+        isSsrExternal!,
+      ).resolve;
     },
 
     /**
