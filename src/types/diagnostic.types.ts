@@ -11,6 +11,7 @@ export interface ResolverDiagnostic {
     | 'ALIAS_NOT_INSTALLED'
     | 'ALIAS_PEER_UNSATISFIED'
     | 'ALIAS_METADATA_UNAVAILABLE'
+    | 'SHARED_PEER_CONTEXT'
     | 'AMBIGUOUS_ALIAS_SCOPE'
     | 'AMBIGUOUS_IMPORTER';
   severity: 'warning' | 'error';

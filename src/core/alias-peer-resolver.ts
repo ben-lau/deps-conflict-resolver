@@ -31,8 +31,13 @@ export async function linkAliasPeers(
   registry: RegistryClient,
   diagnostics: ResolverDiagnostic[],
   peerConflicts: readonly PeerConflict[] = [],
+  watchFiles?: Set<string>,
 ): Promise<void> {
   if (mappings.length === 0) return;
+  const readManifest = (directory: string) => {
+    watchFiles?.add(join(actualPath(directory), 'package.json'));
+    return readPackageJsonCached(directory);
+  };
   // Rebuild derived peer edges after installation or manifest changes. Keeping
   // the previous edges would give one importer two providers after a refresh.
   for (const mapping of mappings) {
@@ -52,7 +57,7 @@ export async function linkAliasPeers(
 
   for (const mapping of mappings) {
     const installedPath = findPackagePath(mapping.aliasName, options.projectRoot);
-    const installed = installedPath ? readPackageJsonCached(installedPath) : null;
+    const installed = installedPath ? readManifest(installedPath) : null;
     if (
       installed?.name === mapping.originalName &&
       installed.version &&
@@ -157,7 +162,7 @@ export async function linkAliasPeers(
             }
           } else {
             const path = findPackagePath(peerName, directory);
-            const provider = path ? readPackageJsonCached(path) : null;
+            const provider = path ? readManifest(path) : null;
             if (path && provider?.version && satisfies(provider.version, range)) {
               const identity = actualPath(path);
               providers.set(identity, [
@@ -201,7 +206,7 @@ export async function linkAliasPeers(
         // A foreign consumer's alias is only a fallback. Preserve a compatible
         // provider visible from this package instead of crossing peer contexts.
         const naturalPath = findPackagePath(peerName, installedPath ?? options.projectRoot);
-        const natural = naturalPath ? readPackageJsonCached(naturalPath) : null;
+        const natural = naturalPath ? readManifest(naturalPath) : null;
         if (natural?.version && satisfies(natural.version, range)) continue;
       }
 
