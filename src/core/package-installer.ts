@@ -154,11 +154,37 @@ export class PackageInstaller {
     logger.info(`Installing ${toInstall.length} alias packages...`);
 
     const installSpecs = toInstall.map((m) => m.installSpec);
-    const installResult = await this.runInstall(installSpecs);
+    let installResult: Awaited<ReturnType<PackageInstaller['runInstall']>>;
+    try {
+      installResult = await this.runInstall(installSpecs);
+    } finally {
+      // Package managers can reconcile other aliases or partially mutate the
+      // installation even when they fail. Preflight metadata is no longer valid.
+      clearPackageJsonCache();
+    }
+
+    const reusedBeforeInstall = new Set(result.reused);
+    result.reused = [];
+    for (const mapping of mappings) {
+      if (!reusedBeforeInstall.has(mapping.aliasName)) continue;
+      const aliasPath = installedAliasPath(mapping.aliasName);
+      if (!aliasPath) {
+        reportMissing(mapping);
+        continue;
+      }
+      const verification = this.verifyInstalledVersion(
+        aliasPath,
+        mapping.originalName,
+        mapping.resolvedVersion,
+      );
+      if (verification.matches) {
+        result.reused.push(mapping.aliasName);
+      } else {
+        reportCollision(mapping, verification);
+      }
+    }
 
     if (installResult.success) {
-      // Installation may invalidate cached misses and preflight metadata.
-      clearPackageJsonCache();
       for (const mapping of toInstall) {
         const aliasPath = installedAliasPath(mapping.aliasName);
 
