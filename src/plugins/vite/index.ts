@@ -2,7 +2,7 @@ import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite
 import { randomUUID } from 'node:crypto';
 import type { PluginConfig, PluginHooks, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
-import { createLogger, LogLevel } from '../../utils/logger';
+import { createLogger, LogLevel, withLogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
 import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
 import { createSsrExternalPolicy } from './ssr-external';
@@ -11,6 +11,12 @@ import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-re
 import { join } from 'node:path';
 
 const logger = createLogger('vite-plugin');
+const VITE_LOG_LEVELS = {
+  silent: LogLevel.SILENT,
+  error: LogLevel.ERROR,
+  warn: LogLevel.WARN | LogLevel.ERROR,
+  info: LogLevel.INFO | LogLevel.WARN | LogLevel.ERROR,
+};
 
 /**
  * Vite 插件名称
@@ -122,10 +128,6 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   function resolverOwner(config: ResolvedConfig): ResolvedConfig {
     const mainConfig = (config as ResolvedConfig & { mainConfig?: ResolvedConfig }).mainConfig;
     return config.isWorker && mainConfig?.plugins.includes(plugin) ? mainConfig : config;
-  }
-
-  if (options.debug) {
-    logger.setLevel(LogLevel.ALL);
   }
 
   function runtimeConfig(
@@ -318,14 +320,23 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           return hooks.onInstallComplete?.bind(hooks);
         },
       };
-      resolver = new DepsConflictResolver(
+      const logLevel = config.logLevel ?? 'info';
+      const level = logLevel === 'info' && options.debug ? LogLevel.ALL : VITE_LOG_LEVELS[logLevel];
+      const withHostLogger = <T>(task: () => T): T =>
+        withLogLevel(level, task, (method, message) => {
+          config.logger[method === 'debug' ? 'info' : method](message);
+        });
+      const active = new DepsConflictResolver(
         {
           ...resolverOptions,
+          // The scoped host logger owns debug output for this preparation.
+          debug: false,
           projectRoot: resolverOptions.projectRoot ?? config.root,
         },
         resolverHooks,
       );
-      await resolver.initialize();
+      resolver = active;
+      await withHostLogger(() => active.initialize());
       // Capture the callback after preparation so build and pre-bundling use
       // the same registration. A declared function can delegate at runtime.
       const beforeResolve = hooks?.beforeResolve;
@@ -343,20 +354,15 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       }
       // Strict snapshots can report a change on any eligible request.
       filterRequests = !beforeResolve && !resolverOptions.strict;
-      const aliasPathMappings = resolver.getAliasPathMappings();
+      const aliasPathMappings = active.getAliasPathMappings();
       if (filterRequests) requestFilter = aliasRequestFilter(aliasPathMappings);
       configured = config;
       // Worker builds inherit optimizer/SSR objects from the main config.
       // Only their module resolver is ours; keep those shared objects intact.
       if (config.isWorker) return;
       if (config.command === 'serve') {
-        if (beforeResolve && beforeResolveCacheKey === undefined) {
-          logger.info(
-            'Vite will rebuild the pre-bundle for the custom beforeResolve hook. Set beforeResolveCacheKey to enable reuse while its inputs are unchanged.',
-          );
-        }
         const watched = new Set(config.configFileDependencies);
-        for (const file of resolver.getAnalysisResult()?.watchFiles ?? []) {
+        for (const file of active.getAnalysisResult()?.watchFiles ?? []) {
           const path = normalizePath(file);
           // Vite ignores installed dependency directories by default. Track
           // project and linked source manifests as config inputs instead.
@@ -365,7 +371,14 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           config.configFileDependencies.push(path);
         }
       }
-      const addition = runtimeConfig(config, resolver, aliasPathMappings);
+      const addition = withHostLogger(() => {
+        if (config.command === 'serve' && beforeResolve && beforeResolveCacheKey === undefined) {
+          logger.info(
+            'Vite will rebuild the pre-bundle for the custom beforeResolve hook. Set beforeResolveCacheKey to enable reuse while its inputs are unchanged.',
+          );
+        }
+        return runtimeConfig(config, active, aliasPathMappings);
+      });
       if (!addition) return;
       // Do not reassign resolve.alias here: Vite already created its alias
       // plugin. resolveId and the optimizer resolve through the final resolver.
@@ -398,7 +411,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       if (ssrExternalEnabled)
         resolveSsrExternal = createSsrExternalPolicy(
           config,
-          resolver.getOptions().projectRoot,
+          active.getOptions().projectRoot,
           isSsrExternal!,
         ).resolve;
     },
@@ -432,7 +445,11 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           return null;
         const resolved = resolver.resolveModule(source, importer);
         if (!resolved) return null;
-        logger.debug(`Redirecting ${source} -> ${resolved} (from ${importer ?? 'entry'})`);
+        if (options.debug && (configured?.logLevel ?? 'info') === 'info') {
+          configured?.logger.info(
+            `[${PLUGIN_NAME}] [DEBUG] Redirecting ${source} -> ${resolved} (from ${importer ?? 'entry'})`,
+          );
+        }
 
         // Active aliases were verified from the host. A linked importer may
         // live outside that host's node_modules resolution ancestry.

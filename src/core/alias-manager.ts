@@ -149,6 +149,7 @@ export class AliasManager {
   });
   private directoryDecisions = new LruCache<string, Decision>({ maxEntries: 5000 });
   private diagnostics = new Map<string, ResolverDiagnostic>();
+  private readonly warnAmbiguity = logger.bindWarning();
 
   constructor(
     private options: ResolvedOptions,
@@ -487,7 +488,7 @@ export class AliasManager {
             importerPaths: matchedPaths,
           };
           this.diagnostics.set(key, diagnostic);
-          logger.warn(diagnostic.message);
+          this.warnAmbiguity(diagnostic.message);
         }
       }
     }

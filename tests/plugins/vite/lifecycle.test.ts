@@ -4,15 +4,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
-import { build, resolveConfig, type Plugin } from 'vite';
+import { build, createLogger, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
-import type { PluginHooks } from '../../../src/types';
+import type { PackageJson, PluginHooks } from '../../../src/types';
 import { mockRegistry } from '../../support/registry';
 
 const roots: string[] = [];
 const redirectToHostVue = (source: string) => (source === 'vue2' ? 'vue' : undefined);
-function fixture(version: string) {
+function writeModule(root: string, request: string, manifest: PackageJson, source: string) {
+  const directory = join(root, 'node_modules', request);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    join(directory, 'package.json'),
+    JSON.stringify({ type: 'module', main: 'index.js', ...manifest }),
+  );
+  writeFileSync(join(directory, 'index.js'), source);
+  return directory;
+}
+
+function fixture(version: string, extraDependencies: Record<string, string> = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'deps-vite-lifecycle-')));
   roots.push(root);
   writeFileSync(
@@ -23,6 +34,7 @@ function fixture(version: string) {
         legacy: '1.0.0',
         vue: '3.0.0',
         vue2: 'npm:vue@' + version,
+        ...extraDependencies,
       },
     }),
   );
@@ -30,20 +42,17 @@ function fixture(version: string) {
     ['legacy', 'legacy', '1.0.0', 'export {version} from "vue";'],
     ['vue', 'vue', '3.0.0', 'export const version="3.0.0";'],
     ['vue2', 'vue', version, 'export const version=' + JSON.stringify(version) + ';'],
-  ]) {
-    const directory = join(root, 'node_modules', request!);
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(
-      join(directory, 'package.json'),
-      JSON.stringify({
+  ] as const) {
+    writeModule(
+      root,
+      request,
+      {
         name,
         version: v,
-        type: 'module',
-        main: 'index.js',
         peerDependencies: request === 'legacy' ? { vue: version } : {},
-      }),
+      },
+      code,
     );
-    writeFileSync(join(directory, 'index.js'), code!);
   }
   writeFileSync(join(root, 'entry.js'), 'export {version} from "legacy";');
   return root;
@@ -54,6 +63,115 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it('honors the host log level during plugin preparation', async () => {
+    const root = fixture('2.7.16');
+    const logs = (['log', 'info', 'warn', 'debug'] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation(() => undefined),
+    );
+    await resolveConfig(
+      {
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [
+          plugin({
+            dependencies: ['legacy'],
+            offline: true,
+            debug: true,
+            hooks: { beforeResolve: redirectToHostVue },
+          }),
+        ],
+      },
+      'serve',
+    );
+    const messages = logs.flatMap(({ mock }) => mock.calls.map(([message]) => String(message)));
+    expect(messages.filter((message) => message.includes('deps-conflict-resolver'))).toEqual([]);
+  });
+
+  it('reports preparation and pre-bundle cache hints through the host logger', async () => {
+    const root = fixture('2.7.16');
+    const hostLogger = createLogger('silent');
+    const messages = vi.spyOn(hostLogger, 'info');
+    await resolveConfig(
+      {
+        root,
+        configFile: false,
+        customLogger: hostLogger,
+        plugins: [
+          plugin({
+            dependencies: ['legacy'],
+            offline: true,
+            hooks: { beforeResolve: redirectToHostVue },
+          }),
+        ],
+      },
+      'serve',
+    );
+    expect(messages).toHaveBeenCalledWith(expect.stringContaining('Starting dependency analysis'));
+    expect(messages).toHaveBeenCalledWith(expect.stringContaining('beforeResolveCacheKey'));
+  });
+
+  it.each(['silent', 'warn'] as const)(
+    'reports runtime ambiguity through the Vite logger at %s',
+    async (logLevel) => {
+      const root = fixture('2.7.16', { older: '1.0.0', vue26: 'npm:vue@2.6.14' });
+      writeModule(
+        root,
+        'older',
+        { name: 'older', version: '1.0.0', peerDependencies: { vue: '2.6.14' } },
+        'export { version } from "vue";',
+      );
+      writeModule(
+        root,
+        'vue26',
+        { name: 'vue', version: '2.6.14' },
+        'export const version = "2.6.14";',
+      );
+      // This consumer is outside dependency analysis. Its two importers learn
+      // about the tie between both aliases only during module resolution.
+      const consumer = writeModule(
+        root,
+        'consumer',
+        { name: 'consumer', version: '1.0.0' },
+        'export { version } from "vue"; export { otherVersion } from "./other.js";',
+      );
+      writeFileSync(join(consumer, 'other.js'), 'export { version as otherVersion } from "vue";');
+      const entry = join(root, 'entry.js');
+      writeFileSync(entry, 'export { version, otherVersion } from "consumer";');
+      const hostLogger = createLogger('silent');
+      const hostWarn = vi.spyOn(hostLogger, 'warn');
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await build({
+        root,
+        configFile: false,
+        logLevel,
+        customLogger: hostLogger,
+        plugins: [
+          plugin({
+            dependencies: ['legacy', 'older'],
+            offline: true,
+            includeRedirects: { vue: ['consumer'] },
+          }),
+        ],
+        build: {
+          lib: { entry, formats: ['cjs'], fileName: () => 'runtime.cjs' },
+          outDir: join(root, 'dist'),
+        },
+      });
+      const ambiguity = 'Multiple aliases match the same importer for vue';
+      expect(
+        consoleWarn.mock.calls.flat().some((message) => String(message).includes(ambiguity)),
+      ).toBe(false);
+      expect(hostWarn.mock.calls.filter(([message]) => message.includes(ambiguity))).toHaveLength(
+        logLevel === 'silent' ? 0 : 1,
+      );
+      expect(createRequire(import.meta.url)(join(root, 'dist/runtime.cjs'))).toMatchObject({
+        version: '3.0.0',
+        otherVersion: '3.0.0',
+      });
+    },
+  );
+
   it.each(['analysis', 'build'] as const)(
     'honors a hook registered during analysis or delegated during build (%s)',
     async (phase) => {

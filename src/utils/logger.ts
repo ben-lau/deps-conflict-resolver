@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { format } from 'node:util';
 
 /**
  * 日志级别
@@ -31,10 +32,12 @@ interface LoggerConfig {
  */
 const DEFAULT_GLOBAL_LEVEL: LogLevel = LogLevel.INFO | LogLevel.WARN | LogLevel.ERROR;
 let __GLOBAL_LEVEL__: LogLevel = DEFAULT_GLOBAL_LEVEL;
-const scopedLevel = new AsyncLocalStorage<LogLevel>();
+type LogMethod = 'debug' | 'info' | 'warn' | 'error';
+type LogWriter = (method: LogMethod, message: string) => void;
+const logScope = new AsyncLocalStorage<{ level: LogLevel; write?: LogWriter }>();
 
-export function withLogLevel<T>(level: LogLevel, callback: () => T): T {
-  return scopedLevel.run(level, callback);
+export function withLogLevel<T>(level: LogLevel, callback: () => T, write?: LogWriter): T {
+  return logScope.run({ level, write }, callback);
 }
 
 /**
@@ -67,51 +70,52 @@ export class Logger {
     this.levelOverride = undefined;
   }
 
-  private getEffectiveLevel(): LogLevel {
-    return this.levelOverride ?? scopedLevel.getStore() ?? __GLOBAL_LEVEL__;
-  }
-
   /**
    * 调试日志
    */
   debug(...args: unknown[]): void {
-    if (this.getEffectiveLevel() & LogLevel.DEBUG) {
-      console.debug(this.formatPrefix('DEBUG'), ...args);
-    }
+    this.output(LogLevel.DEBUG, 'debug', args);
   }
 
   /**
    * 信息日志
    */
   info(...args: unknown[]): void {
-    if (this.getEffectiveLevel() & LogLevel.INFO) {
-      console.info(this.formatPrefix('INFO'), ...args);
-    }
+    this.output(LogLevel.INFO, 'info', args);
   }
 
   /**
    * 警告日志
    */
   warn(...args: unknown[]): void {
-    if (this.getEffectiveLevel() & LogLevel.WARN) {
-      console.warn(this.formatPrefix('WARN'), ...args);
-    }
+    this.output(LogLevel.WARN, 'warn', args);
+  }
+
+  /** Keep a host's logging policy for warnings reported after preparation. */
+  bindWarning(): (message: string) => void {
+    const scope = logScope.getStore();
+    return scope?.write
+      ? (message) => this.output(LogLevel.WARN, 'warn', [message], scope)
+      : this.warn.bind(this);
   }
 
   /**
    * 错误日志
    */
   error(...args: unknown[]): void {
-    if (this.getEffectiveLevel() & LogLevel.ERROR) {
-      console.error(this.formatPrefix('ERROR'), ...args);
-    }
+    this.output(LogLevel.ERROR, 'error', args);
   }
 
-  /**
-   * 格式化前缀
-   */
-  private formatPrefix(level: string): string {
-    return `${this.prefix} [${level}]`;
+  private output(
+    level: LogLevel,
+    method: LogMethod,
+    args: unknown[],
+    scope = logScope.getStore(),
+  ): void {
+    if (!((this.levelOverride ?? scope?.level ?? __GLOBAL_LEVEL__) & level)) return;
+    const prefix = `${this.prefix} [${method.toUpperCase()}]`;
+    if (scope?.write) scope.write(method, format(prefix, ...args));
+    else console[method](prefix, ...args);
   }
 }
 

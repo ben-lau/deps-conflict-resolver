@@ -1,4 +1,5 @@
 import type { Plugin, ResolvedConfig, UserConfig, ConfigEnv } from 'vite';
+import { createLogger } from 'vite';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { depsConflictResolverVitePlugin, createViteAliases } from '../../../src/plugins/vite';
 import type { AliasPathMapping, AnalysisResult } from '../../../src/types';
@@ -32,6 +33,7 @@ async function configure(
     resolve: {},
     optimizeDeps: {},
     ssr: {},
+    logger: createLogger('silent'),
     ...input,
     command,
   } as unknown as ResolvedConfig;
@@ -149,6 +151,7 @@ describe('Vite Plugin', () => {
           root: '/test',
           command: 'build',
           plugins: [plugin],
+          logger: createLogger('silent'),
           optimizeDeps: {},
           ssr: {},
         } as unknown as ResolvedConfig;
