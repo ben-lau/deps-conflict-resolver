@@ -43,11 +43,17 @@ describe('optimizer adapters', () => {
     const { root, resolver } = await fixture();
     vi.spyOn(resolver, 'getAliasPathMappings').mockReturnValue([]);
     const policy = { isExternal: () => true, resolve: async () => undefined };
-    const options = createOptimizerOptions(resolver, root, '8.3.8', policy);
+    const options = createOptimizerOptions(resolver, root, '8.3.8', {
+      filterRequests: true,
+      ssrExternal: policy,
+    });
     expect(options.rolldownOptions!.plugins.map(({ name }) => name)).toEqual([
       'deps-conflict-resolver-ssr-external',
     ]);
-    const unfiltered = createOptimizerOptions(resolver, root, '8.3.8', policy, false);
+    const unfiltered = createOptimizerOptions(resolver, root, '8.3.8', {
+      filterRequests: false,
+      ssrExternal: policy,
+    });
     expect(unfiltered.rolldownOptions!.plugins).toHaveLength(2);
   });
 
@@ -57,7 +63,10 @@ describe('optimizer adapters', () => {
       isRequire ? '/nested/native.cjs' : 'data:text/javascript,export{}',
     );
     const isExternal = vi.fn((name: string) => name !== '@scope/allowed');
-    const options = createOptimizerOptions(resolver, root, '7.3.5', { isExternal, resolve });
+    const options = createOptimizerOptions(resolver, root, '7.3.5', {
+      filterRequests: true,
+      ssrExternal: { isExternal, resolve },
+    });
     let callback!: (args: OnResolveArgs) => Promise<OnResolveResult | null>;
     await options.esbuildOptions!.plugins[1]!.setup({
       onResolve(_options: unknown, handler: typeof callback) {
@@ -103,8 +112,8 @@ describe('optimizer adapters', () => {
       isRequire ? '/nested/native.cjs' : 'data:text/javascript,export{}',
     );
     const options = createOptimizerOptions(resolver, root, '8.3.8', {
-      isExternal: (name) => name !== 'allowed',
-      resolve,
+      filterRequests: true,
+      ssrExternal: { isExternal: (name) => name !== 'allowed', resolve },
     });
     const hook = options.rolldownOptions!.plugins[1]!.resolveId;
     if (typeof hook !== 'function') throw new Error('Expected resolveId function');

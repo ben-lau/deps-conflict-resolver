@@ -269,6 +269,21 @@ describe('Vite Plugin', () => {
       expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
     });
 
+    it('keeps request filtering with a passive analysis hook', async () => {
+      const plugin = depsConflictResolverVitePlugin({
+        dependencies: ['legacy'],
+        hooks: { onAnalysisComplete() {} },
+      });
+      const config = await configure(plugin);
+      const filtered = (await applyToEnvironment(plugin, config)) as Plugin;
+      const hook = filtered.resolveId;
+      if (!hook || typeof hook === 'function') throw new Error('Expected a filtered hook');
+      const filter = hook.filter?.id;
+      if (!(filter instanceof RegExp)) throw new Error('Expected a package request filter');
+      expect(filter.test('vue')).toBe(true);
+      expect(filter.test('unrelated')).toBe(false);
+    });
+
     it('builds a fresh environment filter from the active aliases for each configuration', async () => {
       const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
       const filterFor = async (config: ResolvedConfig) => {

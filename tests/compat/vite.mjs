@@ -29,6 +29,17 @@ function link(target, path) {
   mkdirSync(dirname(path), { recursive: true });
   symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
 }
+function customHook(replacement) {
+  return (source, importer) =>
+    source === 'vue' && /[\\/]legacy[\\/]/.test(importer ?? '') ? replacement : undefined;
+}
+function editedHook(source, importer) {
+  return source === 'vue' && /[\\/]legacy[\\/]/.test(importer ?? '') ? 'vue2' : undefined;
+}
+async function hookVersion(bundle, pass) {
+  return (await import(pathToFileURL(bundle.optimized.legacy.file).href + '?' + pass))
+    .runtimeVersion;
+}
 try {
   link(join(engineRoot, 'node_modules/vite'), join(root, 'node_modules/vite'));
   for (const name of ['semver', 'yaml'])
@@ -127,6 +138,55 @@ try {
     hostVersion,
     'Redirect changes must invalidate the optimizer cache',
   );
+
+  const customOptimizer = (beforeResolve, beforeResolveCacheKey, late = false) =>
+    optimizerConfig(
+      {
+        dependencies: [],
+        beforeResolveCacheKey,
+        hooks: late
+          ? {
+              onAnalysisComplete() {
+                this.beforeResolve = beforeResolve;
+              },
+            }
+          : { beforeResolve },
+      },
+      {
+        cacheDir: join(app, 'cache-custom-hook'),
+        optimizeDeps: { include: ['legacy'], noDiscovery: true },
+      },
+    );
+  const legacyHook = customHook('vue2');
+  const hostHook = customHook('vue');
+  assert.equal(legacyHook.toString(), hostHook.toString());
+  const firstHook = await vite.optimizeDeps(await customOptimizer(legacyHook), false);
+  assert.equal(await hookVersion(firstHook, 'first'), legacyVersion);
+  const secondHook = await vite.optimizeDeps(await customOptimizer(hostHook), false);
+  assert.notEqual(firstHook.hash, secondHook.hash);
+  assert.equal(await hookVersion(secondHook, 'second'), hostVersion);
+
+  const keyedHook = await vite.optimizeDeps(
+    await customOptimizer(legacyHook, 'legacy', true),
+    false,
+  );
+  const warmHook = await vite.optimizeDeps(
+    await customOptimizer(legacyHook, 'legacy', true),
+    false,
+  );
+  assert.equal(keyedHook.hash, warmHook.hash);
+  assert.equal(await hookVersion(warmHook, 'keyed'), legacyVersion);
+  const changedHook = await vite.optimizeDeps(await customOptimizer(hostHook, 'host', true), false);
+  assert.notEqual(changedHook.hash, warmHook.hash);
+  assert.equal(await hookVersion(changedHook, 'key-changed'), hostVersion);
+
+  const edited = await vite.optimizeDeps(await customOptimizer(editedHook, 'host', true), false);
+  assert.notEqual(
+    edited.hash,
+    changedHook.hash,
+    'A hook body change must invalidate the optimizer',
+  );
+  assert.equal(await hookVersion(edited, 'body-edited'), legacyVersion);
 
   const hostAlias = join(app, 'host-vue.mjs');
   const aliasOutput = join(app, 'alias-dist');
@@ -448,12 +508,14 @@ try {
         dependencies: ['legacy'],
         offline: true,
         strict,
-        hooks: {
-          onAnalysisComplete: () => {
-            if (worker) workerAnalyses++;
-            else mainAnalyses++;
+        ...(strict && {
+          hooks: {
+            onAnalysisComplete: () => {
+              if (worker) workerAnalyses++;
+              else mainAnalyses++;
+            },
           },
-        },
+        }),
       });
     const mainPlugin = makePlugin(false);
     const workerPlugins = () => [mode === 'shared' ? mainPlugin : makePlugin(true)];
@@ -484,15 +546,17 @@ try {
       },
     );
     assert.deepEqual(messages, ['2.7.16']);
-    assert.equal(mainAnalyses, mode === 'dedicated' ? 0 : 1);
-    assert.equal(workerAnalyses, mode === 'shared' ? 0 : 1);
+    if (strict) {
+      assert.equal(mainAnalyses, mode === 'dedicated' ? 0 : 1);
+      assert.equal(workerAnalyses, mode === 'shared' ? 0 : 1);
+    }
     const mainVersion = mode === 'dedicated' ? '3.0.0' : '2.7.16';
     const mainCode = outputs
       .filter((result) => result.type === 'chunk')
       .map((result) => result.code)
       .join('\n');
     assert(mainCode.includes(JSON.stringify(mainVersion)), 'Main instance lost its resolver');
-    workers[mode] = { version: messages[0], mainAnalyses, workerAnalyses };
+    workers[mode] = { version: messages[0], ...(strict && { mainAnalyses, workerAnalyses }) };
   }
   process.stdout.write(
     JSON.stringify(

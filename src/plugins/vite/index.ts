@@ -1,5 +1,6 @@
 import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite';
-import type { PluginConfig, AliasPathMapping } from '../../types/index';
+import { randomUUID } from 'node:crypto';
+import type { PluginConfig, PluginHooks, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
@@ -75,6 +76,9 @@ export interface VitePluginOptions extends PluginConfig {
 
   /** Bundle affected packages for SSR builds and pre-bundle them for SSR development. */
   ssr?: 'manual' | 'auto';
+
+  /** Stable identity of the state read by a custom beforeResolve hook for pre-bundle reuse. */
+  beforeResolveCacheKey?: string;
 }
 
 function mergeOptimizer(
@@ -99,17 +103,17 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   let isSsrExternal: SsrExternalPolicy['isExternal'] | undefined;
   let requestFilter: RegExp | undefined;
   let configured: ResolvedConfig | undefined;
+  let filterRequests = true;
+  let optimizerHookKey: string | undefined;
 
   const {
     enableInDev = true,
     enableInBuild = true,
     ssr = 'manual',
     hooks,
+    beforeResolveCacheKey,
     ...resolverOptions
   } = options;
-  // Strict snapshots can report a change on any request. Custom hooks also
-  // receive requests outside the active aliases.
-  const filterRequests = !hooks?.beforeResolve && !resolverOptions.strict;
 
   function enabledFor(command: ResolvedConfig['command']): boolean {
     return command === 'serve' ? enableInDev : enableInBuild;
@@ -133,7 +137,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     // 获取分析结果
     const analysisResult = activeResolver.getAnalysisResult();
 
-    if (!analysisResult || analysisResult.aliasMappings.length === 0) {
+    if (!analysisResult) return undefined;
+    if (aliasPathMappings.length === 0) {
       if (activeResolver.getDiagnostics().some((diagnostic) => diagnostic.severity === 'error')) {
         logger.warn(
           'No alias mappings available; inspect resolver diagnostics for unresolved conditions',
@@ -141,18 +146,12 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       } else {
         logger.info('No aliases needed');
       }
-      return undefined;
-    }
-
-    // 获取别名路径映射并转换为 Vite 格式
-    if (aliasPathMappings.length === 0) {
-      logger.info('No active aliases available');
-      return undefined;
+      if (optimizerHookKey === undefined) return undefined;
+    } else {
+      logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
     }
     const activeOptions = activeResolver.getOptions();
     const projectRoot = activeOptions.projectRoot;
-
-    logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
 
     // 收集需要包含在 optimizeDeps 中的别名包
     const aliasPackages = Array.from(new Set(aliasPathMappings.map((m) => m.aliasName)));
@@ -225,30 +224,27 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 
     // 创建 esbuild 插件用于预构建阶段的别名解析
+    const optimizerOptions = { filterRequests, hookKey: optimizerHookKey };
     const optimizeDeps = createOptimizerOptions(
       activeResolver,
       projectRoot,
       viteVersion,
-      undefined,
-      filterRequests,
+      optimizerOptions,
     );
     ssrExternalEnabled =
       ssr === 'auto' && command === 'serve' && external === true && manualNoExternal !== true;
     isSsrExternal = (packageName) => !keepsInternal(packageName);
     const ssrOptimizeDeps = ssrExternalEnabled
-      ? createOptimizerOptions(
-          activeResolver,
-          projectRoot,
-          viteVersion,
-          {
+      ? createOptimizerOptions(activeResolver, projectRoot, viteVersion, {
+          ...optimizerOptions,
+          ssrExternal: {
             isExternal: (packageName) => !keepsInternal(packageName),
             resolve: (source, importer, isRequire) => {
               if (!resolveSsrExternal) throw new Error('SSR external resolver is not initialized');
               return resolveSsrExternal(source, importer, isRequire);
             },
           },
-          filterRequests,
-        )
+        })
       : optimizeDeps;
 
     // 返回要合并的配置
@@ -305,6 +301,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       if (resolverOwner(config) !== config) return;
       resolver = null;
       requestFilter = undefined;
+      optimizerHookKey = undefined;
       configured = undefined;
       ssrExternalEnabled = false;
       resolveSsrExternal = undefined;
@@ -313,14 +310,39 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         configured = config;
         return;
       }
+      const resolverHooks: PluginHooks | undefined = hooks && {
+        get onAnalysisComplete() {
+          return hooks.onAnalysisComplete?.bind(hooks);
+        },
+        get onInstallComplete() {
+          return hooks.onInstallComplete?.bind(hooks);
+        },
+      };
       resolver = new DepsConflictResolver(
         {
           ...resolverOptions,
           projectRoot: resolverOptions.projectRoot ?? config.root,
         },
-        hooks,
+        resolverHooks,
       );
       await resolver.initialize();
+      // Capture the callback after preparation so build and pre-bundling use
+      // the same registration. A declared function can delegate at runtime.
+      const beforeResolve = hooks?.beforeResolve;
+      if (resolverHooks && beforeResolve) {
+        resolverHooks.beforeResolve = beforeResolve.bind(hooks);
+        optimizerHookKey =
+          beforeResolveCacheKey === undefined
+            ? randomUUID()
+            : JSON.stringify([
+                beforeResolveCacheKey,
+                Function.prototype.toString.call(beforeResolve),
+              ]);
+      } else {
+        optimizerHookKey = undefined;
+      }
+      // Strict snapshots can report a change on any eligible request.
+      filterRequests = !beforeResolve && !resolverOptions.strict;
       const aliasPathMappings = resolver.getAliasPathMappings();
       if (filterRequests) requestFilter = aliasRequestFilter(aliasPathMappings);
       configured = config;
@@ -328,6 +350,11 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       // Only their module resolver is ours; keep those shared objects intact.
       if (config.isWorker) return;
       if (config.command === 'serve') {
+        if (beforeResolve && beforeResolveCacheKey === undefined) {
+          logger.info(
+            'Vite will rebuild the pre-bundle for the custom beforeResolve hook. Set beforeResolveCacheKey to enable reuse while its inputs are unchanged.',
+          );
+        }
         const watched = new Set(config.configFileDependencies);
         for (const file of resolver.getAnalysisResult()?.watchFiles ?? []) {
           const path = normalizePath(file);

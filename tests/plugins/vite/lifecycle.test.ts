@@ -7,9 +7,11 @@ import { runInNewContext } from 'node:vm';
 import { build, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
+import type { PluginHooks } from '../../../src/types';
 import { mockRegistry } from '../../support/registry';
 
 const roots: string[] = [];
+const redirectToHostVue = (source: string) => (source === 'vue2' ? 'vue' : undefined);
 function fixture(version: string) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'deps-vite-lifecycle-')));
   roots.push(root);
@@ -52,6 +54,37 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it.each(['analysis', 'build'] as const)(
+    'honors a hook registered during analysis or delegated during build (%s)',
+    async (phase) => {
+      const root = fixture('2.7.16');
+      const entry = join(root, 'entry.js');
+      writeFileSync(entry, 'export {version} from "vue2";');
+      const hooks: PluginHooks = {};
+      let delegate: PluginHooks['beforeResolve'];
+      const register = () => {
+        if (phase === 'analysis') hooks.beforeResolve = redirectToHostVue;
+        else delegate = redirectToHostVue;
+      };
+      if (phase === 'analysis') hooks.onAnalysisComplete = register;
+      else hooks.beforeResolve = (source, importer) => delegate?.(source, importer);
+      await build({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [
+          plugin({ dependencies: phase === 'analysis' ? [] : ['legacy'], offline: true, hooks }),
+          ...(phase === 'build' ? [{ name: 'register-resolver', buildStart: register }] : []),
+        ],
+        build: {
+          lib: { entry, formats: ['cjs'], fileName: () => 'result.cjs' },
+          outDir: join(root, 'dist'),
+        },
+      });
+      expect(createRequire(import.meta.url)(join(root, 'dist/result.cjs')).version).toBe('3.0.0');
+    },
+  );
+
   it.each([false, true])(
     'initializes a Worker-only instance when a main instance is also present: %s',
     async (withMain) => {

@@ -1,10 +1,16 @@
 import type { Plugin } from 'vite';
 import type { Plugin as EsbuildPlugin } from 'esbuild';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { DepsConflictResolver } from '../../core/resolver';
 import type { AliasPathMapping } from '../../types';
+import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
 import { escapeRegex } from '../../utils/regex';
+
+// Bump when the optimizer's redirect policy changes.
+const OPTIMIZER_CACHE_VERSION = 1;
+const bareRequestFilter = /^[^./]/;
 
 export interface OptimizerOptions {
   include: string[];
@@ -15,6 +21,12 @@ export interface OptimizerOptions {
 export interface SsrExternalPolicy {
   isExternal: (packageName: string) => boolean;
   resolve: (source: string, importer: string, isRequire: boolean) => Promise<string | undefined>;
+}
+
+interface OptimizerResolveOptions {
+  filterRequests: boolean;
+  hookKey?: string;
+  ssrExternal?: SsrExternalPolicy;
 }
 
 export function aliasRequestFilter(mappings: readonly AliasPathMapping[]): RegExp | undefined {
@@ -78,15 +90,15 @@ function esbuildPlugin(
   resolver: DepsConflictResolver,
   projectRoot: string,
   fingerprint: string,
+  filter: RegExp,
 ): EsbuildPlugin {
+  const resolvingRedirect = {};
   return {
     name: 'deps-conflict-resolver-esbuild-' + fingerprint,
     setup(build) {
-      const filter = aliasRequestFilter(resolver.getAliasPathMappings());
-      if (!filter) return;
       build.onResolve({ filter }, (args) => {
-        if (!args.importer) return null;
-        const redirected = resolver.resolveModule(args.path, args.importer);
+        if (args.pluginData === resolvingRedirect) return null;
+        const redirected = resolveOptimizerRequest(resolver, args.path, args.importer);
         if (!redirected) return null;
         if (typeof build.resolve === 'function') {
           // Preserve external/namespace/sideEffects/suffix and diagnostics.
@@ -94,6 +106,7 @@ function esbuildPlugin(
             kind: args.kind,
             resolveDir: projectRoot,
             importer: args.importer,
+            pluginData: resolvingRedirect,
           });
         }
         try {
@@ -113,15 +126,15 @@ function rolldownPlugin(
   resolver: DepsConflictResolver,
   projectRoot: string,
   fingerprint: string,
-  filter: RegExp | undefined,
+  filter: RegExp,
 ): Plugin {
   return {
     name: 'deps-conflict-resolver-rolldown-' + fingerprint,
     resolveId: {
-      ...(filter && { filter: { id: filter } }),
+      filter: { id: filter },
       handler(source, importer, resolveOptions) {
-        if (!importer || (filter && !filter.test(source))) return null;
-        const redirected = resolver.resolveModule(source, importer);
+        if (!filter.test(source)) return null;
+        const redirected = resolveOptimizerRequest(resolver, source, importer);
         if (!redirected) return null;
         return this.resolve(redirected, join(projectRoot, 'package.json'), {
           ...resolveOptions,
@@ -135,26 +148,34 @@ function rolldownPlugin(
   };
 }
 
+function resolveOptimizerRequest(
+  resolver: DepsConflictResolver,
+  request: string,
+  importer?: string,
+): string | null {
+  if (!importer || isPathLikeRequest(request) || isVirtualModuleRequest(request)) return null;
+  return resolver.resolveModule(request, importer);
+}
+
 export function createOptimizerOptions(
   resolver: DepsConflictResolver,
   projectRoot: string,
   viteVersion: string,
-  ssrExternal?: SsrExternalPolicy,
-  filterRequests = true,
+  { filterRequests, hookKey, ssrExternal }: OptimizerResolveOptions = { filterRequests: true },
 ): OptimizerOptions {
   const mappings = resolver.getAliasPathMappings();
   const include = [...new Set(mappings.map((mapping) => mapping.aliasName))];
   // Vite hashes optimizer plugin names across esbuild and Rolldown releases.
-  const fingerprint = resolver.getResolutionFingerprint();
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify([OPTIMIZER_CACHE_VERSION, resolver.getResolutionFingerprint(), hookKey]))
+    .digest('hex');
+  const filter = filterRequests ? aliasRequestFilter(mappings) : bareRequestFilter;
   if (Number.parseInt(viteVersion, 10) >= 8) {
-    const filter = filterRequests ? aliasRequestFilter(mappings) : undefined;
     return {
       include,
       rolldownOptions: {
         plugins: [
-          ...(!filterRequests || filter
-            ? [rolldownPlugin(resolver, projectRoot, fingerprint, filter)]
-            : []),
+          ...(filter ? [rolldownPlugin(resolver, projectRoot, fingerprint, filter)] : []),
           ...(ssrExternal ? [rolldownExternalPlugin(ssrExternal)] : []),
         ],
       },
@@ -164,7 +185,7 @@ export function createOptimizerOptions(
     include,
     esbuildOptions: {
       plugins: [
-        esbuildPlugin(resolver, projectRoot, fingerprint),
+        ...(filter ? [esbuildPlugin(resolver, projectRoot, fingerprint, filter)] : []),
         ...(ssrExternal ? [esbuildExternalPlugin(ssrExternal)] : []),
       ],
     },
