@@ -283,13 +283,17 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     logger.info('Applying DepsConflictResolverWebpackPlugin...');
 
     let runPrepared = false;
-    let verifyBuild: (() => void) | undefined;
+    // Webpack creates a factory for each compilation, including child compilers.
+    // The factory also identifies direct compile() calls that prepare lazily.
+    const verifyBuild = new WeakMap<NormalModuleFactory, () => void>();
     const guarded = Boolean(this.config.strict && compiler.hooks.afterCompile);
-    const guardBuild = () => {
-      if (guarded && this.initialized && this.resolver)
-        verifyBuild ??= getResolverBuild(this.resolver).guardGeneration();
+    const guardBuild = (factory: NormalModuleFactory) => {
+      if (guarded && this.initialized && this.resolver && !verifyBuild.has(factory))
+        verifyBuild.set(factory, getResolverBuild(this.resolver).guardGeneration());
     };
-    compiler.hooks.afterCompile?.tap(PLUGIN_NAME, () => verifyBuild?.());
+    compiler.hooks.afterCompile?.tap(PLUGIN_NAME, (compilation) => {
+      verifyBuild.get(compilation.params.normalModuleFactory)?.();
+    });
     compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, async () => {
       runPrepared = false;
       await this.initialize(compiler);
@@ -309,9 +313,8 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     });
 
     let legacyCacheHookInstalled = false;
-    compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation) => {
-      verifyBuild = undefined;
-      guardBuild();
+    compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation, params) => {
+      if (guarded) guardBuild(params.normalModuleFactory);
       const watched = this.resolver && getResolverBuild(this.resolver).snapshot().watchFiles;
       for (const file of watched?.existing ?? this.analysisResult?.watchFiles ?? [])
         compilation.fileDependencies.add(file);
@@ -375,7 +378,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       const finish = (resolveData: ResolveData, callback: ResolveCallback) => {
         try {
           if (!ready) {
-            guardBuild();
+            guardBuild(nmf);
             ready = true;
           }
           if (

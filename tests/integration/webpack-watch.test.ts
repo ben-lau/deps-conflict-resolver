@@ -106,6 +106,52 @@ it('attempts permissive preparation once per ordinary run and recovers on the ne
   }
 });
 
+it.each(['run', 'compile'] as const)(
+  'retains the parent strict guard when a child compiler runs during %s',
+  async (method) => {
+    const { root, consumer, manifest, entry, dist } = linkedConsumerFixture();
+    json(consumer, { ...manifest, peerDependencies: { vue: '^3' } });
+    writeFileSync(entry, 'module.exports = require("legacy");');
+    const plugin = new DepsConflictResolverWebpackPlugin({
+      dependencies: ['legacy'],
+      offline: true,
+      strict: true,
+    });
+    const compiler = webpack({
+      context: root,
+      mode: 'development',
+      target: 'node',
+      entry,
+      output: { path: dist, filename: 'entry.cjs' },
+      plugins: [plugin],
+    });
+    compiler.hooks.finishMake.tapPromise('ChangeDependenciesBeforeChild', async (compilation) => {
+      if (compilation.compiler !== compiler) return;
+      json(consumer, manifest);
+      const resolver = plugin.getResolver()!;
+      await resolver.installDependencies();
+      expect(resolver.resolveModule('vue', join(consumer, 'index.js'))).toBe('vue2');
+      const child = compilation.createChildCompiler('dependency-review', { filename: 'child.cjs' });
+      await new Promise<void>((resolve, reject) =>
+        child.runAsChild((error) => (error ? reject(error) : resolve())),
+      );
+    });
+    try {
+      await expect(
+        new Promise<void>((resolve, reject) =>
+          compiler[method]((error) => (error ? reject(error) : resolve())),
+        ),
+      ).rejects.toThrow('Dependencies changed during compilation');
+      expect(existsSync(join(dist, 'entry.cjs'))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        compiler.close((error) => (error ? reject(error) : resolve())),
+      );
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 it('resolves a hook-relative request from the original importer', async () => {
   const { root, consumer, entry, dist } = linkedConsumerFixture();
   writeFileSync(entry, 'module.exports = require("legacy");');
@@ -589,7 +635,7 @@ it.each(['initial exception', 'refresh exception', 'refresh diagnostic'] as cons
         let phase = initialFailure ? 1 : 0;
         let builtPhase = -1;
         let verified = -1;
-        compiler.hooks.watchRun.tap('RecordRepairPhase', () => {
+        compiler.hooks.watchRun.tap({ name: 'RecordRepairPhase', stage: -1000 }, () => {
           builtPhase = phase;
         });
         deadline = setTimeout(() => reject(new Error('Watch did not react to the repair')), 5000);
