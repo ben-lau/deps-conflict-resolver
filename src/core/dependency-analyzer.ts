@@ -1000,6 +1000,7 @@ export class DependencyAnalyzer {
     const pending: SearchState[] = [{ plans: start, links: initialLinks }];
     const needsVersions = new Map<string, Set<SearchState>>();
     const unavailableVersions = new Set<string>();
+    const uncheckedVersions = new Set<string>();
     const canFetch = this.options.autoInstall && !this.options.offline;
     let registryLookups = 0;
     while (pending.length > 0 || needsVersions.size > 0) {
@@ -1030,10 +1031,14 @@ export class DependencyAnalyzer {
       );
       for (const plan of conflicts) {
         const name = plan.mapping.originalName;
-        if (canFetch && !versionsByPackage.has(name)) {
-          const waiting = needsVersions.get(name) ?? new Set<SearchState>();
-          waiting.add(state);
-          needsVersions.set(name, waiting);
+        if (!versionsByPackage.has(name)) {
+          if (canFetch) {
+            const waiting = needsVersions.get(name) ?? new Set<SearchState>();
+            waiting.add(state);
+            needsVersions.set(name, waiting);
+          } else {
+            uncheckedVersions.add(name);
+          }
         }
         for (const alternative of this.peerPlanAlternatives(plan, plans, versionsByPackage)) {
           const next = this.rebuildAliasPlans(
@@ -1069,6 +1074,15 @@ export class DependencyAnalyzer {
         severity: 'warning',
         packageName,
         message: 'Could not retrieve alternative peer alias versions for ' + packageName,
+      });
+    }
+    if (uncheckedVersions.size > 0) {
+      const packageName = [...uncheckedVersions].sort().join(', ');
+      this.diagnostics.push({
+        code: 'ALIAS_PEER_CANDIDATES_UNCHECKED',
+        severity: 'warning',
+        packageName,
+        message: 'Alternative registry versions remain unchecked for ' + packageName,
       });
     }
     return undefined;

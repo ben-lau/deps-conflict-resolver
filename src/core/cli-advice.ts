@@ -33,6 +33,8 @@ const actions: Partial<Record<ResolverDiagnostic['code'], string>> = {
     'Reduce the candidate versions with verified peerOverrides or preinstall compatible exact alias versions.',
   ALIAS_PEER_UNSATISFIED:
     'Inspect the peers of both the alias and its consumers. Install versions that satisfy both requirements.',
+  ALIAS_PEER_CANDIDATES_UNCHECKED:
+    'Run deps-conflict-resolver prepare with the same entries in online mode. Omit --offline and set offline: false and preparedPlan: false in any shared config.',
   ALIAS_METADATA_UNAVAILABLE: 'Check access to the alias manifest, then rerun prepare online.',
   TRANSITIVE_PEER_CONFLICT:
     'Verify the reported consumer’s peer range. Add it as an entry if visible from the host, or correct its declaration with peerOverrides.',

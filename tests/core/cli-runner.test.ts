@@ -108,6 +108,74 @@ describe('doctor and prepare commands', () => {
     );
   });
 
+  it.each([false, true])(
+    'explains unchecked remote alias candidates in doctor (offline=%s)',
+    async (offline) => {
+      writeAlias();
+      const config = join(root, 'resolver.json');
+      writeFileSync(
+        config,
+        JSON.stringify({
+          dependencies: ['legacy'],
+          offline,
+          preparedPlan: offline,
+          registry: 'https://unused.invalid/',
+          packageManager: 'npm',
+        }),
+      );
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({
+          name: 'host',
+          dependencies: {
+            legacy: '1.0.0',
+            vue: '3.5.0',
+            vue2: 'npm:vue@2.7.16',
+            renderer: '2.0.0',
+            renderer1: 'npm:renderer@1.0.0',
+          },
+        }),
+      );
+      for (const [name, manifest] of Object.entries({
+        legacy: {
+          name: 'legacy',
+          version: '1.0.0',
+          peerDependencies: { vue: '^2', renderer: '^1' },
+        },
+        renderer: { name: 'renderer', version: '2.0.0' },
+        renderer1: { name: 'renderer', version: '1.0.0', peerDependencies: { vue: '~2.6' } },
+      })) {
+        const directory = join(root, 'node_modules', name);
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(join(directory, 'package.json'), JSON.stringify(manifest));
+      }
+      const fetch = mockRegistry({ name: 'vue', version: '2.6.14' });
+      const exit = await runCli(
+        ['doctor', '--root', root, '--config', config, '--strict', '--json'],
+        output,
+      );
+      const report = JSON.parse(stdout);
+      expect(exit).toBe(1);
+      expect(report.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ code: 'ALIAS_PEER_UNSATISFIED', severity: 'error' }),
+          expect.objectContaining({
+            code: 'ALIAS_PEER_CANDIDATES_UNCHECKED',
+            severity: 'warning',
+            packageName: expect.stringContaining('vue'),
+          }),
+        ]),
+      );
+      expect(report.actions).toContainEqual(
+        expect.objectContaining({
+          code: 'ALIAS_PEER_CANDIDATES_UNCHECKED',
+          message: expect.stringMatching(/prepare.*offline: false.*preparedPlan: false/),
+        }),
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
   it('guides init with a minimal offline configuration and only writes a new file on request', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch');
     const config = join(root, 'legacy-deps.json');
