@@ -677,6 +677,62 @@ export class DependencyAnalyzer {
   }
 
   /**
+   * 检查某个宿主未声明的 peer 请求是否已由其所属的中间 workspace 包自洽封装并满足。
+   * 仅当请求链路上的祖先 workspace 包在 dependencies/optionalDependencies 中显式声明了该包，
+   * 且从请求包物理路径可解析到满足范围的真实安装包时返回 true（避免把 pnpm hoist 幽灵依赖误判为已声明）。
+   */
+  private isSatisfiedByOwningWorkspace(
+    packageName: string,
+    request: DependencyPath,
+    resolvedRange: string,
+  ): boolean {
+    if (request.path.length <= 1 || !request.packagePath) {
+      return false;
+    }
+
+    let currentDir = this.options.projectRoot;
+    let declaredByWorkspaceAncestor = false;
+    for (let index = 0; index < request.path.length - 1; index++) {
+      const segment = request.path[index]!;
+      const ancestorPath = findPackagePath(segment, currentDir);
+      if (!ancestorPath) {
+        return false;
+      }
+      const canonicalAncestor = canonicalPath(ancestorPath);
+      this.watchFiles.add(join(canonicalAncestor, 'package.json'));
+      const ancestorManifest = readPackageJsonCached(canonicalAncestor);
+      if (ancestorManifest) {
+        const declaredSpec =
+          ancestorManifest.dependencies?.[packageName] ??
+          ancestorManifest.optionalDependencies?.[packageName];
+        if (typeof declaredSpec === 'string') {
+          const npmAlias = parseNpmAlias(declaredSpec);
+          if (!npmAlias || npmAlias[0] === packageName) {
+            declaredByWorkspaceAncestor = true;
+          }
+        }
+      }
+      currentDir = canonicalAncestor;
+    }
+
+    if (!declaredByWorkspaceAncestor) {
+      return false;
+    }
+
+    const { packagePath: installedPath, pkgJson: installedManifest } = this.resolvePackageJson(
+      packageName,
+      request.packagePath,
+    );
+    if (!installedPath || !installedManifest?.version) {
+      return false;
+    }
+    if (installedManifest.name && installedManifest.name !== packageName) {
+      return false;
+    }
+    return satisfies(installedManifest.version, resolvedRange);
+  }
+
+  /**
    * 分析 peer 依赖冲突
    * 只有当主工程已安装某个依赖，且 peerDeps 要求的版本不兼容时，才需要别名
    */
@@ -692,20 +748,10 @@ export class DependencyAnalyzer {
       // 只有声明过的包才会参与冲突判定
       const mainVersion = isDeclared ? this.getMainProjectVersion(packageName) : null;
       const isInstalled = mainVersion !== null;
-      if (!isDeclared || !isInstalled) {
-        this.diagnostics.push({
-          code: isDeclared ? 'PEER_NOT_INSTALLED' : 'PEER_NOT_DECLARED',
-          severity: 'error',
-          packageName,
-          requestedBy: requestedBy.map((request) => request.path.join('>')),
-          message:
-            packageName +
-            (isDeclared ? ' is declared but not installed' : ' is not declared by the host'),
-        });
-      }
 
       const conflictingRanges: DependencyPath[] = [];
       const satisfiedRanges: DependencyPath[] = [];
+      const undeclaredRequests: DependencyPath[] = [];
 
       for (const request of requestedBy) {
         const resolvedRange =
@@ -714,12 +760,38 @@ export class DependencyAnalyzer {
 
         if (mainVersion && satisfies(mainVersion, resolvedRange)) {
           satisfiedRanges.push(request);
+        } else if (
+          !isDeclared &&
+          this.isSatisfiedByOwningWorkspace(packageName, request, resolvedRange)
+        ) {
+          satisfiedRanges.push(request);
         } else {
           conflictingRanges.push({
             ...request,
             requiredRange: resolvedRange,
           });
+          if (!isDeclared) {
+            undeclaredRequests.push(request);
+          }
         }
+      }
+
+      if (!isDeclared && undeclaredRequests.length > 0) {
+        this.diagnostics.push({
+          code: 'PEER_NOT_DECLARED',
+          severity: 'error',
+          packageName,
+          requestedBy: undeclaredRequests.map((request) => request.path.join('>')),
+          message: packageName + ' is not declared by the host',
+        });
+      } else if (isDeclared && !isInstalled) {
+        this.diagnostics.push({
+          code: 'PEER_NOT_INSTALLED',
+          severity: 'error',
+          packageName,
+          requestedBy: requestedBy.map((request) => request.path.join('>')),
+          message: packageName + ' is declared but not installed',
+        });
       }
 
       // hasConflict: 纯版本兼容性判断——存在不满足的 peer 范围即为 true
@@ -1862,6 +1934,13 @@ export class DependencyAnalyzer {
       for (const request of requests) {
         const requestedBy = request.path.join('>');
         if (!requestedBy) continue;
+
+        const resolvedRange =
+          this.workspaceDetector.resolveVersionSpec(peerName, request.requiredRange) ??
+          request.requiredRange;
+        if (this.isSatisfiedByOwningWorkspace(peerName, request, resolvedRange)) {
+          continue;
+        }
 
         // 未声明：缺失（不自动安装，只提示）
         missing.push({

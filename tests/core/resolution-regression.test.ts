@@ -1489,4 +1489,107 @@ describe('resolution correctness with installed packages', () => {
     expect(resolver.resolveModule('vue-router', join(legacy, 'index.js'))).toBe('vue-router3');
     expect(resolver.resolveModule('vue', join(nestedRouter, 'index.js'))).toBeNull();
   });
+
+  it.each([
+    'encapsulated',
+    'peer-pass-through',
+    'incompatible-version',
+    'hoisted-undeclared',
+    'mixed-host-and-workspace',
+  ])(
+    'treats workspace-encapsulated peers as satisfied only when owned and compatible: %s',
+    async (mode) => {
+      const root = project({
+        workspaces: ['apps/*', 'packages/*'],
+        dependencies: { vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+      });
+      const app = join(root, 'apps/host');
+      const sharedUi = join(root, 'packages/shared-ui');
+      mkdirSync(app, { recursive: true });
+      mkdirSync(sharedUi, { recursive: true });
+      writeFileSync(
+        join(app, 'package.json'),
+        JSON.stringify({
+          name: 'host',
+          version: '1.0.0',
+          dependencies: {
+            'shared-ui': 'workspace:*',
+            ...(mode === 'mixed-host-and-workspace' ? { legacy: '1.0.0' } : {}),
+          },
+        }),
+      );
+      writeFileSync(
+        join(sharedUi, 'package.json'),
+        JSON.stringify({
+          name: 'shared-ui',
+          version: '1.0.0',
+          dependencies: {
+            legacy: '1.0.0',
+            ...(mode === 'encapsulated' ||
+            mode === 'incompatible-version' ||
+            mode === 'mixed-host-and-workspace'
+              ? { 'element-ui': '^2.15.0' }
+              : {}),
+          },
+          ...(mode === 'peer-pass-through'
+            ? { peerDependencies: { 'element-ui': '^2.15.0' } }
+            : {}),
+        }),
+      );
+      mkdirSync(join(app, 'node_modules'), { recursive: true });
+      symlinkSync(
+        sharedUi,
+        join(app, 'node_modules/shared-ui'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+
+      pkg(root, 'vue', { version: '3.5.0' });
+      pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+      const legacyInWorkspace = pkg(sharedUi, 'legacy', {
+        peerDependencies: { vue: '^2.0.0', 'element-ui': '^2.15.0' },
+      });
+      if (mode === 'mixed-host-and-workspace') {
+        pkg(app, 'legacy', {
+          peerDependencies: { vue: '^2.0.0', 'element-ui': '^2.15.0' },
+        });
+      }
+
+      if (mode === 'hoisted-undeclared' || mode === 'peer-pass-through') {
+        pkg(root, 'element-ui', { version: '2.15.14', peerDependencies: { vue: '^2.0.0' } });
+      } else {
+        pkg(sharedUi, 'element-ui', {
+          version: mode === 'incompatible-version' ? '1.4.0' : '2.15.14',
+          peerDependencies: { vue: '^2.0.0' },
+        });
+      }
+
+      const options = { ...baseOptions(app, ['legacy']), offline: true };
+      const resolver = await createResolver(options);
+      const diagnostics = resolver
+        .getDiagnostics()
+        .filter((diagnostic) => diagnostic.code === 'PEER_NOT_DECLARED');
+      const missing = resolver.getAnalysisResult()?.missingFirstLevelPeers ?? [];
+
+      if (mode === 'encapsulated') {
+        expect(diagnostics).toEqual([]);
+        expect(missing).toEqual([]);
+        expect(resolver.resolveModule('vue', join(legacyInWorkspace, 'index.js'))).toBe('vue2');
+        await expect(createResolver({ ...options, strict: true })).resolves.toBeDefined();
+      } else {
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0]).toMatchObject({
+          code: 'PEER_NOT_DECLARED',
+          severity: 'error',
+          packageName: 'element-ui',
+          requestedBy: mode === 'mixed-host-and-workspace' ? ['legacy'] : ['shared-ui>legacy'],
+        });
+        expect(missing.map((item) => item.requestedBy)).toEqual(
+          mode === 'mixed-host-and-workspace' ? ['legacy'] : ['shared-ui>legacy'],
+        );
+        await expect(createResolver({ ...options, strict: true })).rejects.toBeInstanceOf(
+          ResolutionError,
+        );
+      }
+    },
+  );
 });
