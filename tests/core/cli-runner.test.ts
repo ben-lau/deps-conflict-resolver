@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { buildSync } from 'esbuild';
 import { tmpdir } from 'node:os';
@@ -137,6 +145,34 @@ describe('doctor and prepare commands', () => {
     });
   });
 
+  it('prints a reviewable config for an exports-only source hint without writing an empty config', async () => {
+    const legacy = join(root, 'node_modules/legacy');
+    const config = join(root, 'resolver-options.json');
+    writeFileSync(
+      join(legacy, 'package.json'),
+      JSON.stringify({
+        name: 'legacy',
+        version: '1.0.0',
+        peerDependencies: { vue: '>=2' },
+        exports: { '.': { import: './component.mjs' } },
+      }),
+    );
+    writeFileSync(join(legacy, 'component.mjs'), 'export default Vue.extend({});');
+    expect(await runCli(['init', '--root', root, '--write-config', config, '--json'], output)).toBe(
+      0,
+    );
+    expect(existsSync(config)).toBe(false);
+    const report = JSON.parse(stdout);
+    expect(report).not.toHaveProperty('configFile');
+    expect(report.sourceHints).toMatchObject([
+      {
+        packageName: 'legacy',
+        config: { dependencies: ['legacy'], peerOverrides: { 'legacy@1.0.0': { vue: '^2' } } },
+      },
+    ]);
+    expect(report).not.toHaveProperty('suggestedConfig');
+  });
+
   it('warns when a visible optional peer is incompatible and passes in strict mode', async () => {
     writeFileSync(
       join(root, 'node_modules/legacy/package.json'),
@@ -154,6 +190,37 @@ describe('doctor and prepare commands', () => {
       aliases: [],
       diagnostics: [{ code: 'OPTIONAL_PEER_MISMATCH', severity: 'warning', packageName: 'vue' }],
     });
+  });
+
+  it('limits optional peer warnings to configured entries and direct dependencies', async () => {
+    const optionalVue = {
+      peerDependencies: { vue: '^2' },
+      peerDependenciesMeta: { vue: { optional: true } },
+    };
+    for (const [name, deps] of [
+      ['legacy', { direct: '1.0.0' }],
+      ['direct', { deep: '1.0.0' }],
+      ['deep', {}],
+    ] as const) {
+      const directory = join(root, 'node_modules', name);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(
+        join(directory, 'package.json'),
+        JSON.stringify({
+          name,
+          version: '1.0.0',
+          dependencies: deps,
+          ...optionalVue,
+        }),
+      );
+    }
+    expect(await runCli(['doctor', 'legacy', '--root', root, '--offline', '--json'], output)).toBe(
+      0,
+    );
+    expect(JSON.parse(stdout).diagnostics).toMatchObject([
+      { code: 'OPTIONAL_PEER_MISMATCH', requestedBy: ['legacy'] },
+      { code: 'OPTIONAL_PEER_MISMATCH', requestedBy: ['direct'] },
+    ]);
   });
 
   it('reports measured analysis and filesystem work without probing a registry offline', async () => {

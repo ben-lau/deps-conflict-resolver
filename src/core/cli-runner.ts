@@ -162,20 +162,25 @@ export async function runCli(
     }
     const diagnostics = failure?.diagnostics ?? resolver.getDiagnostics();
     const analysis = build.snapshot().analysis;
-    const suggestedConfig =
+    const suggestedDependencies =
       command === 'init'
+        ? selectedPackages
+          ? dependencies
+          : suggestEntryPackages(analysis!, dependencies)
+        : [];
+    const suggestedConfig =
+      suggestedDependencies.length > 0
         ? {
-            dependencies: selectedPackages
-              ? dependencies
-              : suggestEntryPackages(analysis!, dependencies),
+            dependencies: suggestedDependencies,
             ...(options.aliasPrefix !== undefined && { aliasPrefix: options.aliasPrefix }),
             ...(options.peerOverrides && { peerOverrides: options.peerOverrides }),
             ...(options.includeRedirects && { includeRedirects: options.includeRedirects }),
             ...(options.excludeRedirects && { excludeRedirects: options.excludeRedirects }),
           }
         : undefined;
-    if (outputConfig && suggestedConfig) {
-      await writeFile(outputConfig, JSON.stringify(suggestedConfig, null, 2) + '\n', {
+    const writtenConfig = suggestedConfig ? outputConfig : undefined;
+    if (writtenConfig) {
+      await writeFile(writtenConfig, JSON.stringify(suggestedConfig, null, 2) + '\n', {
         flag: 'wx',
       });
     }
@@ -204,7 +209,7 @@ export async function runCli(
       ...(plan?.failure && { planFailure: plan.failure }),
       ...(sourceHints && { sourceHints: hints }),
       ...(suggestedConfig && { suggestedConfig }),
-      ...(outputConfig && { configFile: outputConfig }),
+      ...(writtenConfig && { configFile: writtenConfig }),
     };
     if (json) {
       output.stdout(JSON.stringify(report, null, 2) + '\n');
@@ -244,15 +249,20 @@ export async function runCli(
         output.stdout(JSON.stringify(hint.config, null, 2) + '\n');
       }
       if (suggestedConfig) {
-        if (outputConfig) output.stdout('Wrote resolver options to ' + outputConfig + '\n');
+        if (writtenConfig) output.stdout('Wrote resolver options to ' + writtenConfig + '\n');
         else
           output.stdout(
             'Suggested resolver options\n' + JSON.stringify(suggestedConfig, null, 2) + '\n',
           );
-        if (suggestedConfig.dependencies.length > 0)
-          output.stdout(
-            'Run deps-conflict-resolver prepare --config <options.json> --strict --write-plan, then import the same options in the bundler with preparedPlan: true and strict: true.\n',
-          );
+        output.stdout(
+          'Run deps-conflict-resolver prepare --config <options.json> --strict --write-plan, then import the same options in the bundler with preparedPlan: true and strict: true.\n',
+        );
+      } else if (command === 'init') {
+        output.stdout(
+          hints.length
+            ? 'Review the suggested source overrides and save confirmed settings before running prepare --config.\n'
+            : 'No dependency conflicts requiring a resolver configuration were identified.\n',
+        );
       }
       if (report.timings) output.stdout(JSON.stringify(report.timings, null, 2) + '\n');
       if (plan?.file) output.stdout('Saved dependency plan to ' + plan.file + '\n');

@@ -8,7 +8,7 @@ import { mockRegistry } from '../support/registry';
 import * as packageManager from '../../src/core/package-manager-adapter';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
-import type { PackageJson } from '../../src/types';
+import type { AnalysisResult, PackageJson } from '../../src/types';
 
 const roots: string[] = [];
 
@@ -69,6 +69,61 @@ afterEach(() => {
 });
 
 describe('strict peer validation across installation', () => {
+  it.each([true, false])(
+    'checks optional peers after a planned provider is installed (success=%s)',
+    async (success) => {
+      const root = makeProjectRoot();
+      const dependencies = { legacy: '1.0.0', 'optional-reader': '1.0.0', vue: '3.0.0' };
+      writePackage(root, { name: 'host', dependencies });
+      writePackage(join(root, 'node_modules/legacy'), {
+        name: 'legacy',
+        version: '1.0.0',
+        peerDependencies: { vue: '^2' },
+      });
+      writePackage(join(root, 'node_modules/optional-reader'), {
+        name: 'optional-reader',
+        version: '1.0.0',
+        peerDependencies: { vue: '^2' },
+        peerDependenciesMeta: { vue: { optional: true } },
+      });
+      writePackage(join(root, 'node_modules/vue'), { name: 'vue', version: '3.0.0' });
+      const vue2 = { name: 'vue', version: '2.7.16' };
+      mockRegistry(vue2);
+      vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({
+        install: async ([spec]) => {
+          if (success) {
+            const alias = spec!.slice(0, spec!.indexOf('@npm:'));
+            writePackage(join(root, 'node_modules', alias), vue2);
+            writePackage(root, {
+              name: 'host',
+              dependencies: { ...dependencies, [alias]: 'npm:vue@2.7.16' },
+            });
+          }
+          return { success, exitCode: success ? 0 : 1, stdout: '', stderr: '', timedOut: false };
+        },
+      });
+      const onAnalysisComplete = vi.fn<(result: AnalysisResult) => void>();
+      const resolver = await createResolver(
+        {
+          projectRoot: root,
+          dependencies: ['legacy', 'optional-reader'],
+          includeRedirects: { vue: ['optional-reader'] },
+          packageManager: 'npm',
+          strict: false,
+          registry: 'https://unused.invalid/',
+        },
+        { onAnalysisComplete },
+      );
+      expect(onAnalysisComplete).toHaveBeenCalledTimes(1);
+      expect(onAnalysisComplete.mock.calls[0]?.[0].diagnostics ?? []).not.toContainEqual(
+        expect.objectContaining({ code: 'OPTIONAL_PEER_MISMATCH' }),
+      );
+      expect(
+        resolver.getDiagnostics().filter(({ code }) => code === 'OPTIONAL_PEER_MISMATCH'),
+      ).toHaveLength(success ? 0 : 1);
+    },
+  );
+
   it.each([false, true])(
     'does not publish a reused alias reconciled to a different version: strict=%s',
     async (strict) => {

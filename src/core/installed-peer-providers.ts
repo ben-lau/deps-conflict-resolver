@@ -37,19 +37,37 @@ function validateOptionalPeers(
   diagnostics: ResolverDiagnostic[],
   resolveAlias: ResolveAlias,
 ): void {
+  const consumers = new Set(graph.roots);
+  for (const id of graph.roots) {
+    const root = graph.nodes.get(id);
+    const runtime = { ...root?.manifest.dependencies, ...root?.manifest.optionalDependencies };
+    for (const name of Object.keys(runtime)) {
+      const child = root?.resolvedChildren.get(name);
+      if (child) consumers.add(child);
+    }
+  }
   const reported = new Set<string>();
-  for (const node of graph.nodes.values()) {
+  for (const id of consumers) {
+    const node = graph.nodes.get(id);
+    if (!node) continue;
     for (const [requester, peers] of node.peerDependenciesByName) {
       for (const [peer, entry] of peers) {
         if (!entry.optional) continue;
-        const actual = installedProvider(graph, node, peer);
+        const expected = resolveDependencyRequirement(peer, entry.range, detector);
+        if (!isValidRange(expected.range)) continue;
         const alias = resolveAlias(peer, node.packagePath);
+        // Final analysis after installation checks the actual provider. Avoid
+        // warning about the host during a preparation that plans to replace it.
+        if (
+          alias?.originalName === expected.name &&
+          satisfies(alias.resolvedVersion, expected.range)
+        )
+          continue;
+        const actual = installedProvider(graph, node, peer);
         const activeAlias = alias?.installSpec === '' ? alias : undefined;
         const version = activeAlias?.resolvedVersion ?? actual?.version;
         if (!version || !isValidVersion(version)) continue;
         const name = activeAlias?.originalName ?? actual?.manifest.name;
-        const expected = resolveDependencyRequirement(peer, entry.range, detector);
-        if (!isValidRange(expected.range)) continue;
         if (name === expected.name && satisfies(version, expected.range)) continue;
         const key = JSON.stringify([node.id, peer, expected.name, expected.range]);
         if (reported.has(key)) continue;

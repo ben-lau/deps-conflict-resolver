@@ -82,7 +82,43 @@ export function suggestEntryPackages(analysis: AnalysisResult, entries: string[]
 interface SourceHint {
   packageName: string;
   message: string;
-  config: Pick<DepsConflictResolverOptions, 'peerOverrides'>;
+  config: Pick<DepsConflictResolverOptions, 'dependencies' | 'peerOverrides'>;
+}
+
+type EntryManifest = PackageJson & { exports?: unknown; module?: unknown; main?: unknown };
+
+function sourceEntries(manifest: EntryManifest): Set<string> {
+  const entries = new Set<string>();
+  if (manifest.exports === undefined) {
+    for (const value of [manifest.module, manifest.main ?? 'index.js']) {
+      if (typeof value === 'string') entries.add(value);
+    }
+    return entries;
+  }
+  const exported = manifest.exports;
+  const conditions = ['import', 'require', 'browser', 'node', 'default'];
+  const root =
+    exported &&
+    typeof exported === 'object' &&
+    !Array.isArray(exported) &&
+    Object.keys(exported).some((key) => key.startsWith('.'))
+      ? (exported as Record<string, unknown>)['.']
+      : exported;
+  // Look at public root entries from common export conditions. Bound the
+  // inspection even when a package publishes a large conditional export map.
+  const candidates: unknown[] = [root];
+  for (let i = 0; i < candidates.length && i < 16 && entries.size < 4; i++) {
+    const target = candidates[i];
+    if (typeof target === 'string' && target.startsWith('./')) entries.add(target);
+    else if (Array.isArray(target)) candidates.push(...target.slice(0, 4));
+    else if (target && typeof target === 'object') {
+      const branches = target as Record<string, unknown>;
+      for (const condition of conditions) {
+        if (Object.hasOwn(branches, condition)) candidates.push(branches[condition]);
+      }
+    }
+  }
+  return entries;
 }
 
 async function readEntry(directory: string, entry: string): Promise<string> {
@@ -117,17 +153,13 @@ export async function findSourceHints(
   for (const packageName of entries) {
     const path = findPackagePath(packageName, projectRoot);
     if (!path) continue;
-    const manifest = readPackageJsonCached(path) as
-      | (PackageJson & { module?: unknown; main?: unknown })
-      | null;
+    const manifest = readPackageJsonCached(path) as EntryManifest | null;
     if (!manifest?.version || !isValidVersion(manifest.version)) continue;
     const range = manifest.peerDependencies?.vue;
     if (range && (!satisfies(vue.version, range) || !rangesIntersect(range, '^2'))) continue;
-    const candidates = new Set([manifest.module, manifest.main ?? 'index.js']);
     let vue2 = false;
     let vue3 = false;
-    for (const entry of candidates) {
-      if (typeof entry !== 'string') continue;
+    for (const entry of sourceEntries(manifest)) {
       const source = await readEntry(path, entry);
       vue2 ||= /\b(?:Vue\.extend\s*\(|_vm\.(?:_self\._c|\$createElement|_c)\b)/.test(source);
       vue3 ||= /\b(?:openBlock|createElementVNode|createVNode)\b/.test(source);
@@ -137,7 +169,10 @@ export async function findSourceHints(
       packageName,
       message:
         'The installed entry contains Vue 2 render patterns. Verify the supported Vue range before applying this override.',
-      config: { peerOverrides: { [packageName + '@' + manifest.version]: { vue: '^2' } } },
+      config: {
+        dependencies: [packageName],
+        peerOverrides: { [packageName + '@' + manifest.version]: { vue: '^2' } },
+      },
     });
   }
   return hints;
