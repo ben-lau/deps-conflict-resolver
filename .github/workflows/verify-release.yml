@@ -92,6 +92,14 @@ jobs:
         run: |
           node --input-type=module -e "for (const name of ['deps-conflict-resolver', 'deps-conflict-resolver/vite', 'deps-conflict-resolver/webpack']) await import(name)"
           node -e "for (const name of ['deps-conflict-resolver', 'deps-conflict-resolver/vite', 'deps-conflict-resolver/webpack']) require(name)"
+      - name: Verify the packaged CLI
+        working-directory: ${{ runner.temp }}/release-consumer
+        run: |
+          test -x node_modules/.bin/deps-conflict-resolver
+          mkdir -p "$RUNNER_TEMP/release-cli-fixture"
+          printf '%s\n' '{"name":"release-cli-fixture","version":"1.0.0"}' > "$RUNNER_TEMP/release-cli-fixture/package.json"
+          node_modules/.bin/deps-conflict-resolver doctor --root "$RUNNER_TEMP/release-cli-fixture" --offline --strict --json > "$RUNNER_TEMP/release-cli-report.json"
+          node -e 'const r = require(process.argv[1]); if (r.schemaVersion !== 1 || r.command !== "doctor" || !Array.isArray(r.diagnostics)) process.exit(1)' "$RUNNER_TEMP/release-cli-report.json"
       - name: Build a consumer with conflicting Vue versions
         run: node tests/compat/vite-release.mjs "$RUNNER_TEMP/release-consumer"
       - name: Verify optimizer and SSR compatibility when available

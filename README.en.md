@@ -137,6 +137,18 @@ The plugin supports automatic detection of the package manager and registry:
 
 An explicit `registry` option overrides this detection. The resolver uses it for remote version queries, and the package manager uses the same registry when installing aliases.
 
+## Command-Line Diagnostics and Preparation
+
+Inspect conflicts, explicitly prepare aliases, and validate the installed environment offline in CI:
+
+```bash
+pnpm exec deps-conflict-resolver doctor legacy-lib --json
+pnpm exec deps-conflict-resolver prepare legacy-lib
+pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
+```
+
+`doctor` never installs packages; without package names it scans runtime dependencies and installed optional dependencies. `prepare` requires package names and updates the manifest and lockfile through the project's package manager. `--json` emits structured diagnostics, aliases, and installation outcomes. Commit the resulting manifest and lockfile and use a frozen installation in CI.
+
 ## Strict and Offline Resolution
 
 `offline: true` reuses verified installed aliases without registry queries or installation. Setting `autoInstall: false` alone does not prevent version queries. `strict: true` reports unresolved required dependencies, installation failures, and ambiguous runtime resolutions. Both options default to `false`.
