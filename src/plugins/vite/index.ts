@@ -2,7 +2,7 @@ import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite
 import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
-import { createFilter, mergeConfig, version as viteVersion } from 'vite';
+import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
 import { createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
 import { createSsrExternalPolicy } from './ssr-external';
 import { escapeRegex } from '../../utils/regex';
@@ -136,7 +136,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       logger.info('No active aliases available');
       return undefined;
     }
-    const projectRoot = activeResolver.getOptions().projectRoot;
+    const activeOptions = activeResolver.getOptions();
+    const projectRoot = activeOptions.projectRoot;
 
     logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
 
@@ -150,7 +151,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     const ssrOptimizerPackages = new Set(aliasPackages);
     for (const mapping of analysisResult.aliasMappings) {
       if (!activeNames.has(mapping.aliasName)) continue;
-      const excluded = new Set(resolverOptions.excludeRedirects?.[mapping.originalName] ?? []);
+      const excluded = new Set(activeOptions.excludeRedirects?.[mapping.originalName] ?? []);
       const usedBySegments = mapping.usedBy.flatMap((path) => path.split('>'));
       const usedByOptimizerIds = mapping.usedBy
         .map((path) => path.split('>'))
@@ -160,13 +161,13 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         ...mapping.allDependents,
         ...usedBySegments,
         ...(mapping.workspaceEntryNames ?? []),
-        ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
+        ...(activeOptions.includeRedirects?.[mapping.originalName] ?? []),
       ]) {
         if (!excluded.has(name)) ssrPackages.add(name);
       }
       for (const name of [
         ...usedByOptimizerIds,
-        ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []).filter(
+        ...(activeOptions.includeRedirects?.[mapping.originalName] ?? []).filter(
           (entry) => !excluded.has(entry),
         ),
       ]) {
@@ -299,6 +300,17 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       // Worker builds inherit optimizer/SSR objects from the main config.
       // Only their module resolver is ours; keep those shared objects intact.
       if (config.isWorker) return;
+      if (config.command === 'serve') {
+        const watched = new Set(config.configFileDependencies);
+        for (const file of resolver.getAnalysisResult()?.watchFiles ?? []) {
+          const path = normalizePath(file);
+          // Vite ignores installed dependency directories by default. Track
+          // project and linked source manifests as config inputs instead.
+          if (path.includes('/node_modules/') || watched.has(path)) continue;
+          watched.add(path);
+          config.configFileDependencies.push(path);
+        }
+      }
       const addition = runtimeConfig(config, resolver);
       if (!addition) return;
       // Do not reassign resolve.alias here: Vite already created its alias
@@ -337,28 +349,15 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         ).resolve;
     },
 
-    /**
-     * 解析模块 ID
-     */
-    resolveId(source, importer, resolveOptions) {
-      if (!isEnabled || !resolver) {
-        return null;
-      }
-
-      // 跳过相对路径和绝对路径
-      if (isPathLikeRequest(source)) {
-        return null;
-      }
-
-      // 跳过虚拟模块
-      if (isVirtualModuleRequest(source)) {
-        return null;
-      }
-
-      // 尝试解析别名
-      const resolved = resolver.resolveModule(source, importer);
-
-      if (resolved) {
+    resolveId: {
+      // Vite's alias plugin precedes user plugins ordered by enforce.
+      // Inspect the original request before a global alias rewrites it.
+      order: 'pre',
+      handler(source, importer, resolveOptions) {
+        if (!isEnabled || !resolver || isPathLikeRequest(source) || isVirtualModuleRequest(source))
+          return null;
+        const resolved = resolver.resolveModule(source, importer);
+        if (!resolved) return null;
         logger.debug(`Redirecting ${source} -> ${resolved} (from ${importer ?? 'entry'})`);
 
         // Active aliases were verified from the host. A linked importer may
@@ -370,9 +369,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           if (!result) throw new Error('Cannot resolve active alias: ' + resolved);
           return result;
         });
-      }
-
-      return null;
+      },
     },
   };
   return plugin;

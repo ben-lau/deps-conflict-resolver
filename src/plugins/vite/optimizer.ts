@@ -64,9 +64,13 @@ function rolldownExternalPlugin(policy: SsrExternalPolicy): Plugin {
   };
 }
 
-function esbuildPlugin(resolver: DepsConflictResolver, projectRoot: string): EsbuildPlugin {
+function esbuildPlugin(
+  resolver: DepsConflictResolver,
+  projectRoot: string,
+  fingerprint: string,
+): EsbuildPlugin {
   return {
-    name: 'deps-conflict-resolver-esbuild',
+    name: 'deps-conflict-resolver-esbuild-' + fingerprint,
     setup(build) {
       const originals = [
         ...new Set(resolver.getAliasPathMappings().map((mapping) => mapping.originalName)),
@@ -98,9 +102,13 @@ function esbuildPlugin(resolver: DepsConflictResolver, projectRoot: string): Esb
 }
 
 /** Vite 8's optimizer consumes native Rolldown hooks, not esbuild setup hooks. */
-function rolldownPlugin(resolver: DepsConflictResolver, projectRoot: string): Plugin {
+function rolldownPlugin(
+  resolver: DepsConflictResolver,
+  projectRoot: string,
+  fingerprint: string,
+): Plugin {
   return {
-    name: 'deps-conflict-resolver-rolldown',
+    name: 'deps-conflict-resolver-rolldown-' + fingerprint,
     async resolveId(source, importer, resolveOptions) {
       if (!importer) return null;
       const redirected = resolver.resolveModule(source, importer);
@@ -122,12 +130,14 @@ export function createOptimizerOptions(
   ssrExternal?: SsrExternalPolicy,
 ): OptimizerOptions {
   const include = [...new Set(resolver.getAliasPathMappings().map((mapping) => mapping.aliasName))];
+  // Vite hashes optimizer plugin names across esbuild and Rolldown releases.
+  const fingerprint = resolver.getResolutionFingerprint();
   return Number.parseInt(viteVersion, 10) >= 8
     ? {
         include,
         rolldownOptions: {
           plugins: [
-            rolldownPlugin(resolver, projectRoot),
+            rolldownPlugin(resolver, projectRoot, fingerprint),
             ...(ssrExternal ? [rolldownExternalPlugin(ssrExternal)] : []),
           ],
         },
@@ -136,7 +146,7 @@ export function createOptimizerOptions(
         include,
         esbuildOptions: {
           plugins: [
-            esbuildPlugin(resolver, projectRoot),
+            esbuildPlugin(resolver, projectRoot, fingerprint),
             ...(ssrExternal ? [esbuildExternalPlugin(ssrExternal)] : []),
           ],
         },

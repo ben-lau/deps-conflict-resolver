@@ -18,6 +18,7 @@ import {
   readPackageJsonCached,
 } from '../utils/fs';
 import { realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createEnvironmentDetector, EnvironmentDetector } from './environment-detector';
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
 import { createAliasManager, AliasManager } from './alias-manager';
@@ -558,6 +559,8 @@ export class DepsConflictResolver {
         [...mapping.allDependents].sort(),
         mapping.importerPaths ? [...mapping.importerPaths].sort() : null,
         mapping.excludedImporterPaths ? [...mapping.excludedImporterPaths].sort() : null,
+        [...new Set(this.options.includeRedirects[mapping.originalName])].sort(),
+        [...new Set(this.options.excludeRedirects[mapping.originalName])].sort(),
       ])
       .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
     const providers = (this.aliasManager?.getAliasPathMappings() ?? [])
@@ -574,7 +577,9 @@ export class DepsConflictResolver {
         return [mapping.aliasName, path, readPackageJsonCached(path)] as const;
       })
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    return JSON.stringify([mappings, providers]);
+    return createHash('sha256')
+      .update(JSON.stringify([mappings, providers]))
+      .digest('hex');
   }
 
   private captureSnapshot(): void {
@@ -770,6 +775,11 @@ export class DepsConflictResolver {
 
     if (!this.snapshotCurrent()) return [];
     return this.aliasManager.getAliasPathMappings();
+  }
+
+  /** Stable identity of the active rules and their installed providers. */
+  getResolutionFingerprint(): string {
+    return this.initialized && this.snapshotCurrent() ? this.snapshotSignature : '';
   }
 
   /**

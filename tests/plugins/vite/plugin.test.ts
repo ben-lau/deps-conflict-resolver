@@ -9,6 +9,7 @@ const mockResolverInstance = {
   getAnalysisResult: vi.fn(),
   getAliasPathMappings: vi.fn(),
   getOptions: vi.fn(),
+  getResolutionFingerprint: vi.fn().mockReturnValue('fixture'),
   resolveModule: vi.fn(),
   getDiagnostics: vi.fn().mockReturnValue([]),
 };
@@ -37,6 +38,11 @@ async function configure(
   (plugin.config as (c: UserConfig, env: ConfigEnv) => void)(input, { command, mode: 'test' });
   await (plugin.configResolved as (c: ResolvedConfig) => Promise<void>)(config);
   return config;
+}
+
+function resolveHook(plugin: Plugin) {
+  const hook = plugin.resolveId!;
+  return typeof hook === 'function' ? hook : hook.handler;
 }
 
 describe('Vite Plugin', () => {
@@ -162,7 +168,7 @@ describe('Vite Plugin', () => {
           await ready(worker);
         }
         expect(mockResolverInstance.initialize).toHaveBeenCalledTimes(1);
-        const resolve = plugin.resolveId as (source: string, importer?: string) => null;
+        const resolve = resolveHook(plugin) as (source: string, importer?: string) => null;
         expect(resolve('vue', '/test/legacy/index.js')).toBeNull();
         expect(mockResolverInstance.resolveModule).toHaveBeenCalledWith(
           'vue',
@@ -197,7 +203,7 @@ describe('Vite Plugin', () => {
       const config = await configure(plugin, command);
       expect(mockResolverInstance.initialize).not.toHaveBeenCalled();
       expect(config.optimizeDeps.include).toBeUndefined();
-      const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
+      const resolveId = resolveHook(plugin) as (source: string, importer?: string) => unknown;
       expect(resolveId('vue', '/test/index.js')).toBeNull();
     });
 
@@ -234,7 +240,7 @@ describe('Vite Plugin', () => {
       async (source) => {
         const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
         await configure(plugin);
-        const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
+        const resolveId = resolveHook(plugin) as (source: string, importer?: string) => unknown;
         expect(resolveId(source, '/test/index.js')).toBeNull();
         expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
       },
@@ -243,7 +249,7 @@ describe('Vite Plugin', () => {
     it('leaves unmatched requests to the native resolver', async () => {
       const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
       await configure(plugin);
-      const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
+      const resolveId = resolveHook(plugin) as (source: string, importer?: string) => unknown;
       expect(resolveId('unrelated', '/test/index.js')).toBeNull();
     });
 
@@ -253,7 +259,7 @@ describe('Vite Plugin', () => {
       mockResolverInstance.resolveModule.mockReturnValue('aliased-vue/feature');
       const result = { id: '/resolved/feature.js', moduleSideEffects: false };
       const context = { resolve: vi.fn().mockResolvedValue(result) };
-      const resolveId = plugin.resolveId as unknown as (
+      const resolveId = resolveHook(plugin) as unknown as (
         this: typeof context,
         source: string,
         importer: string,

@@ -66,35 +66,39 @@ try {
   });
   writeFileSync(
     join(legacyDirectory, 'index.js'),
-    'import Vue from "vue"; export const runtime = Vue; export const runtimeVersion = Vue.version;',
+    'import * as namespace from "vue"; export const runtime = namespace.default ?? namespace; export const runtimeVersion = runtime.version;',
   );
   const entry = join(app, 'entry.js');
   writeFileSync(
     entry,
     'import { runtime } from "legacy"; import Vue from "vue2"; export { runtimeVersion } from "legacy"; export { version as hostVersion } from "vue"; export const shared = runtime === Vue;',
   );
-  const plugin = () =>
+  const plugin = (overrides = {}) =>
     depsConflictResolverVitePlugin({
       dependencies: ['legacy'],
       offline: true,
       strict: true,
       ssr: 'auto',
+      ...overrides,
     });
-  const config = await vite.resolveConfig(
-    {
-      root: app,
-      configFile: false,
-      logLevel: 'silent',
-      plugins: [plugin()],
-      optimizeDeps: { include: ['legacy', 'vue'], noDiscovery: true },
-    },
-    'serve',
-  );
+  const optimizerConfig = (overrides, configOptions = {}) =>
+    vite.resolveConfig(
+      {
+        root: app,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [plugin(overrides)],
+        optimizeDeps: { include: ['legacy', 'vue'], noDiscovery: true },
+        ...configOptions,
+      },
+      'serve',
+    );
+  const config = await optimizerConfig();
   const optimizer = Number.parseInt(vite.version, 10) >= 8 ? 'rolldown' : 'esbuild';
   if (optimizer === 'rolldown') {
     assert(
-      config.optimizeDeps.rolldownOptions.plugins.some(
-        (p) => p.name === 'deps-conflict-resolver-rolldown',
+      config.optimizeDeps.rolldownOptions.plugins.some((p) =>
+        p.name.startsWith('deps-conflict-resolver-rolldown-'),
       ),
     );
   }
@@ -103,6 +107,58 @@ try {
   const host = await import(pathToFileURL(metadata.optimized.vue.file).href);
   assert.equal(legacy.runtimeVersion, legacyVersion);
   assert.equal(host.version, hostVersion);
+  assert.equal((await vite.optimizeDeps(await optimizerConfig(), false)).hash, metadata.hash);
+  const changed = await vite.optimizeDeps(
+    await optimizerConfig({ excludeRedirects: { vue: ['legacy'] } }),
+    false,
+  );
+  const changedLegacy = await import(
+    pathToFileURL(changed.optimized.legacy.file).href + '?changed'
+  );
+  assert.equal(
+    changedLegacy.runtimeVersion,
+    hostVersion,
+    'Redirect changes must invalidate the optimizer cache',
+  );
+
+  const hostAlias = join(app, 'host-vue.mjs');
+  const aliasOutput = join(app, 'alias-dist');
+  writeFileSync(hostAlias, 'export const version = "host-alias";');
+  const optimizedGlobalAliases = {};
+  for (const [kind, replacement, expectedHost] of [
+    ['absolute', hostAlias, 'host-alias'],
+    ['subpath', 'vue/dist/vue.esm-bundler.js', hostVersion],
+  ]) {
+    const configWithAlias = await optimizerConfig(undefined, {
+      cacheDir: join(app, 'cache-global-alias-' + kind),
+      resolve: { alias: { vue: replacement } },
+    });
+    const { optimized } = await vite.optimizeDeps(configWithAlias, true);
+    const optimizedLegacy = await import(pathToFileURL(optimized.legacy.file).href);
+    const optimizedHost = await import(pathToFileURL(optimized.vue.file).href);
+    assert.equal(optimizedHost.version, expectedHost);
+    assert.equal(optimizedLegacy.runtimeVersion, legacyVersion);
+    if (kind === 'subpath') assert(optimized.vue.src.endsWith('/dist/vue.esm-bundler.js'));
+    optimizedGlobalAliases[kind] = {
+      host: optimizedHost.version,
+      legacy: optimizedLegacy.runtimeVersion,
+    };
+  }
+
+  await vite.build({
+    root: app,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [plugin()],
+    resolve: { alias: { vue: hostAlias } },
+    build: {
+      lib: { entry, formats: ['es'], fileName: () => 'entry.mjs' },
+      outDir: aliasOutput,
+    },
+  });
+  const aliased = await import(pathToFileURL(join(aliasOutput, 'entry.mjs')).href);
+  assert.equal(aliased.hostVersion, 'host-alias');
+  assert.equal(aliased.runtimeVersion, legacyVersion);
 
   await vite.build({
     root: app,
@@ -437,6 +493,9 @@ try {
         vite: vite.version,
         optimizer,
         dev: { host: host.version, legacy: legacy.runtimeVersion },
+        changedRedirect: changedLegacy.runtimeVersion,
+        globalAlias: { host: aliased.hostVersion, legacy: aliased.runtimeVersion },
+        optimizedGlobalAliases,
         ssr: { host: ssr.hostVersion, legacy: ssr.runtimeVersion },
         ssrDev,
         mixedSsrConfig,

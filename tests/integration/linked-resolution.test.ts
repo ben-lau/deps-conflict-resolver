@@ -6,9 +6,11 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import webpack from 'webpack';
 import { build, optimizeDeps, resolveConfig } from 'vite';
+import { runCli } from '../../src/core/cli-runner';
 import vitePlugin from '../../src/plugins/vite';
 import { DepsConflictResolverWebpackPlugin } from '../../src/plugins/webpack';
 import { clearPackageJsonCache } from '../../src/utils/fs';
+import type { DepsConflictResolverOptions } from '../../src/types';
 
 const roots: string[] = [];
 const require = createRequire(import.meta.url);
@@ -166,7 +168,7 @@ function workspaceFixture(): string {
 async function bundle(
   app: string,
   tool: 'webpack' | 'vite',
-  extraOptions: Partial<{ peerOverrides: Record<string, Record<string, string>> }> = {},
+  extraOptions: Partial<DepsConflictResolverOptions> = {},
 ): Promise<unknown> {
   const options = {
     projectRoot: app,
@@ -222,7 +224,117 @@ afterEach(() => {
   clearPackageJsonCache();
 });
 
+it('keeps a Vite alias for the host while linking the legacy importer to its own runtime', async () => {
+  const app = fixture(false, '');
+  const entry = join(app, 'entry.mjs');
+  const hostAlias = join(app, 'host-vue.mjs');
+  const outDir = join(app, 'dist');
+  writeFileSync(hostAlias, 'export const version = "host-specific-entry";');
+  writeFileSync(
+    entry,
+    'import { version as host } from "vue"; import { version as legacy } from "legacy"; export const version = { host, legacy };',
+  );
+  await build({
+    root: app,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [vitePlugin({ dependencies: ['legacy'], offline: true, strict: true })],
+    resolve: { alias: { vue: hostAlias } },
+    build: {
+      lib: { entry, formats: ['cjs'], fileName: () => 'entry.cjs' },
+      outDir,
+    },
+  });
+  expect(require(join(outDir, 'entry.cjs')).version).toEqual({
+    host: 'host-specific-entry',
+    legacy: '2.7.16-import',
+  });
+});
+
+it('rebuilds the Vite optimizer cache when only the redirect scope changes', async () => {
+  const app = fixture(false, '');
+  const optimize = async (exclude: boolean) =>
+    optimizeDeps(
+      await resolveConfig(
+        {
+          root: app,
+          configFile: false,
+          logLevel: 'silent',
+          plugins: [
+            vitePlugin({
+              dependencies: ['legacy'],
+              offline: true,
+              strict: true,
+              excludeRedirects: exclude ? { vue: ['legacy'] } : {},
+            }),
+          ],
+          optimizeDeps: { include: ['legacy'], noDiscovery: true },
+        },
+        'serve',
+      ),
+      false,
+    );
+  const first = await optimize(false);
+  const initial = await import(pathToFileURL(first.optimized.legacy!.file).href);
+  expect(initial.version).toBe('2.7.16-import');
+  expect((await optimize(false)).configHash).toBe(first.configHash);
+
+  const next = await optimize(true);
+  const changed = await import(pathToFileURL(next.optimized.legacy!.file).href + '?changed');
+  expect(changed.version).toBe('3.0.0-import');
+});
+
+it('registers linked manifests outside the Vite root as configuration dependencies', async () => {
+  const app = fixture(false, '');
+  const config = await resolveConfig(
+    {
+      root: app,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [vitePlugin({ dependencies: ['legacy'], offline: true, strict: true })],
+    },
+    'serve',
+  );
+  expect(config.configFileDependencies).toContain(
+    join(app, '../packages/legacy/package.json').replace(/\\/g, '/'),
+  );
+});
+
 describe.each(['webpack', 'vite'] as const)('linked aliases in %s', (tool) => {
+  it('resolves aliases with the same module of options imported by the CLI', async () => {
+    const app = fixture(false, '');
+    const file = join(app, 'my-resolver-options.cjs');
+    json(join(app, '../packages/legacy'), {
+      name: 'legacy',
+      version: '1.0.0',
+      type: 'module',
+      main: './index.js',
+      peerDependencies: { vue: '>=2' },
+    });
+    writeFileSync(
+      file,
+      'module.exports = { dependencies: ["legacy"], peerOverrides: { legacy: { vue: "^2" } } };',
+    );
+    let report = '';
+    const code = await runCli(
+      ['doctor', '--config', file, '--root', app, '--offline', '--strict', '--json'],
+      {
+        stdout: (text) => {
+          report += text;
+        },
+        stderr: (text) => {
+          throw new Error(text);
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(report).activeAliases).toEqual([
+      expect.objectContaining({ aliasName: 'vue2' }),
+    ]);
+    const options = require(file) as DepsConflictResolverOptions;
+    expect(await bundle(app, tool, options)).toBe('2.7.16-import');
+  });
+
   it.each([false, true])(
     'resolves root and exported subpaths from the host: commonjs=%s',
     async (commonjs) => {

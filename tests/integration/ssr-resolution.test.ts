@@ -586,7 +586,7 @@ describe('SSR alias resolution', () => {
     expect(config.ssr.optimizeDeps.esbuildOptions?.define).toEqual({ CUSTOM_FLAG: 'true' });
     expect(config.ssr.optimizeDeps.esbuildOptions?.plugins?.map((plugin) => plugin.name)).toEqual([
       'custom-ssr-plugin',
-      'deps-conflict-resolver-esbuild',
+      expect.stringMatching(/^deps-conflict-resolver-esbuild-/),
     ]);
   });
 
