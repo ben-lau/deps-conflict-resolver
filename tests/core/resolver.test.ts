@@ -76,7 +76,6 @@ describe('DepsConflictResolver', () => {
       detectedFrom: 'lockfile',
       rootDir: '/test/project',
     });
-    mockEnvironmentDetector.getRegistry.mockResolvedValue('https://registry.npmjs.org');
     mockEnvironmentDetector.getRegistryForPackageManager.mockResolvedValue(
       'https://registry.npmjs.org',
     );
@@ -985,7 +984,6 @@ describe('createResolver', () => {
       detectedFrom: 'lockfile',
       rootDir: '/test/project',
     });
-    mockEnvironmentDetector.getRegistry.mockResolvedValue('https://registry.npmjs.org');
     mockEnvironmentDetector.getRegistryForPackageManager.mockResolvedValue(
       'https://registry.npmjs.org',
     );
