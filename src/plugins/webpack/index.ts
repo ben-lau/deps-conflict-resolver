@@ -25,6 +25,7 @@ type RedirectBuildInfo = NonNullable<NormalModule['buildInfo']> & {
   depsConflictResolverRequests?: string[];
 };
 type ResolveOptions = NonNullable<ResolveData['resolveOptions']>;
+type ResolveCallback = (error?: Error | null) => void;
 
 const emptyResolveOptions: ResolveOptions = {};
 const packageRequest = /^(?:@[^/?#]+\/)?[^/?#]+/;
@@ -256,13 +257,14 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     if (!this.initialized || !module.resource || !this.resolver || this.aliasVersions.size === 0)
       return '';
     // Webpack uses nameForCondition() as the issuer when resolving dependencies.
-    const importer = module.nameForCondition?.() ?? module.resource;
-    const versions: string[] = [];
+    let importer: string | undefined;
+    let versions: string[] | undefined;
     for (const request of requests ?? moduleRequests(module)) {
       if (!this.targets.has(originalPackage(request))) continue;
+      importer ??= module.nameForCondition?.() ?? module.resource;
       const decision = this.resolver.explainResolution(request, importer, { skipHook: true });
       if (!decision.resolved && decision.reason !== 'ambiguous') continue;
-      versions.push(
+      (versions ??= []).push(
         JSON.stringify([
           request,
           decision.resolved,
@@ -270,7 +272,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         ]),
       );
     }
-    return versions.length > 0 ? JSON.stringify(versions.sort()) : '';
+    return versions ? JSON.stringify(versions.sort()) : '';
   }
 
   apply(compiler: Compiler): void {
@@ -280,7 +282,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     };
     logger.info('Applying DepsConflictResolverWebpackPlugin...');
 
-    let runPreparation: Promise<void> | undefined;
+    let runPrepared = false;
     let verifyBuild: (() => void) | undefined;
     const guarded = Boolean(this.config.strict && compiler.hooks.afterCompile);
     const guardBuild = () => {
@@ -288,9 +290,10 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         verifyBuild ??= getResolverBuild(this.resolver).guardGeneration();
     };
     compiler.hooks.afterCompile?.tap(PLUGIN_NAME, () => verifyBuild?.());
-    compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, () => {
-      runPreparation = this.initialize(compiler);
-      return runPreparation;
+    compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, async () => {
+      runPrepared = false;
+      await this.initialize(compiler);
+      runPrepared = true;
     });
 
     // 对于 watch 模式
@@ -318,7 +321,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       compilation.hooks.succeedModule.tap(PLUGIN_NAME, (module) => {
         if ('resource' in module && module.buildInfo) {
           const info = module.buildInfo as RedirectBuildInfo;
-          const requests = moduleRequests(module as NormalModule);
+          const requests = this.targets.size ? moduleRequests(module as NormalModule) : undefined;
           info.depsConflictResolverRequests = requests;
           info.depsConflictResolver = this.moduleResolutionVersion(
             module as NormalModule,
@@ -363,37 +366,35 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     compiler.hooks.normalModuleFactory.tap(PLUGIN_NAME, (nmf: NormalModuleFactory) => {
       // Direct compile() calls do not run beforeRun. Share their preparation
       // within this factory and retry at the start of the next compilation.
-      let preparation = !compiler.running ? undefined : runPreparation;
-      // beforeResolve: 在模块解析之前修改请求
-      // 这是最早能够拦截模块请求的时机
-      // AsyncSeriesBailHook<[ResolveData], false | void>
-      // - 直接修改 resolveData 对象即可
-      // - 返回 false 表示跳过该模块
-      // - 返回 undefined/void 表示继续处理
-      nmf.hooks.beforeResolve.tapAsync(PLUGIN_NAME, (resolveData, callback) => {
-        const fail = (error: unknown) => {
-          logger.error('Error during module resolution:', error);
-          callback(this.config.strict ? (error as Error) : undefined);
-        };
-        const finish = () => {
-          try {
+      let preparation: Promise<void> | undefined;
+      let ready = compiler.watchMode || (compiler.running && runPrepared);
+      const fail = (error: unknown, callback: ResolveCallback) => {
+        logger.error('Error during module resolution:', error);
+        callback(this.config.strict ? (error as Error) : undefined);
+      };
+      const finish = (resolveData: ResolveData, callback: ResolveCallback) => {
+        try {
+          if (!ready) {
             guardBuild();
-            if (
-              (!guarded && this.config.strict) ||
-              this.config.hooks?.beforeResolve ||
-              this.targets.has(originalPackage(resolveData.request))
-            )
-              this.handleResolve(resolveData);
-          } catch (error) {
-            return fail(error);
+            ready = true;
           }
-          callback();
-        };
-        if (!compiler.watchMode && !this.initialized) {
-          void (preparation ??= this.initialize(compiler)).then(finish, fail);
-        } else {
-          finish();
+          if (
+            (!guarded && this.config.strict) ||
+            this.config.hooks?.beforeResolve ||
+            (this.targets.size > 0 && this.targets.has(originalPackage(resolveData.request)))
+          )
+            this.handleResolve(resolveData);
+        } catch (error) {
+          return fail(error, callback);
         }
+        callback();
+      };
+      nmf.hooks.beforeResolve.tapAsync(PLUGIN_NAME, (resolveData, callback) => {
+        if (ready || this.initialized) return finish(resolveData, callback);
+        void (preparation ??= this.initialize(compiler)).then(
+          () => finish(resolveData, callback),
+          (error: unknown) => fail(error, callback),
+        );
       });
     });
 
