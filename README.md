@@ -60,6 +60,22 @@ export default defineConfig({
 });
 ```
 
+Worker 构建需要处理相同冲突时，在 `worker.plugins` 中创建独立实例。以下为 Vite 5+ 配置；Vite 4 使用 `worker.plugins: [conflictResolver()]`：
+
+```typescript
+const conflictResolver = () =>
+  depsConflictResolverVitePlugin({
+    dependencies: ['legacy-vue2-library'],
+    offline: true,
+    strict: true,
+  });
+
+export default defineConfig({
+  plugins: [conflictResolver()],
+  worker: { plugins: () => [conflictResolver()] },
+});
+```
+
 ### Webpack
 
 ```typescript

@@ -60,6 +60,22 @@ export default defineConfig({
 });
 ```
 
+When Worker builds need the same conflict resolution, create separate instances in `worker.plugins`. This example uses Vite 5+; for Vite 4, use `worker.plugins: [conflictResolver()]`:
+
+```typescript
+const conflictResolver = () =>
+  depsConflictResolverVitePlugin({
+    dependencies: ['legacy-vue2-library'],
+    offline: true,
+    strict: true,
+  });
+
+export default defineConfig({
+  plugins: [conflictResolver()],
+  worker: { plugins: () => [conflictResolver()] },
+});
+```
+
 ### Webpack
 
 ```typescript

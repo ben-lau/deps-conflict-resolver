@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const engineRoot = resolve(process.argv[2] ?? repository);
@@ -367,6 +368,69 @@ try {
     assert.equal(actual, '2.7.16');
     lateRoot[post ? 'post' : 'normal'] = actual;
   }
+  const workers = {};
+  writeFileSync(
+    join(finalRoot, 'worker-entry.mjs'),
+    'import {version} from "legacy";globalThis.mainVersion=version;new Worker(new URL("./worker.mjs",import.meta.url),{type:"module"});',
+  );
+  writeFileSync(
+    join(finalRoot, 'worker.mjs'),
+    'import {version} from "legacy";self.postMessage(version);',
+  );
+  for (const mode of ['dedicated', 'both', 'shared']) {
+    let mainAnalyses = 0;
+    let workerAnalyses = 0;
+    const makePlugin = (worker) =>
+      depsConflictResolverVitePlugin({
+        dependencies: ['legacy'],
+        offline: true,
+        strict: true,
+        hooks: {
+          onAnalysisComplete: () => {
+            if (worker) workerAnalyses++;
+            else mainAnalyses++;
+          },
+        },
+      });
+    const mainPlugin = makePlugin(false);
+    const workerPlugins = () => [mode === 'shared' ? mainPlugin : makePlugin(true)];
+    const output = await vite.build({
+      root: finalRoot,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: mode === 'dedicated' ? [] : [mainPlugin],
+      worker: {
+        plugins: Number.parseInt(vite.version, 10) === 4 ? workerPlugins() : workerPlugins,
+      },
+      build: {
+        write: false,
+        minify: false,
+        rollupOptions: { input: join(finalRoot, 'worker-entry.mjs') },
+      },
+    });
+    const outputs = (Array.isArray(output) ? output : [output]).flatMap((result) => result.output);
+    const asset = outputs.find(
+      (result) => result.type === 'asset' && result.fileName.endsWith('.js'),
+    );
+    assert(asset, 'Worker output is missing');
+    const messages = [];
+    runInNewContext(
+      typeof asset.source === 'string' ? asset.source : Buffer.from(asset.source).toString(),
+      {
+        self: { postMessage: (value) => messages.push(value) },
+      },
+    );
+    assert.deepEqual(messages, ['2.7.16']);
+    assert.equal(mainAnalyses, mode === 'dedicated' ? 0 : 1);
+    assert.equal(workerAnalyses, mode === 'shared' ? 0 : 1);
+    const mainVersion = mode === 'dedicated' ? '3.0.0' : '2.7.16';
+    const mainCode = outputs
+      .filter((result) => result.type === 'chunk')
+      .map((result) => result.code)
+      .join('\n');
+    assert(mainCode.includes(JSON.stringify(mainVersion)), 'Main instance lost its resolver');
+    workers[mode] = { version: messages[0], mainAnalyses, workerAnalyses };
+  }
   process.stdout.write(
     JSON.stringify(
       {
@@ -378,6 +442,7 @@ try {
         mixedSsrConfig,
         nestedSsrExternal,
         lateRoot,
+        workers,
       },
       null,
       2,
