@@ -1,5 +1,4 @@
-import { realpathSync } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import { join } from 'node:path';
 import type {
   DependencyInfo,
   PackageJson,
@@ -13,6 +12,7 @@ import type {
 } from '../types/index';
 import { createLogger } from '../utils/logger';
 import {
+  canonicalPath,
   readPackageJsonCached,
   findPackagePath,
   clearPackageJsonCache,
@@ -161,7 +161,7 @@ export class DependencyAnalyzer {
     }
 
     const pkgJson = readPackageJsonCached(packagePath);
-    this.watchFiles.add(join(this.normalizeInstalledPath(packagePath), 'package.json'));
+    this.watchFiles.add(join(canonicalPath(packagePath), 'package.json'));
     return { packagePath, pkgJson };
   }
 
@@ -523,9 +523,7 @@ export class DependencyAnalyzer {
       const rootVisiblePath = findPackagePath(node.name, this.options.projectRoot);
       if (!rootVisiblePath) continue;
 
-      const rootVisibleNode = this.dependencyGraph.nodes.get(
-        this.normalizeInstalledPath(rootVisiblePath),
-      );
+      const rootVisibleNode = this.dependencyGraph.nodes.get(canonicalPath(rootVisiblePath));
       if (rootVisibleNode && !rootVisibleNodeIds.has(node.name)) {
         rootVisibleNodeIds.set(node.name, rootVisibleNode.id);
       }
@@ -886,7 +884,7 @@ export class DependencyAnalyzer {
       const identities = new Set(
         aliases.map(
           (alias) =>
-            `${alias.installedPath ? this.normalizeInstalledPath(alias.installedPath) : alias.scope}\0${alias.version}`,
+            `${alias.installedPath ? canonicalPath(alias.installedPath) : alias.scope}\0${alias.version}`,
         ),
       );
       if (identities.size < 2) continue;
@@ -931,7 +929,7 @@ export class DependencyAnalyzer {
       }
 
       usedAliasNames.add(existingAlias.name);
-      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ? this.normalizeInstalledPath(existingAlias.installedPath) : existingAlias.scope}\0${existingAlias.version}`;
+      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ? canonicalPath(existingAlias.installedPath) : existingAlias.scope}\0${existingAlias.version}`;
       const reusedGroup = reusedAliasGroups.get(aliasIdentity);
       if (reusedGroup) {
         reusedGroup.requests.push(request);
@@ -983,6 +981,9 @@ export class DependencyAnalyzer {
     }
 
     for (const reusedGroup of reusedAliasGroups.values()) {
+      logger.info(
+        `    Reusing ${reusedGroup.alias.scope} alias: ${reusedGroup.alias.name}@${reusedGroup.alias.version}`,
+      );
       mappings.push(
         this.buildAliasMapping(
           packageName,
@@ -1345,7 +1346,7 @@ export class DependencyAnalyzer {
         const allSatisfied = ranges.every((range) => satisfies(alias.installedVersion!, range));
 
         if (allSatisfied) {
-          logger.info(`    Reusing local alias: ${alias.aliasName}@${alias.installedVersion}`);
+          logger.debug(`    Matched local alias: ${alias.aliasName}@${alias.installedVersion}`);
           return {
             name: alias.aliasName,
             version: alias.installedVersion,
@@ -1383,7 +1384,7 @@ export class DependencyAnalyzer {
       if (!packagePath || pkgJson?.name !== packageName || !pkgJson.version) continue;
       const installedVersion = pkgJson.version;
       if (ranges.every((range) => satisfies(installedVersion, range))) {
-        logger.info(`    Reusing workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
+        logger.debug(`    Matched workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
         return {
           name: wsAlias.aliasName,
           version: installedVersion,
@@ -1488,14 +1489,6 @@ export class DependencyAnalyzer {
       ...Object.keys(this.declaredDeps),
       ...Object.keys(this.workspaceRootDeclaredDeps),
     ]);
-  }
-
-  private normalizeInstalledPath(packagePath: string): string {
-    try {
-      return realpathSync(packagePath);
-    } catch {
-      return resolvePath(packagePath);
-    }
   }
 
   private findGraphChildNode(

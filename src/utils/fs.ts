@@ -53,12 +53,55 @@ const packagePathCache = new LruCache<string, string | null>({
 });
 
 /**
+ * 规范化路径缓存（避免对同一目录重复触发 realpathSync）
+ */
+const DEFAULT_CANONICAL_PATH_CACHE_MAX_ENTRIES = 20000;
+const canonicalPathCache = new LruCache<string, { path: string; real: boolean }>({
+  maxEntries: DEFAULT_CANONICAL_PATH_CACHE_MAX_ENTRIES,
+});
+
+/**
  * 清理本库的 IO 缓存，不修改 Node 的内部模块缓存。
  */
 export function clearPackageJsonCache(): void {
   packageJsonCache.clear();
   packagePathCache.clear();
+  canonicalPathCache.clear();
   requireCache.clear();
+}
+
+/**
+ * 读取已缓存的真实物理路径（仅返回由 realpathSync 确认过的路径）
+ */
+export function getCachedRealPath(targetPath: string): string | undefined {
+  const cached = canonicalPathCache.get(targetPath);
+  return cached?.real ? cached.path : undefined;
+}
+
+/**
+ * 解析目标路径的规范化物理路径（带代际缓存，失败时回退到 resolve）
+ */
+export function canonicalPath(targetPath: string): string {
+  const cached = canonicalPathCache.get(targetPath);
+  if (cached !== undefined) {
+    return cached.path;
+  }
+
+  let resolved: string;
+  let real = true;
+  try {
+    resolved = realpathSync(targetPath);
+  } catch {
+    resolved = resolve(targetPath);
+    real = false;
+  }
+
+  const entry = { path: resolved, real };
+  canonicalPathCache.set(targetPath, entry);
+  if (real && resolved !== targetPath) {
+    canonicalPathCache.set(resolved, entry);
+  }
+  return resolved;
 }
 
 /**
@@ -147,14 +190,7 @@ export function findPackagePath(packageName: string, baseDir: string): string | 
           }
         }
       }
-      let resolved = visible;
-      if (visible) {
-        try {
-          resolved = realpathSync(visible);
-        } catch {
-          resolved = resolve(visible);
-        }
-      }
+      const resolved = visible ? canonicalPath(visible) : null;
       // Do not fall back to require.resolve on a miss: it can still return a
       // deleted link's old store directory from Node's private path cache.
       packagePathCache.set(cacheKey, resolved);

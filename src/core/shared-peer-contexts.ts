@@ -1,9 +1,8 @@
-import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AliasMapping, PackageJson, ResolvedOptions, ResolverDiagnostic } from '../types';
 import type { InstalledDependencyGraph } from './dependency-graph';
 import { AliasManager } from './alias-manager';
-import { findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { resolvePeerOverridesForPackage } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
 
@@ -11,14 +10,6 @@ interface Provider {
   path: string;
   version: string;
   label: string;
-}
-
-function canonical(directory: string): string {
-  try {
-    return realpathSync(directory);
-  } catch {
-    return directory;
-  }
 }
 
 /**
@@ -42,7 +33,7 @@ export function validateSharedPeerContexts(
   const installedMappings = mappings.filter((mapping) => {
     const path = findPackagePath(mapping.aliasName, options.projectRoot);
     if (!path) return false;
-    const physical = canonical(path);
+    const physical = canonicalPath(path);
     const manifest = readManifest(physical);
     if (
       manifest?.name !== mapping.originalName ||
@@ -58,13 +49,6 @@ export function validateSharedPeerContexts(
     return true;
   });
   if (installedMappings.length === 0) return;
-  const resolver = new AliasManager({ ...options, strict: false });
-  resolver.initFromAnalysisResult({
-    aliasMappings: installedMappings,
-    analyzedDependencies: new Map(),
-    peerConflicts: [],
-    missingFirstLevelPeers: [],
-  });
   const aliasPaths = new Set([...aliases.values()].map((provider) => provider.path));
   const originals = new Set(installedMappings.map((mapping) => mapping.originalName));
   const requests: Array<[string, string[]]> = [];
@@ -72,9 +56,30 @@ export function validateSharedPeerContexts(
     for (const request of instances) requests.push(request);
   }
 
+  let resolver: AliasManager | null = null;
+  const getResolver = (): AliasManager => {
+    if (!resolver) {
+      resolver = new AliasManager({ ...options, strict: false });
+      resolver.initFromAnalysisResult({
+        aliasMappings: installedMappings,
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        missingFirstLevelPeers: [],
+      });
+    }
+    return resolver;
+  };
+
   for (const peer of originals) {
-    const hasExclusions = (options.excludeRedirects[peer]?.length ?? 0) > 0;
-    const roots: Array<{ nodeId: string; consumer: string; provider: Provider }> = [];
+    const excludedForPeer = options.excludeRedirects[peer] ?? [];
+    const hasExclusions = excludedForPeer.length > 0;
+    const candidateRoots: Array<{
+      nodeId: string;
+      nodeName: string;
+      packagePath: string;
+      requestPath: string[];
+      range: string;
+    }> = [];
     for (const [nodeId, requestPath] of requests) {
       const node = graph.nodes.get(nodeId);
       if (!node) continue;
@@ -86,18 +91,53 @@ export function validateSharedPeerContexts(
       )?.[peer];
       const range = overrideRange ?? manifest?.peerDependencies?.[peer];
       if (!range || (!overrideRange && manifest?.peerDependenciesMeta?.[peer]?.optional)) continue;
-      const decision = resolver.explainResolution(
+      candidateRoots.push({
+        nodeId,
+        nodeName: node.name,
+        packagePath: node.packagePath,
+        requestPath,
+        range,
+      });
+    }
+    if (new Set(candidateRoots.map((entry) => entry.nodeId)).size < 2) continue;
+
+    // Fast path: if only one installed alias exists for this peer and every
+    // candidate root is directly covered by that alias without being excluded,
+    // all roots are guaranteed to share the same provider.
+    const peerMappings = installedMappings.filter((mapping) => mapping.originalName === peer);
+    if (peerMappings.length === 1 && peerMappings[0]!.importerPaths) {
+      const positivePaths = new Set(peerMappings[0]!.importerPaths);
+      const isRootExcluded = (name: string, packagePath: string) =>
+        excludedForPeer.some(
+          (excluded) =>
+            excluded === name ||
+            packagePath.replace(/\\/g, '/').includes('/node_modules/' + excluded + '/'),
+        );
+      if (
+        candidateRoots.every(
+          ({ nodeName, packagePath }) =>
+            positivePaths.has(packagePath) && !isRootExcluded(nodeName, packagePath),
+        )
+      ) {
+        continue;
+      }
+    }
+
+    const activeResolver = getResolver();
+    const roots: Array<{ nodeId: string; consumer: string; provider: Provider }> = [];
+    for (const { nodeId, packagePath, requestPath, range } of candidateRoots) {
+      const decision = activeResolver.explainResolution(
         peer,
-        join(node.packagePath, '__peer_context__.js'),
+        join(packagePath, '__peer_context__.js'),
       );
       if (decision.reason === 'ambiguous') continue;
       let provider = decision.resolved ? aliases.get(decision.aliases[0]!) : undefined;
       if (!decision.resolved) {
-        const path = findPackagePath(peer, node.packagePath);
-        const natural = path ? readManifest(canonical(path)) : null;
+        const path = findPackagePath(peer, packagePath);
+        const natural = path ? readManifest(canonicalPath(path)) : null;
         if (path && natural?.version)
           provider = {
-            path: canonical(path),
+            path: canonicalPath(path),
             version: natural.version,
             label: peer + '@' + natural.version,
           };
@@ -121,8 +161,8 @@ export function validateSharedPeerContexts(
       if (!node || originals.has(node.name)) continue;
       if (
         hasExclusions &&
-        resolver.explainResolution(peer, join(node.packagePath, '__peer_context__.js')).reason ===
-          'excluded'
+        activeResolver.explainResolution(peer, join(node.packagePath, '__peer_context__.js'))
+          .reason === 'excluded'
       )
         continue;
       const manifest = readManifest(node.packagePath);

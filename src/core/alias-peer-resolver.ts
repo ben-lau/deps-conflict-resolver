@@ -1,4 +1,3 @@
-import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   AliasMapping,
@@ -7,20 +6,12 @@ import type {
   ResolvedOptions,
   ResolverDiagnostic,
 } from '../types';
-import { findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { resolvePeerOverridesForPackage } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
 import { createWorkspaceDetector } from './workspace-detector';
 import type { RegistryClient } from './registry-client';
 import { AliasManager } from './alias-manager';
-
-function actualPath(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
-  }
-}
 
 /**
  * Link the peers of the selected versions, never those of the host versions.
@@ -36,7 +27,7 @@ export async function linkAliasPeers(
 ): Promise<void> {
   if (mappings.length === 0) return;
   const readManifest = (directory: string) => {
-    watchFiles?.add(join(actualPath(directory), 'package.json'));
+    watchFiles?.add(join(canonicalPath(directory), 'package.json'));
     return readPackageJsonCached(directory);
   };
   // Rebuild derived peer edges after installation or manifest changes. Keeping
@@ -97,11 +88,11 @@ export async function linkAliasPeers(
   for (const [importer, manifest] of manifests) {
     const importerPaths = new Set([
       join(options.projectRoot, 'node_modules', importer.aliasName),
-      join(actualPath(options.projectRoot), 'node_modules', importer.aliasName),
+      join(canonicalPath(options.projectRoot), 'node_modules', importer.aliasName),
     ]);
     if (workspaceRoot) importerPaths.add(join(workspaceRoot, 'node_modules', importer.aliasName));
     const installedPath = installedPaths.get(importer);
-    if (installedPath) importerPaths.add(actualPath(installedPath));
+    if (installedPath) importerPaths.add(canonicalPath(installedPath));
     // Registry manifests describe peers, but only installation establishes
     // nested providers. Do not reject an install that can supply those peers.
     const pendingInstallation = !installedPath && options.autoInstall && importer.installSpec;
@@ -135,7 +126,7 @@ export async function linkAliasPeers(
             for (const name of request.path) {
               const packageDirectory = findPackagePath(name, directory);
               // Normalize legacy requests before probing a synthetic importer.
-              directory = packageDirectory ? actualPath(packageDirectory) : null;
+              directory = packageDirectory ? canonicalPath(packageDirectory) : null;
               if (!directory) break;
             }
           }
@@ -162,7 +153,7 @@ export async function linkAliasPeers(
           if (selected.length > 0) {
             for (const mapping of selected) {
               if (!satisfies(mapping.resolvedVersion, range)) continue;
-              const path = actualPath(
+              const path = canonicalPath(
                 findPackagePath(mapping.aliasName, options.projectRoot) ??
                   join(options.projectRoot, 'node_modules', mapping.aliasName),
               );
@@ -176,7 +167,7 @@ export async function linkAliasPeers(
             const path = findPackagePath(peerName, directory);
             const provider = path ? readManifest(path) : null;
             if (path && provider?.version && satisfies(provider.version, range)) {
-              const identity = actualPath(path);
+              const identity = canonicalPath(path);
               providers.set(identity, [
                 ...(providers.get(identity) ?? []),
                 consumer + ' -> ' + peerName + '@' + provider.version,

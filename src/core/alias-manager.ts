@@ -9,7 +9,7 @@ import type {
 import { realpathSync, statSync } from 'node:fs';
 import { join, posix } from 'path';
 import { createLogger } from '../utils/logger';
-import { findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { findPackagePath, getCachedRealPath, readPackageJsonCached } from '../utils/fs';
 import { LruCache } from '../utils/lru-cache';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../utils/module-request';
 import { ResolutionError } from './resolution-error';
@@ -152,24 +152,26 @@ export class AliasManager {
     const cached = this.pathCache.get(cacheKey);
     if (cached) return cached;
     let literalPath = path;
-    let realPath: string | undefined;
-    try {
-      realPath = realpathSync(path);
-    } catch {
-      // Physical directory paths are literal. For module IDs, recognize a
-      // suffix only after a real file, preserving '#' and '?' in directories
-      // and filenames. Longest prefixes handle multiple query/hash markers.
-      if (moduleId) {
-        const markers = [...path.matchAll(/[?#]/g)];
-        for (let index = markers.length - 1; index >= 0; index--) {
-          const candidate = path.slice(0, markers[index]!.index);
-          try {
-            if (!statSync(candidate).isFile()) continue;
-            realPath = realpathSync(candidate);
-            literalPath = candidate;
-            break;
-          } catch {
-            // Nonexistent/virtual importers retain their lexical path.
+    let realPath = !moduleId ? getCachedRealPath(path) : undefined;
+    if (realPath === undefined) {
+      try {
+        realPath = realpathSync(path);
+      } catch {
+        // Physical directory paths are literal. For module IDs, recognize a
+        // suffix only after a real file, preserving '#' and '?' in directories
+        // and filenames. Longest prefixes handle multiple query/hash markers.
+        if (moduleId) {
+          const markers = [...path.matchAll(/[?#]/g)];
+          for (let index = markers.length - 1; index >= 0; index--) {
+            const candidate = path.slice(0, markers[index]!.index);
+            try {
+              if (!statSync(candidate).isFile()) continue;
+              realPath = realpathSync(candidate);
+              literalPath = candidate;
+              break;
+            } catch {
+              // Nonexistent/virtual importers retain their lexical path.
+            }
           }
         }
       }

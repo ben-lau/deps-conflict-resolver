@@ -1,6 +1,5 @@
-import { realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
+import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 
 export interface InstalledPackageNode {
   id: string;
@@ -28,14 +27,6 @@ interface PackageRequest {
   rootPath?: string[];
 }
 
-function normalizePackagePath(packagePath: string): string {
-  try {
-    return realpathSync(packagePath);
-  } catch {
-    return resolve(packagePath);
-  }
-}
-
 function findRootRequests(
   packageNames: string[],
   projectRoot: string,
@@ -51,9 +42,9 @@ function findRootRequests(
   }));
   if (!workspaceRoot || names.size === 0) return requests;
 
-  const workspace = normalizePackagePath(workspaceRoot);
+  const workspace = canonicalPath(workspaceRoot);
   const pending: Array<{ directory: string; path: string[] }> = [
-    { directory: normalizePackagePath(projectRoot), path: [] },
+    { directory: canonicalPath(projectRoot), path: [] },
   ];
   const visited = new Set<string>();
   while (pending.length > 0) {
@@ -68,7 +59,7 @@ function findRootRequests(
     for (const [name, spec] of Object.entries(dependencies)) {
       const dependencyPath = findPackagePath(name, directory);
       if (!dependencyPath) continue;
-      const dependency = normalizePackagePath(dependencyPath);
+      const dependency = canonicalPath(dependencyPath);
       const requestPath = [...path, name];
       if (path.length > 0 && names.has(name)) {
         requests.push({ name, baseDir: directory, parentId: null, rootPath: requestPath });
@@ -114,7 +105,7 @@ export function buildInstalledDependencyGraph(
     const packagePath = findPackagePath(item.name, item.baseDir);
     if (!packagePath) continue;
 
-    const normalizedPath = normalizePackagePath(packagePath);
+    const normalizedPath = canonicalPath(packagePath);
     const existingNode = nodes.get(normalizedPath);
     const packageJson = existingNode ? null : readPackageJsonCached(normalizedPath);
     if (!existingNode && !packageJson) continue;
