@@ -169,7 +169,7 @@ Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal. D
 
 Development pre-bundling uses active aliases, direct consumers, and includeRedirects as entries, then follows actual import / require requests instead of eagerly loading every declared dependency. Explicit ssr.external and SSR optimizeDeps.exclude settings, including environments.ssr settings, take precedence over generated configuration. Externals are also forwarded to the SSR optimizer. Consumers explicitly excluded from automatic handling require manual resolution configuration.
 
-ssr.external=true (Vite 5+) also applies inside pre-bundled entries; dependencies matching noExternal package names or patterns remain bundled. External entry points resolve from their original consumer, preserving nested versions and import/require conditions instead of resolving from the optimizer cache directory.
+ssr.external=true (Vite 5+) also applies inside pre-bundled entries; dependencies matching noExternal package names or patterns remain bundled. External entry points resolve from their original consumer, preserving nested versions and import/require conditions instead of resolving from the optimizer cache directory. Native external loading preserves namespace identity, Node's module cache and live bindings without guessing default exports.
 
 ### Explain a Resolution
 
@@ -186,7 +186,15 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 explainResolution returns resolved, reason, aliases, and matchedPaths. Reasons distinguish redirection, exclusion, no match, inactive state, ambiguity, and beforeResolve hook handling. Diagnostics have stable codes and do not require parsing log messages. Strict initialization failures throw the exported ResolutionError, which exposes diagnostics.
 
-Pass `{ skipHook: true }` as the third argument to inspect static redirect rules without invoking user callbacks. Concurrent installDependencies() calls share one installation. invalidate() throws while installation is pending; await it first. Each new initialization refreshes this library's IO caches before its first read. After the package manager exits, all accepted aliases, including reused ones, are revalidated against the currently visible installation and symlink targets. Mismatched aliases are removed from active mappings.
+Pass `{ skipHook: true }` as the third argument to inspect static rules without executing user callbacks. Concurrent installDependencies() calls on one instance share preparation; invalidate() rejects while installation is pending.
+
+Preparations sharing a physical installation project or workspace run serially. Waiters read current inputs before choosing alias names. Processes of the same OS user coordinate through a local lock in their shared OS temporary directory and must use the same temporary directory. Generated aliases save exact versions; valid existing aliases remain reusable. After a package-manager attempt, preparation rebuilds consumer scopes, peer linkage and watch inputs and verifies every alias. At most one corrective installation is allowed; persistently changing inputs produce PROJECT_STATE_CHANGED.
+
+An initialized instance is invalidated if another preparation changes its effective rules or provider. Strict resolution rejects until invalidate() and initialize() run again, or the build restarts. Concurrent initialization waits for the project preparation queue. User hooks run outside preparation locks; internal replanning does not repeat analysis notifications. onAnalysisComplete observes a candidate analysis; query getAnalysisResult() after initialize() completes for the final result.
+
+Vite's implicit projectRoot follows the final configured root, including changes made by other config hooks. An explicit projectRoot takes precedence. Preparation locks coordinate this library's preparations; avoid other processes or package managers rewriting the installation during a running build. For parallel CI, prepare once, perform a frozen install and build with offline + strict.
+
+Run `pnpm bench:scale` to measure repeated ranges, multiple importers and package names, and the 5,000-entry cache boundary, including realpath counts and heap deltas. Resolution caches remain bounded; zero-realpath warm resolution applies when the working set fits in cache, rather than to arbitrary project sizes.
 
 ### Compatibility and Verification
 

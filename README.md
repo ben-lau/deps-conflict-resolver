@@ -169,7 +169,7 @@ Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal�
 
 开发预构建只将有效 alias、直接消费方和 includeRedirects 作为入口，再跟随实际的 import / require，不会提前加载整个依赖清单。显式 ssr.external 和 SSR optimizeDeps.exclude（包括 environments.ssr 的配置）优先于自动生成的配置；外置的依赖也会传给 SSR 优化器。显式排除需要重定向的消费方时，需要手动配置其解析方式。
 
-ssr.external=true（Vite 5+）也作用于预构建入口内部的依赖；noExternal 中包名或正则匹配的依赖继续内联。外置入口从原消费方解析，保留嵌套版本及 import/require 条件导出，避免优化器缓存目录改变其解析结果。
+ssr.external=true（Vite 5+）也作用于预构建入口内部的依赖；noExternal 中包名或正则匹配的依赖继续内联。外置入口从原消费方解析，保留嵌套版本及 import/require 条件导出，避免优化器缓存目录改变其解析结果。 外置模块通过 Node 原生加载，保留其 namespace 身份、模块缓存及 live bindings，不依赖默认导出探测。
 
 ### 查看某次解析的原因
 
@@ -186,7 +186,15 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason 可以表示已重定向、被排除、没有匹配、未初始化或多版本歧义；它也会说明 beforeResolve 钩子是否接管请求。诊断使用稳定的 code，无需解析日志。严格初始化失败时可以捕获导出的 ResolutionError 并读取 diagnostics。
 
-需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。并发的 installDependencies() 会共享同一次安装；安装未结束时 invalidate() 会抛错，应先等待安装完成。新一轮初始化会在首次读取前刷新本库的 IO 缓存。包管理器退出后会按当前可见的安装目录和软链接目标重新校验包括复用项在内的 alias，失配项不会继续发布为有效映射。
+需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。同一实例并发调用 installDependencies() 会共享一次准备；安装未结束时 invalidate() 会抛错，应先等待安装完成。
+
+同一实际安装工程或共享 workspace 的准备会串行执行，等待者重新读取输入后规划名称；同一系统用户的进程通过共享 OS 临时目录中的本地锁协调，参与进程需使用相同临时目录。新生成的 alias 精确保存版本，已有有效 alias 继续复用。包管理器结束后会重建消费方范围、peer 关联和 watch 输入，并重新验证所有 alias；必要时最多进行一次修正安装，输入持续变化则报告 PROJECT_STATE_CHANGED。
+
+已初始化实例若因另一轮准备而改变实际规则或 provider，会明确失效；strict 模式拒绝继续解析，应调用 invalidate() 后重新 initialize()，或重启对应构建。并发初始化会等待工程准备队列完成。用户钩子在准备锁外执行，内部重新规划不会重复触发分析通知；onAnalysisComplete 观察的是候选分析，最终结果在 initialize() 完成后通过 getAnalysisResult() 查询。
+
+Vite 的隐式 projectRoot 使用最终配置的 root，支持其他 config 钩子调整目录；显式 projectRoot 优先。准备锁协调本库的准备过程；正在构建时应避免其他进程或包管理器改写安装树。并行 CI 建议先 prepare、冻结安装，再使用 offline + strict 构建。
+
+运行 `pnpm bench:scale` 可检查重复版本范围、多 importer、多请求包名以及 5,000 项缓存容量边界的耗时、realpath 次数和堆变化。解析缓存保持有界；零 realpath 热路径适用于工作集能驻留缓存的情况，不代表任意工程规模都无需文件系统查询。
 
 ### 兼容性与验证
 
