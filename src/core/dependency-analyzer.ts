@@ -42,8 +42,7 @@ import {
   getEffectivePeerDependencies,
   type EffectivePeerEntry,
 } from '../utils/peer-overrides';
-import { clearNpmRegistryCache } from './npm-registry';
-import { npmRegistryClient, type RegistryClient } from './registry-client';
+import { NpmRegistryClient, type RegistryClient } from './registry-client';
 import {
   buildInstalledDependencyGraph,
   collectWorkspaceEntryNames,
@@ -166,7 +165,7 @@ export class DependencyAnalyzer {
     /** 可选：预填充的已安装包信息（主要用于测试） */
     installedDeps?: Map<string, InstalledPackageInfo>,
     /** 可选：注册表访问适配器（主要用于离线分析和测试） */
-    registryClient: RegistryClient = npmRegistryClient,
+    registryClient: RegistryClient = new NpmRegistryClient(),
   ) {
     this.options = options;
     this.registryClient = registryClient;
@@ -451,11 +450,8 @@ export class DependencyAnalyzer {
         missingFirstLevelPeers,
       };
     } finally {
-      // 清理全局 IO 缓存（允许 DepsConflictResolver 在完成 AliasManager 初始化后统一清理，以复用规范化路径缓存）
-      if (options?.clearCache !== false) {
-        clearPackageJsonCache();
-      }
-      clearNpmRegistryCache();
+      // The caller may reuse filesystem lookups while publishing alias rules.
+      if (options?.clearCache !== false) clearPackageJsonCache();
 
       // 清理仅在分析期间使用的内部状态，允许 GC 回收
       // 注意：不能清理 analyzedDependencies，它被返回值直接引用
@@ -583,20 +579,18 @@ export class DependencyAnalyzer {
     if (!this.dependencyGraph || this.graphPopulated) return;
     this.graphPopulated = true;
 
-    const rootVisibleNodeIds = new Map<string, string>();
-    for (const node of this.dependencyGraph.nodes.values()) {
-      const rootVisiblePath = findPackagePath(node.name, this.options.projectRoot);
-      if (!rootVisiblePath) continue;
-
-      const rootVisibleNode = this.dependencyGraph.nodes.get(canonicalPath(rootVisiblePath));
-      if (rootVisibleNode && !rootVisibleNodeIds.has(node.name)) {
-        rootVisibleNodeIds.set(node.name, rootVisibleNode.id);
-      }
+    const rootVisibleNodeIds = new Map<string, string | undefined>();
+    for (const { name } of this.dependencyGraph.nodes.values()) {
+      if (rootVisibleNodeIds.has(name)) continue;
+      const path = findPackagePath(name, this.options.projectRoot);
+      const node = path ? this.dependencyGraph.nodes.get(canonicalPath(path)) : undefined;
+      rootVisibleNodeIds.set(name, node?.id);
     }
 
     const orderedNodes: InstalledPackageNode[] = [];
     const selectedNodeIds = new Set<string>();
     for (const nodeId of rootVisibleNodeIds.values()) {
+      if (!nodeId) continue;
       const node = this.dependencyGraph.nodes.get(nodeId);
       if (node && !selectedNodeIds.has(node.id)) {
         selectedNodeIds.add(node.id);
@@ -612,8 +606,7 @@ export class DependencyAnalyzer {
     for (const node of orderedNodes) {
       if (this.analyzedDependencies.has(node.name)) continue;
 
-      const packageJson = readPackageJsonCached(node.packagePath);
-      if (!packageJson) continue;
+      const packageJson = node.manifest;
 
       this.cacheInstalledPackageInfo(node.name, node.packagePath, packageJson);
       this.analyzedDependencies.set(node.name, {
@@ -630,8 +623,7 @@ export class DependencyAnalyzer {
     for (const name of this.dependencyGraph.rootRequests.keys()) {
       const node = this.findGraphRoot(name);
       if (!node || node.name === name) continue;
-      const packageJson = readPackageJsonCached(node.packagePath);
-      if (!packageJson) continue;
+      const packageJson = node.manifest;
       this.cacheInstalledPackageInfo(name, node.packagePath, packageJson);
       this.analyzedDependencies.set(name, {
         name,
@@ -2421,6 +2413,7 @@ export class DependencyAnalyzer {
 export function createDependencyAnalyzer(
   options: ResolvedOptions,
   preparedAliases: readonly AliasMapping[] = [],
+  registryClient?: RegistryClient,
 ): DependencyAnalyzer {
   const mainPackageJson = readPackageJsonCached(options.projectRoot);
   if (!mainPackageJson) {
@@ -2443,8 +2436,10 @@ export function createDependencyAnalyzer(
         'npm:' + mapping.originalName + '@' + mapping.resolvedVersion,
       ]),
   );
-  return new DependencyAnalyzer(options, {
-    ...mainPackageJson,
-    devDependencies: { ...additional, ...mainPackageJson.devDependencies },
-  });
+  return new DependencyAnalyzer(
+    options,
+    { ...mainPackageJson, devDependencies: { ...additional, ...mainPackageJson.devDependencies } },
+    undefined,
+    registryClient,
+  );
 }

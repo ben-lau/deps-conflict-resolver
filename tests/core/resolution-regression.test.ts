@@ -16,7 +16,7 @@ import { createRequire } from 'node:module';
 import { createResolver } from '../../src/core/resolver';
 import { createDependencyAnalyzer } from '../../src/core/dependency-analyzer';
 import { ResolutionError } from '../../src/core/resolution-error';
-import { npmRegistryClient } from '../../src/core/registry-client';
+import { mockRegistry } from '../support/registry';
 import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
 import { clearPackageJsonCache, getCachedRealPath } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
@@ -152,11 +152,7 @@ describe('diagnostics and deterministic offline operation', () => {
       const covered = pkg(root, 'covered-child', {
         peerDependencies: { [installedPeer]: '^3.0.0' },
       });
-      const versions = vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.0.0']);
-      vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
-        name: 'runtime',
-        version: '2.0.0',
-      });
+      const fetch = mockRegistry({ name: 'runtime', version: '2.0.0' });
 
       const resolver = await createResolver({
         ...baseOptions(root, ['legacy', 'stable']),
@@ -179,7 +175,7 @@ describe('diagnostics and deterministic offline operation', () => {
       ]);
       expect(resolver.resolveModule('runtime', join(uncovered, 'index.js'))).toBeNull();
       expect(resolver.resolveModule(installedPeer, join(covered, 'index.js'))).toBe('compat');
-      if (offline) expect(versions).not.toHaveBeenCalled();
+      if (offline) expect(fetch).not.toHaveBeenCalled();
     },
   );
 
@@ -475,9 +471,11 @@ describe('diagnostics and deterministic offline operation', () => {
     });
     pkg(root, 'consumer', { peerDependencies: { '@scope/foo': '^1', 'scope-foo': '^1' } });
     for (const name of ['@scope/foo', 'scope-foo']) pkg(root, name, { version: '2.0.0' });
-    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['1.0.0', '2.0.0']);
-    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockImplementation(
-      async (name, version) => ({ name, version }),
+    mockRegistry(
+      { name: '@scope/foo', version: '1.0.0' },
+      { name: '@scope/foo', version: '2.0.0' },
+      { name: 'scope-foo', version: '1.0.0' },
+      { name: 'scope-foo', version: '2.0.0' },
     );
     const resolver = await createResolver(baseOptions(root, ['consumer']));
     const mappings = resolver.getAnalysisResult()!.aliasMappings;

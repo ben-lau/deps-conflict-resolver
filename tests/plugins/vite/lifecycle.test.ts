@@ -7,7 +7,7 @@ import { runInNewContext } from 'node:vm';
 import { build, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
-import { npmRegistryClient } from '../../../src/core/registry-client';
+import { mockRegistry } from '../../support/registry';
 
 const roots: string[] = [];
 function fixture(version: string) {
@@ -159,11 +159,7 @@ describe('Vite final configuration', () => {
     const a = fixture('2.6.14');
     const b = fixture('2.7.16');
     rmSync(join(a, 'node_modules/vue2'), { recursive: true });
-    const fetch = vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.6.14']);
-    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
-      name: 'vue',
-      version: '2.6.14',
-    });
+    const fetch = mockRegistry({ name: 'vue', version: '2.6.14' });
     const install = vi.fn().mockResolvedValue({
       success: false,
       exitCode: 1,

@@ -70,6 +70,7 @@ interface LockOwner {
   token: string;
   // Zero publishes the choosing phase; positive tickets order contenders.
   ticket: number;
+  mode?: 'read';
 }
 
 async function readOwner(path: string): Promise<LockOwner | null> {
@@ -133,7 +134,7 @@ async function readContenders(directory: string, token: string): Promise<LockOwn
   return contenders;
 }
 
-async function acquireLock(owner: string): Promise<() => Promise<void>> {
+async function acquireLock(owner: string, mode: 'read' | 'write'): Promise<() => Promise<void>> {
   // A private lock directory must not make another OS user's projects fail
   // with EACCES when /tmp is shared (as it is on Linux).
   const user =
@@ -146,7 +147,13 @@ async function acquireLock(owner: string): Promise<() => Promise<void>> {
   const token = randomUUID();
   const path = join(directory, token + '.json');
   const candidate = join(directory, token + '.tmp');
-  const record: LockOwner = { pid: process.pid, host: hostname(), token, ticket: 0 };
+  const record: LockOwner = {
+    pid: process.pid,
+    host: hostname(),
+    token,
+    ticket: 0,
+    ...(mode === 'read' && { mode }),
+  };
   const deadline = performance.now() + 300_000;
   let published = false;
   try {
@@ -172,8 +179,10 @@ async function acquireLock(owner: string): Promise<() => Promise<void>> {
       const blocked = (await readContenders(directory, token)).some(
         (other) =>
           other.ticket === 0 ||
-          other.ticket < record.ticket ||
-          (other.ticket === record.ticket && other.token < token),
+          // Legacy records have no mode and take an exclusive lock.
+          ((mode === 'write' || other.mode !== 'read') &&
+            (other.ticket < record.ticket ||
+              (other.ticket === record.ticket && other.token < token))),
       );
       if (!blocked) return () => removeRecord(path);
       if (performance.now() >= deadline)
@@ -197,6 +206,7 @@ export async function withProjectPreparation<T>(
   state: ProjectPreparation,
   task: (markChanged: () => void) => Promise<T>,
   current?: PreparationObserver,
+  mode: 'read' | 'write' = 'write',
 ): Promise<T> {
   const previous = state.tail;
   let finish!: () => void;
@@ -207,8 +217,9 @@ export async function withProjectPreparation<T>(
   let unlock: (() => Promise<void>) | undefined;
   let changed = false;
   try {
-    unlock = await acquireLock(state.owner);
+    unlock = await acquireLock(state.owner, mode);
     return await task(() => {
+      if (mode === 'read') throw new Error('Cannot change dependencies while holding a read lock');
       if (!changed) {
         state.revision++;
         changed = true;

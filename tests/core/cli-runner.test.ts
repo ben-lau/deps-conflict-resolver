@@ -6,7 +6,7 @@ import { runCli } from '../../src/core/cli-runner';
 import { createResolver } from '../../src/index';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
 import { clearPackageJsonCache } from '../../src/utils/fs';
-import { npmRegistryClient } from '../../src/core/registry-client';
+import { mockRegistry } from '../support/registry';
 import * as packageManager from '../../src/core/package-manager-adapter';
 
 describe('doctor and prepare commands', () => {
@@ -304,11 +304,7 @@ describe('doctor and prepare commands', () => {
         peerDependencies: { vue: '^2', missing: '^1' },
       }),
     );
-    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.7.16']);
-    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
-      name: 'vue',
-      version: '2.7.16',
-    });
+    mockRegistry({ name: 'vue', version: '2.7.16' });
     const install = vi.fn().mockResolvedValue({ success: false, errors: ['unexpected install'] });
     vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({ install });
 
@@ -326,11 +322,7 @@ describe('doctor and prepare commands', () => {
   });
 
   it('inherits package-manager registry settings and keeps install errors printed to stdout', async () => {
-    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.7.16']);
-    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
-      name: 'vue',
-      version: '2.7.16',
-    });
+    mockRegistry({ name: 'vue', version: '2.7.16' });
     const adapter = vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({
       install: vi.fn().mockResolvedValue({
         success: false,

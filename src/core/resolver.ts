@@ -23,6 +23,7 @@ import { createEnvironmentDetector, EnvironmentDetector } from './environment-de
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
 import { createAliasManager, AliasManager } from './alias-manager';
 import { createPackageInstaller, PackageInstaller } from './package-installer';
+import { NpmRegistryClient, type RegistryClient } from './registry-client';
 import { ResolutionError } from './resolution-error';
 import {
   getProjectPreparation,
@@ -253,36 +254,21 @@ export class DepsConflictResolver {
     // Notifications may initialize another resolver. Never await user code
     // while owning the project lock; read its inputs again afterwards.
     if (this.hooks.onAnalysisComplete) {
-      this.analysisResult = await withProjectPreparation(this.preparation, () =>
-        this.analyzeCurrent(),
+      this.analysisResult = await withProjectPreparation(
+        this.preparation,
+        () => this.analyzeCurrent(),
+        undefined,
+        'read',
       );
       await this.hooks.onAnalysisComplete(this.analysisResult);
     }
 
+    // Keep the queue position and lock through installation and publication.
     await withProjectPreparation(
       this.preparation,
-      async (markChanged) => {
-        try {
-          this.analysisResult = await this.analyzeCurrent(this.options.offline, [], false);
-          this.logMissingFirstLevelPeers(this.analysisResult);
-          this.assertResolved();
-          if (this.options.autoInstall) {
-            const installing = this.installGeneration(markChanged);
-            this.installationPromise = installing;
-            try {
-              await installing;
-            } finally {
-              this.installationPromise = null;
-            }
-          } else {
-            this.publishWithoutInstallation();
-          }
-          this.observeSnapshot();
-        } finally {
-          clearPackageJsonCache();
-        }
-      },
+      (markChanged) => this.prepareInitialSnapshot(markChanged),
       this.observer,
+      this.options.autoInstall ? 'write' : 'read',
     );
 
     await waitForProjectPreparation(this.preparation);
@@ -308,6 +294,29 @@ export class DepsConflictResolver {
 
     this.initialized = true;
     logger.info('Dependencies resolver initialized');
+  }
+
+  private async prepareInitialSnapshot(markChanged: () => void): Promise<void> {
+    try {
+      const registryClient = new NpmRegistryClient();
+      this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
+      this.assertResolved();
+      if (!this.options.autoInstall) {
+        this.publishWithoutInstallation();
+      } else {
+        const installing = this.installGeneration(markChanged, registryClient);
+        this.installationPromise = installing;
+        try {
+          await installing;
+        } finally {
+          this.installationPromise = null;
+        }
+      }
+      this.logMissingFirstLevelPeers(this.analysisResult);
+      this.observeSnapshot();
+    } finally {
+      clearPackageJsonCache();
+    }
   }
 
   /**
@@ -356,10 +365,11 @@ export class DepsConflictResolver {
         this.preparation,
         async (markChanged) => {
           try {
-            this.analysisResult = await this.analyzeCurrent(this.options.offline, [], false);
+            const registryClient = new NpmRegistryClient();
+            this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
             this.installDiagnostics = [];
             this.assertResolved();
-            if (!this.options.offline) await this.installGeneration(markChanged);
+            if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
             this.observeSnapshot();
           } finally {
@@ -367,6 +377,7 @@ export class DepsConflictResolver {
           }
         },
         this.observer,
+        this.options.offline ? 'read' : 'write',
       );
     } finally {
       this.preparing = false;
@@ -377,13 +388,23 @@ export class DepsConflictResolver {
     if (this.initialized) this.logPeerWarnings();
   }
 
-  private async analyzeCurrent(
+  private async analyzeCurrent({
     offline = this.options.offline,
-    preparedAliases: readonly AliasMapping[] = [],
+    preparedAliases = [],
     clearCache = true,
-  ): Promise<AnalysisResult> {
+    registryClient,
+  }: {
+    offline?: boolean;
+    preparedAliases?: readonly AliasMapping[];
+    clearCache?: boolean;
+    registryClient?: RegistryClient;
+  } = {}): Promise<AnalysisResult> {
     clearPackageJsonCache();
-    this.analyzer = createDependencyAnalyzer({ ...this.options, offline }, preparedAliases);
+    this.analyzer = createDependencyAnalyzer(
+      { ...this.options, offline },
+      preparedAliases,
+      registryClient,
+    );
     try {
       return await this.analyzer.analyze({ clearCache });
     } finally {
@@ -406,7 +427,10 @@ export class DepsConflictResolver {
     }
   }
 
-  private async installGeneration(markChanged: () => void): Promise<void> {
+  private async installGeneration(
+    markChanged: () => void,
+    registryClient: RegistryClient,
+  ): Promise<void> {
     const report: InstallReport = {
       success: true,
       installed: [],
@@ -455,11 +479,12 @@ export class DepsConflictResolver {
 
       // Installation can reconcile the whole tree. Reusing a planned alias
       // also changes the set of verified providers for scopes and diagnostics.
-      this.analysisResult = await this.analyzeCurrent(
-        result.success ? this.options.offline : true,
-        verified,
-        false,
-      );
+      this.analysisResult = await this.analyzeCurrent({
+        offline: !result.success || this.options.offline,
+        preparedAliases: verified,
+        clearCache: false,
+        registryClient,
+      });
       const fresh = this.analysisResult.aliasMappings;
       const pending = fresh.filter(
         (mapping) => mapping.installSpec && !blocked.has(mapping.aliasName),
@@ -513,7 +538,11 @@ export class DepsConflictResolver {
     const previous = this.snapshotSignature;
     try {
       try {
-        const analysis = await this.analyzeCurrent(true, this.activeMappings, false);
+        const analysis = await this.analyzeCurrent({
+          offline: true,
+          preparedAliases: this.activeMappings,
+          clearCache: false,
+        });
         if (generation !== this.snapshotGeneration) return;
         this.analysisResult = analysis;
         this.setActiveAliasMappings(

@@ -45,6 +45,64 @@ afterEach(async () => {
 });
 
 describe('project preparation ownership', () => {
+  it('runs readers concurrently while an earlier writer blocks later readers', async () => {
+    const root = fixture();
+    const bundle = join(root, 'preparation.cjs');
+    buildSync({
+      entryPoints: [resolve('src/core/project-preparation.ts')],
+      outfile: bundle,
+      bundle: true,
+      platform: 'node',
+    });
+    const script = String.raw`
+      const fs = require('node:fs'), path = require('node:path');
+      const [bundle, root, id, mode] = process.argv.slice(1);
+      const flag = (name) => path.join(root, id + '-' + name);
+      const rename = fs.promises.rename;
+      fs.promises.rename = async (...args) => {
+        await rename(...args);
+        fs.writeFileSync(flag('queued'), '');
+      };
+      const {getProjectPreparation, withProjectPreparation} = require(bundle);
+      withProjectPreparation(getProjectPreparation(root), async () => {
+        fs.writeFileSync(flag('entered'), '');
+        while (!fs.existsSync(flag('release'))) await new Promise(done => setTimeout(done, 10));
+      }, undefined, mode).catch(error => { console.error(error); process.exitCode = 1 });
+    `;
+    const start = (id: string, mode: string) => {
+      const child = spawn(process.execPath, ['-e', script, bundle, root, id, mode], {
+        env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+        stdio: 'inherit',
+      });
+      children.push(child);
+      return {
+        queued: () => existsSync(join(root, id + '-queued')),
+        entered: () => existsSync(join(root, id + '-entered')),
+        release: () => writeFileSync(join(root, id + '-release'), ''),
+        done: new Promise<number | null>((done) => child.once('close', done)),
+      };
+    };
+    const first = start('first', 'read');
+    const second = start('second', 'read');
+    await until(() => first.entered() && second.entered());
+    const writer = start('writer', 'write');
+    await until(writer.queued);
+    const last = start('last', 'read');
+    await until(last.queued);
+    expect(writer.entered()).toBe(false);
+    expect(last.entered()).toBe(false);
+    first.release();
+    expect(await first.done).toBe(0);
+    expect(writer.entered()).toBe(false);
+    second.release();
+    await until(writer.entered);
+    expect(last.entered()).toBe(false);
+    writer.release();
+    await until(last.entered);
+    last.release();
+    expect(await Promise.all([second.done, writer.done, last.done])).toEqual([0, 0, 0]);
+  }, 10_000);
+
   it.each(['unpublished', 'choosing', 'numbered'] as const)(
     'recovers a process killed at the %s publication boundary without stealing a live lock',
     async (phase) => {

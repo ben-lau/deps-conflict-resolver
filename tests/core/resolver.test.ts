@@ -210,7 +210,7 @@ describe('DepsConflictResolver', () => {
           {
             originalName: 'vue',
             aliasName: 'aliased-vue2',
-            installSpec: 'aliased-vue2@npm:vue@2.7.0',
+            installSpec: '',
             resolvedVersion: '2.7.0',
             usedBy: ['legacy-package'],
             allDependents: ['legacy-package'],
@@ -224,7 +224,6 @@ describe('DepsConflictResolver', () => {
           {
             ...firstResult.aliasMappings[0],
             aliasName: 'aliased-vue3',
-            installSpec: 'aliased-vue3@npm:vue@3.4.0',
             resolvedVersion: '3.4.0',
           },
         ],

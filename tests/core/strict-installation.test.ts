@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createResolver } from '../../src/core/resolver';
 import { ResolutionError } from '../../src/core/resolution-error';
-import { npmRegistryClient } from '../../src/core/registry-client';
+import { mockRegistry } from '../support/registry';
 import * as packageManager from '../../src/core/package-manager-adapter';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
@@ -42,8 +42,7 @@ function fixture(withNestedProvider: boolean, peerRange = '^1') {
     dependencies: { runtime: '^1' },
     peerDependencies: { runtime: peerRange },
   };
-  vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['1.0.0', '2.0.0']);
-  vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue(selected);
+  mockRegistry(selected, { name: 'renderer', version: '2.0.0' });
   const install = vi.fn(async (specs: string[]) => {
     for (const spec of specs) {
       const alias = spec.slice(0, spec.indexOf('@npm:'));
@@ -238,8 +237,7 @@ describe('strict peer validation across installation', () => {
       writePackage(join(root, 'node_modules/runtime26'), { name: 'runtime', version: '2.6.14' });
       const candidate = { name: 'runtime', version: '2.7.16' };
       writePackage(join(root, 'node_modules', recentAlias), candidate);
-      vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue([candidate.version]);
-      vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue(candidate);
+      mockRegistry(candidate);
       const install = vi.fn(() => {
         throw new Error('An existing alias should be reused');
       });

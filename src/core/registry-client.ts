@@ -1,6 +1,6 @@
 import type { NpmPackageInfo, PackageJson } from '../types/index';
 import { createLogger } from '../utils/logger';
-import { DEFAULT_NPM_REGISTRY, DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../constants';
+import { DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../constants';
 import { LruCache } from '../utils/lru-cache';
 
 const logger = createLogger('npm-registry');
@@ -17,17 +17,6 @@ export interface RegistryClient {
     version: string,
     registry: string,
   ): Promise<PackageJson>;
-}
-
-/**
- * NPM 注册表缓存
- */
-const packageCache = new Map<string, NpmPackageInfo>();
-const manifestCache = new LruCache<string, PackageJson>({ maxEntries: 200 });
-
-export function clearNpmRegistryCache(): void {
-  packageCache.clear();
-  manifestCache.clear();
 }
 
 /**
@@ -59,17 +48,7 @@ async function fetchWithTimeout<T>(
 /**
  * 从 NPM 注册表获取包信息
  */
-async function fetchPackageInfo(
-  packageName: string,
-  registry = DEFAULT_NPM_REGISTRY,
-): Promise<NpmPackageInfo> {
-  // 检查缓存
-  const cacheKey = `${registry}:${packageName}`;
-  const cached = packageCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
+async function fetchPackageInfo(packageName: string, registry: string): Promise<NpmPackageInfo> {
   try {
     // 处理作用域包的 URL 编码
     const encodedName = packageName.startsWith('@')
@@ -110,7 +89,7 @@ async function fetchPackageInfo(
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const packageInfo: NpmPackageInfo = {
+    return {
       name: data!.name,
       versions: Object.keys(data!.versions),
       // Installation metadata includes peer declarations. Retain only the
@@ -134,10 +113,6 @@ async function fetchPackageInfo(
       ),
       distTags: data!['dist-tags'],
     };
-
-    packageCache.set(cacheKey, packageInfo);
-
-    return packageInfo;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       logger.error(
@@ -151,22 +126,39 @@ async function fetchPackageInfo(
   }
 }
 
-function getCachedManifest(packageName: string, version: string, registry: string) {
-  return (
-    manifestCache.get(`${registry}\0${packageName}\0${version}`) ??
-    packageCache.get(`${registry}:${packageName}`)?.versionDetails[version]
-  );
-}
+/** Metadata survives corrective analysis within the same preparation. */
+export class NpmRegistryClient implements RegistryClient {
+  private readonly packageCache = new Map<string, NpmPackageInfo>();
+  private readonly manifestCache = new LruCache<string, PackageJson>({ maxEntries: 200 });
 
-export const npmRegistryClient: RegistryClient = {
   async fetchAllVersions(packageName: string, registry: string): Promise<string[]> {
-    const info = await fetchPackageInfo(packageName, registry);
-    return info?.versions ?? [];
-  },
-  getCachedManifest,
-  async fetchPackageManifest(packageName, version, registry) {
+    const key = `${registry}\0${packageName}`;
+    let info = this.packageCache.get(key);
+    if (!info) {
+      info = await fetchPackageInfo(packageName, registry);
+      this.packageCache.set(key, info);
+    }
+    return info.versions;
+  }
+
+  getCachedManifest(
+    packageName: string,
+    version: string,
+    registry: string,
+  ): PackageJson | undefined {
+    return (
+      this.manifestCache.get(`${registry}\0${packageName}\0${version}`) ??
+      this.packageCache.get(`${registry}\0${packageName}`)?.versionDetails[version]
+    );
+  }
+
+  async fetchPackageManifest(
+    packageName: string,
+    version: string,
+    registry: string,
+  ): Promise<PackageJson> {
     const key = `${registry}\0${packageName}\0${version}`;
-    const cached = getCachedManifest(packageName, version, registry);
+    const cached = this.getCachedManifest(packageName, version, registry);
     if (cached) return cached;
     const encodedName = packageName.startsWith('@')
       ? `@${encodeURIComponent(packageName.slice(1))}`
@@ -185,7 +177,19 @@ export const npmRegistryClient: RegistryClient = {
     if (manifest.name !== packageName || manifest.version !== version) {
       throw new Error(`Invalid manifest for ${packageName}@${version}`);
     }
-    manifestCache.set(key, manifest);
+    this.manifestCache.set(key, manifest);
     return manifest;
-  },
-};
+  }
+
+  clear(): void {
+    this.packageCache.clear();
+    this.manifestCache.clear();
+  }
+}
+
+// Shared only by the legacy npm-registry helper.
+export const npmRegistryClient = new NpmRegistryClient();
+
+export function clearNpmRegistryCache(): void {
+  npmRegistryClient.clear();
+}

@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createResolver } from '../../src/core/resolver';
-import { npmRegistryClient } from '../../src/core/registry-client';
+import { mockRegistry } from '../support/registry';
 import * as packageManager from '../../src/core/package-manager-adapter';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
@@ -43,11 +43,10 @@ function fixture() {
       peerDependencies: { vue: version! },
     });
   }
-  vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.6.14', '2.7.16']);
-  vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockImplementation(async (name, version) => ({
-    name,
-    version,
-  }));
+  const fetch = mockRegistry(
+    { name: 'vue', version: '2.6.14' },
+    { name: 'vue', version: '2.7.16' },
+  );
   const install = vi.fn(async (specs: string[]) => {
     for (const spec of specs) {
       const [alias, target] = spec.split('@npm:');
@@ -71,7 +70,7 @@ function fixture() {
     autoInstall: true,
     strict: true,
   };
-  return { root, install, options };
+  return { root, install, options, fetch };
 }
 
 afterEach(() => {
@@ -82,6 +81,68 @@ afterEach(() => {
 });
 
 describe('project preparation and published rules', () => {
+  it('waits for an earlier online preparation before checking aliases offline', async () => {
+    const { root, options, install, fetch } = fixture();
+    let started!: () => void;
+    let release!: () => void;
+    const registryStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const registryResponse = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const version = '2.6.14';
+    fetch.mockImplementation(async () => {
+      started();
+      await registryResponse;
+      return new Response(
+        JSON.stringify({ name: 'vue', versions: { [version]: { name: 'vue', version } } }),
+      );
+    });
+    const online = createResolver(options);
+    await registryStarted;
+    const offline = createResolver({ ...options, offline: true });
+    const prepared = Promise.allSettled([online, offline]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    release();
+    await prepared;
+    const [writer, reader] = await Promise.all([online, offline]);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('https://unused.invalid/vue', expect.anything());
+    expect(install).toHaveBeenCalledTimes(1);
+    const [alias] = writer.getInstallResult()!.installed;
+    expect(alias).toBeDefined();
+    expect(reader.resolveModule('vue', join(root, 'node_modules/a/index.js'))).toBe(alias);
+  });
+
+  it('keeps registry metadata for corrective installation while another project prepares', async () => {
+    const { root, options, install, fetch } = fixture();
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'deps-prepare-other-')));
+    roots.push(other);
+    manifest(other, { name: 'other' });
+    const versions = Object.fromEntries(
+      ['2.6.14', '2.7.16'].map((version) => [version, { name: 'vue', version }]),
+    );
+    fetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({ name: 'vue', versions })))
+      .mockRejectedValue(new Error('Registry became unavailable'));
+    const perform = install.getMockImplementation()!;
+    install.mockImplementationOnce(async (specs) => {
+      const result = await perform(specs);
+      manifest(join(root, 'node_modules/a'), {
+        name: 'a',
+        version: '1.0.0',
+        peerDependencies: { vue: '2.7.16' },
+      });
+      await createResolver({ ...options, projectRoot: other, dependencies: [], offline: true });
+      return result;
+    });
+
+    const resolver = await createResolver(options);
+    expect(resolver.getAnalysisResult()?.aliasMappings[0]?.resolvedVersion).toBe('2.7.16');
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])(
     'preserves both concurrent resolver targets: sameVersion=%s',
     async (sameVersion) => {
@@ -210,11 +271,11 @@ describe('project preparation and published rules', () => {
 
   it('bounds corrective installations when peer inputs keep changing', async () => {
     const { root, options, install } = fixture();
-    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue([
-      '2.6.14',
-      '2.7.16',
-      '4.0.0',
-    ]);
+    mockRegistry(
+      { name: 'vue', version: '2.6.14' },
+      { name: 'vue', version: '2.7.16' },
+      { name: 'vue', version: '4.0.0' },
+    );
     const perform = install.getMockImplementation()!;
     install.mockImplementation(async (specs) => {
       const result = await perform(specs);
@@ -247,7 +308,7 @@ describe('project preparation and published rules', () => {
     });
     manifest(join(root, 'node_modules/renderer'), { name: 'renderer', version: '2.0.0' });
     const a = await createResolver({ ...options, offline: true });
-    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['1.0.0']);
+    mockRegistry({ name: 'renderer', version: '1.0.0' });
     const perform = install.getMockImplementation()!;
     install.mockImplementation(async (specs) => {
       const result = await perform(specs);
@@ -278,7 +339,7 @@ describe('project preparation and published rules', () => {
       });
       manifest(join(root, 'node_modules/renderer'), { name: 'renderer', version: '2.0.0' });
       const a = await createResolver({ ...options, offline: true });
-      vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['1.0.0', '3.0.0']);
+      mockRegistry({ name: 'renderer', version: '1.0.0' }, { name: 'renderer', version: '3.0.0' });
       const perform = install.getMockImplementation()!;
       install.mockImplementation(async (specs) => {
         const result = await perform(specs);
