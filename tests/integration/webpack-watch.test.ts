@@ -50,6 +50,53 @@ function linkedConsumerFixture() {
   return { root, consumer, manifest, entry: join(root, 'entry.cjs'), dist: join(root, 'dist') };
 }
 
+it('attempts permissive preparation once per ordinary run and recovers on the next run', async () => {
+  const { root, entry, dist } = linkedConsumerFixture();
+  const output = join(dist, 'entry.cjs');
+  writeFileSync(entry, 'module.exports = require("legacy");');
+  const logger = vi.spyOn(console, 'error').mockImplementation(() => {});
+  let broken = true;
+  const onAnalysisComplete = vi.fn(() => {
+    if (broken) throw new Error('Analysis hook failed');
+  });
+  const compiler = webpack({
+    context: root,
+    mode: 'development',
+    target: 'node',
+    entry,
+    output: { path: dist, filename: 'entry.cjs', library: { type: 'commonjs2' } },
+    plugins: [
+      new DepsConflictResolverWebpackPlugin({
+        dependencies: ['legacy'],
+        offline: true,
+        hooks: { onAnalysisComplete },
+      }),
+    ],
+  });
+  async function compile() {
+    const stats = await new Promise<webpack.Stats>((resolve, reject) => {
+      compiler.run((error, value) => (error || !value ? reject(error) : resolve(value)));
+    });
+    expect(stats.hasErrors(), stats.toString({ all: false, errors: true })).toBe(false);
+    delete require.cache[output];
+    return require(output);
+  }
+  try {
+    expect(await compile()).toBe('3.0.0');
+    expect(onAnalysisComplete).toHaveBeenCalledTimes(1);
+    expect(logger).toHaveBeenCalledTimes(1);
+    broken = false;
+    expect(await compile()).toBe('2.7.16');
+    expect(onAnalysisComplete).toHaveBeenCalledTimes(2);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      compiler.close((error) => (error ? reject(error) : resolve())),
+    );
+    logger.mockRestore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it.each([false, true])(
   'updates watch output and retains unrelated caches: legacy hooks=%s',
   async (legacyHooks) => {

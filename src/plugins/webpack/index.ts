@@ -269,9 +269,10 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     };
     logger.info('Applying DepsConflictResolverWebpackPlugin...');
 
-    // Start preparation at the first compilation so watchRun doesn't repeat it.
-    compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, async () => {
-      await this.initialize(compiler);
+    let runPreparation: Promise<void> | undefined;
+    compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, () => {
+      runPreparation = this.initialize(compiler);
+      return runPreparation;
     });
 
     // 对于 watch 模式
@@ -330,6 +331,9 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     // 使用 normalModuleFactory 钩子拦截模块请求
     compiler.hooks.normalModuleFactory.tap(PLUGIN_NAME, (nmf: NormalModuleFactory) => {
+      // Direct compile() calls do not run beforeRun. Share their preparation
+      // within this factory and retry at the start of the next compilation.
+      let preparation = ! compiler.running ? undefined : runPreparation;
       // beforeResolve: 在模块解析之前修改请求
       // 这是最早能够拦截模块请求的时机
       // AsyncSeriesBailHook<[ResolveData], false | void>
@@ -339,7 +343,9 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       nmf.hooks.beforeResolve.tapPromise(PLUGIN_NAME, async (resolveData) => {
         try {
           // watchRun prepares once per compilation, including permissive failures.
-          if (!compiler.watchMode) await this.initialize(compiler);
+          if (!compiler.watchMode && !this.initialized) {
+            await (preparation ??= this.initialize(compiler));
+          }
           this.handleResolve(resolveData);
         } catch (err) {
           logger.error('Error during module resolution:', err);
