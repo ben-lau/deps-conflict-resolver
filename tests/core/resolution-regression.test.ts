@@ -213,6 +213,66 @@ describe('diagnostics and deterministic offline operation', () => {
     expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
   });
 
+  it.each(['wrong-name', 'wrong-version', 'compatible-override', 'none'])(
+    'validates workspace alias reuse from its host-visible location: %s',
+    async (shadow) => {
+      const root = project({
+        workspaces: ['packages/*'],
+        dependencies: { 'renderer-b': '2.0.0', compat: 'npm:renderer-b@1.0.0' },
+      });
+      pkg(root, 'renderer-b', { version: '2.0.0' });
+      pkg(root, 'compat', { name: 'renderer-b', version: '1.0.0' });
+      const app = join(root, 'packages/app');
+      mkdirSync(app, { recursive: true });
+      writeFileSync(
+        join(app, 'package.json'),
+        JSON.stringify({
+          name: 'app',
+          dependencies: {
+            consumer: '1.0.0',
+            ...(shadow === 'none'
+              ? {}
+              : { compat: shadow === 'wrong-name' ? 'npm:renderer-a@1.0.0' : 'file:./compat' }),
+          },
+        }),
+      );
+      const consumer = pkg(app, 'consumer', { peerDependencies: { 'renderer-b': '^1' } });
+      if (shadow !== 'none')
+        pkg(app, 'compat', {
+          name: shadow === 'wrong-name' ? 'renderer-a' : 'renderer-b',
+          version:
+            shadow === 'wrong-version'
+              ? '2.0.0'
+              : shadow === 'compatible-override'
+                ? '1.1.0'
+                : '1.0.0',
+        });
+      const initializing = createResolver({
+        ...baseOptions(app, ['consumer']),
+        offline: true,
+        strict: true,
+      });
+      if (shadow === 'wrong-name' || shadow === 'wrong-version') {
+        await expect(initializing).rejects.toMatchObject({
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING' }),
+          ]),
+        });
+      } else {
+        const resolver = await initializing;
+        expect(resolver.getDiagnostics()).toEqual([]);
+        expect(resolver.getAnalysisResult()!.aliasMappings[0]!.resolvedVersion).toBe(
+          shadow === 'none' ? '1.0.0' : '1.1.0',
+        );
+        expect(resolver.resolveModule('renderer-b', join(consumer, 'index.js'))).toBe('compat');
+        const active = resolver.getAliasPathMappings()[0]!;
+        expect(JSON.parse(readFileSync(join(active.path, 'package.json'), 'utf8')).name).toBe(
+          'renderer-b',
+        );
+      }
+    },
+  );
+
   it('keeps both configured names when roots share one physical package', async () => {
     const root = project({
       dependencies: {
