@@ -90,6 +90,165 @@ function nativeDependency(root: string, imported = false, subpath = false): void
 }
 
 describe('SSR alias resolution', () => {
+  it.each(['await', 'throw', 'then'] as const)(
+    'keeps native external evaluation semantics: %s',
+    async (kind) => {
+      const { root } = fixture();
+      const legacy = join(root, 'node_modules/legacy');
+      const provider = join(legacy, 'node_modules/evaluated-native');
+      mkdirSync(provider, { recursive: true });
+      writeFileSync(
+        join(provider, 'package.json'),
+        JSON.stringify({
+          name: 'evaluated-native',
+          version: '1.0.0',
+          type: 'module',
+          exports: './index.mjs',
+        }),
+      );
+      writeFileSync(
+        join(provider, 'index.mjs'),
+        kind === 'throw'
+          ? 'throw new Error("native evaluation failed");'
+          : kind === 'await'
+            ? 'await Promise.resolve(); export const value="ready"; export const marker={};'
+            : 'import * as self from "./index.mjs"; export const marker={}; export function then(resolve){resolve({value:"ready",own:this===self,marker});}',
+      );
+      const original = JSON.parse(readFileSync(join(legacy, 'package.json'), 'utf8'));
+      writeFileSync(
+        join(legacy, 'package.json'),
+        JSON.stringify({ ...original, dependencies: { 'evaluated-native': '1.0.0' } }),
+      );
+      writeFileSync(
+        join(legacy, 'index.js'),
+        readFileSync(join(legacy, 'index.js'), 'utf8') +
+          '\nimport * as native from "evaluated-native"; export const nativeValue=native.value; export const own=native.own; export const marker=native.marker;',
+      );
+      writeFileSync(
+        join(root, 'entry.js'),
+        readFileSync(join(root, 'entry.js'), 'utf8') +
+          '\nexport {nativeValue,own,marker} from "legacy";',
+      );
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        server: { middlewareMode: true, hmr: false },
+        ssr: { external: true, noExternal: ['legacy', 'vue', 'vue2'] },
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            offline: true,
+            strict: true,
+            ssr: 'auto',
+          }),
+        ],
+      });
+      try {
+        if (kind === 'throw') {
+          await expect(server.ssrLoadModule('/entry.js')).rejects.toThrow(
+            'native evaluation failed',
+          );
+        } else {
+          const url = pathToFileURL(join(provider, 'index.mjs')).href;
+          const native = (
+            await import(
+              'data:text/javascript,' +
+                encodeURIComponent('export default await import(' + JSON.stringify(url) + ');')
+            )
+          ).default;
+          const result = await server.ssrLoadModule('/entry.js');
+          expect(result.nativeValue).toBe(native.value);
+          expect(result.marker).toBe(native.marker);
+          if (kind === 'then') expect(result.own).toBe(true);
+          expect(result.runtimeVersion).toBe('2.7.16');
+        }
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  it('preserves nested native ESM namespace identity, live bindings and warm-cache identity', async () => {
+    const { root } = fixture();
+    const legacy = join(root, 'node_modules/legacy');
+    const provider = join(legacy, 'node_modules/namespace-provider');
+    mkdirSync(provider, { recursive: true });
+    writeFileSync(
+      join(provider, 'package.json'),
+      JSON.stringify({
+        name: 'namespace-provider',
+        version: '1.0.0',
+        type: 'module',
+        exports: './index.mjs',
+      }),
+    );
+    writeFileSync(
+      join(provider, 'index.mjs'),
+      'import * as self from "./index.mjs"; export {self}; export const token = {}; export let value = 0; export function increment(){value++;}',
+    );
+    const original = JSON.parse(readFileSync(join(legacy, 'package.json'), 'utf8'));
+    writeFileSync(
+      join(legacy, 'package.json'),
+      JSON.stringify({ ...original, dependencies: { 'namespace-provider': '1.0.0' } }),
+    );
+    writeFileSync(
+      join(legacy, 'index.js'),
+      readFileSync(join(legacy, 'index.js'), 'utf8') +
+        '\nimport * as native from "namespace-provider"; export const namespaceStable = native === native.self; export const nativeToken = native.token; export function readNative(){return native.value;} export const increment = native.increment;',
+    );
+    writeFileSync(
+      join(root, 'entry.js'),
+      readFileSync(join(root, 'entry.js'), 'utf8') +
+        '\nexport {namespaceStable,nativeToken,readNative,increment} from "legacy";',
+    );
+    const nativeUrl = pathToFileURL(join(provider, 'index.mjs')).href;
+    // The test runner transforms file imports too. Load the reference through
+    // a native data module so this compares with Node's actual module cache.
+    const native = (
+      await import(
+        'data:text/javascript,' +
+          encodeURIComponent(
+            'import * as native from ' + JSON.stringify(nativeUrl) + '; export {native};',
+          )
+      )
+    ).native;
+    let metadata: string | undefined;
+    for (let pass = 0; pass < 2; pass++) {
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        server: { middlewareMode: true, hmr: false },
+        ssr: { external: true, noExternal: ['legacy', 'vue', 'vue2'] },
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            offline: true,
+            strict: true,
+            ssr: 'auto',
+          }),
+        ],
+      });
+      try {
+        const result = await server.ssrLoadModule('/entry.js');
+        expect(result.namespaceStable).toBe(true);
+        expect(result.nativeToken).toBe(native.token);
+        result.increment();
+        expect(result.readNative()).toBe(native.value);
+        expect(native.value).toBe(pass + 1);
+        const current = readFileSync(
+          join(server.config.cacheDir, 'deps_ssr/_metadata.json'),
+          'utf8',
+        );
+        if (metadata) expect(current).toBe(metadata);
+        metadata = current;
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
   it.for([
     { commonjs: false, location: 'root', pattern: false },
     { commonjs: true, location: 'root', pattern: false },
