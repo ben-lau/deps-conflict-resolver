@@ -470,6 +470,59 @@ describe('diagnostics and deterministic offline operation', () => {
 });
 
 describe('resolution correctness with installed packages', () => {
+  it('discovers workspace-only configured instances through installed runtime links', async () => {
+    const root = project({ name: 'workspace', workspaces: ['apps/*', 'packages/*'] });
+    function writeWorkspacePackage(directory: string, manifest: PackageJson): string {
+      const path = join(root, directory);
+      mkdirSync(join(path, 'node_modules'), { recursive: true });
+      writeFileSync(join(path, 'package.json'), JSON.stringify(manifest));
+      return path;
+    }
+    const app = writeWorkspacePackage('apps/host', {
+      name: 'host',
+      dependencies: { vue: '3.5.0', vue26: 'npm:vue@2.6.14', vue27: 'npm:vue@2.7.16' },
+      optionalDependencies: { bridge: 'workspace:*', 'missing-bridge': 'workspace:*' },
+    });
+    const bridge = writeWorkspacePackage('packages/bridge', {
+      name: 'bridge',
+      dependencies: { ui: 'workspace:*' },
+    });
+    const ui = writeWorkspacePackage('packages/ui', {
+      name: 'ui',
+      dependencies: { bridge: 'workspace:*', legacy: '1.0.0' },
+    });
+    const sibling = writeWorkspacePackage('packages/unused', {
+      name: 'unused',
+      dependencies: { legacy: '1.0.0' },
+    });
+    symlinkSync(bridge, join(app, 'node_modules/bridge'), 'junction');
+    symlinkSync(ui, join(bridge, 'node_modules/ui'), 'junction');
+    symlinkSync(bridge, join(ui, 'node_modules/bridge'), 'junction');
+    const legacy = pkg(ui, 'legacy', { peerDependencies: { vue: '2.7.16' } });
+    const unused = pkg(sibling, 'legacy', { peerDependencies: { vue: '2.6.14' } });
+    pkg(app, 'vue', { version: '3.5.0' });
+    pkg(app, 'vue26', { name: 'vue', version: '2.6.14' });
+    pkg(app, 'vue27', { name: 'vue', version: '2.7.16' });
+
+    const resolver = await createResolver({ ...baseOptions(app), offline: true, strict: true });
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue27');
+    expect(resolver.resolveModule('vue', join(unused, 'index.js'))).toBeNull();
+    expect(resolver.getAnalysisResult()?.aliasMappings.map(({ usedBy }) => usedBy)).toEqual([
+      ['bridge>ui>legacy'],
+    ]);
+    expect(resolver.getAnalysisResult()?.watchFiles).toEqual(
+      expect.arrayContaining([bridge, ui, legacy].map((path) => join(path, 'package.json'))),
+    );
+
+    writeFileSync(
+      join(legacy, 'package.json'),
+      JSON.stringify({ name: 'legacy', version: '1.0.0', peerDependencies: { vue: '2.6.14' } }),
+    );
+    resolver.invalidate();
+    await resolver.initialize();
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue26');
+  });
+
   it('uses the selected alias manifest for peer closure instead of the host manifest', async () => {
     const root = project({
       dependencies: {

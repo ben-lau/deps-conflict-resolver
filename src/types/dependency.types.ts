@@ -87,6 +87,9 @@ export interface DependencyPath {
    */
   path: string[];
 
+  /** Physical package directory of the requester, when resolved from disk. */
+  packagePath?: string;
+
   /**
    * 要求的版本范围
    */

@@ -320,6 +320,8 @@ export class DependencyAnalyzer {
       this.dependencyGraph = buildInstalledDependencyGraph(
         this.options.dependencies,
         this.options.projectRoot,
+        workspaceRoot,
+        this.watchFiles,
       );
       for (const node of this.dependencyGraph.nodes.values()) {
         this.watchFiles.add(join(node.packagePath, 'package.json'));
@@ -481,7 +483,7 @@ export class DependencyAnalyzer {
 
   private findGraphRoot(packageName: string): InstalledPackageNode | null {
     if (!this.dependencyGraph) return null;
-    const rootId = this.dependencyGraph.rootRequests.get(packageName);
+    const rootId = this.dependencyGraph.rootRequests.get(packageName)?.keys().next().value;
     return rootId ? (this.dependencyGraph.nodes.get(rootId) ?? null) : null;
   }
 
@@ -550,8 +552,8 @@ export class DependencyAnalyzer {
       this.visitedPackages.add(node.name);
     }
 
-    for (const [name, rootId] of this.dependencyGraph.rootRequests) {
-      const node = this.dependencyGraph.nodes.get(rootId);
+    for (const name of this.dependencyGraph.rootRequests.keys()) {
+      const node = this.findGraphRoot(name);
       if (!node || node.name === name) continue;
       const packageJson = readPackageJsonCached(node.packagePath);
       if (!packageJson) continue;
@@ -612,47 +614,39 @@ export class DependencyAnalyzer {
    */
   private collectFirstLevelPeerDependencies(): Map<string, DependencyPath[]> {
     const peerDepsMap = new Map<string, DependencyPath[]>();
-    const hasInstalledGraphRoots = (this.dependencyGraph?.roots.length ?? 0) > 0;
-
-    // 只遍历第一层依赖（用户指定的 dependencies）
-    for (const depName of this.options.dependencies) {
-      // `analyzedDependencies` is intentionally keyed by package name for
-      // compatibility, so a nested instance can appear under the same key
-      // after another root populated the graph. In a real installed graph,
-      // only a node recorded in `roots` is a configured first-level package.
-      // Keep the no-root fallback for injected/unit-test analyzers that do
-      // not materialize an installed graph at all.
-      if (hasInstalledGraphRoots && !this.findGraphRoot(depName)) {
-        logger.debug(`Skipping non-root configured dependency: ${depName}`);
-        continue;
-      }
-
-      const depInfo = this.analyzedDependencies.get(depName);
-      if (!depInfo) continue;
-
-      const peerDeps = depInfo.peerDependencies;
-      const peerMeta = depInfo.peerDependenciesMeta ?? {};
-
-      for (const [peerName, peerRange] of Object.entries(peerDeps)) {
-        const isOptional = peerMeta[peerName]?.optional === true;
-
-        if (isOptional) {
-          logger.debug(
-            `Skipping optional first-level peer dependency: ${peerName}@${peerRange} required by ${depName}`,
-          );
-          continue;
-        }
+    const collectPeers = (
+      manifest: Pick<PackageJson, 'peerDependencies' | 'peerDependenciesMeta'>,
+      path: string[],
+      packagePath?: string,
+    ) => {
+      for (const [peerName, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
+        if (manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
 
         const existing = peerDepsMap.get(peerName) ?? [];
         existing.push({
-          path: [depName],
+          path,
           requiredRange: peerRange,
+          ...(packagePath ? { packagePath } : {}),
         });
         peerDepsMap.set(peerName, existing);
-
         logger.debug(
-          `Found first-level peer dependency: ${peerName}@${peerRange} required by ${depName}${isOptional ? ' (optional)' : ''}`,
+          `Found first-level peer dependency: ${peerName}@${peerRange} required by ${path.join('>')}`,
         );
+      }
+    };
+
+    if (this.dependencyGraph?.roots.length) {
+      for (const instances of this.dependencyGraph.rootRequests.values()) {
+        for (const [packagePath, path] of instances) {
+          const manifest = readPackageJsonCached(packagePath);
+          if (manifest) collectPeers(manifest, path, packagePath);
+        }
+      }
+    } else {
+      // Retain the fallback for analyzers with injected package metadata.
+      for (const name of this.options.dependencies) {
+        const manifest = this.analyzedDependencies.get(name);
+        if (manifest) collectPeers(manifest, [name]);
       }
     }
 
@@ -1186,22 +1180,17 @@ export class DependencyAnalyzer {
     // usedBy 包含声明 peerDependency 的包路径
     const usedBy = group.map((r) => r.path.join('>'));
 
-    // 收集 usedBy 中第一层包作为起点
-    const usedByRoots = [
-      ...new Set(group.map((r) => r.path[0]).filter((p): p is string => p !== undefined)),
-    ];
-
-    // 收集 usedByRoots 子树（dependencies + peerDependencies 递归）用于重定向。
-    // 图模式按实际 package instance 路径收集，避免同名嵌套包共享规则。
-    // 排除所有冲突包名（allConflictPackageNames），防止其被纳入 allDependents 后
-    // 导致主工程对这些包的引用也被错误重定向。
+    const rootIds = group.flatMap(({ packagePath }) => (packagePath ? [packagePath] : []));
     const graphInstances = this.collectGraphRelatedPackageInstances(
-      usedByRoots,
+      rootIds,
       allConflictPackageNames,
     );
     const allDependents = graphInstances
       ? [...new Set(graphInstances.map((instance) => instance.name))]
-      : this.collectAllRelatedPackages(usedByRoots, allConflictPackageNames);
+      : this.collectAllRelatedPackages(
+          group.flatMap(({ path }) => (path[0] ? [path[0]] : [])),
+          allConflictPackageNames,
+        );
 
     return {
       originalName: packageName,
@@ -1491,20 +1480,15 @@ export class DependencyAnalyzer {
    * 对应的图根，调用方可为兼容旧测试/旧调用回退到名称遍历。
    */
   private collectGraphRelatedPackageInstances(
-    packageNames: string[],
+    rootIds: string[],
     excludePackages: string[] = [],
   ): Array<{ name: string; path: string }> | null {
-    if (!this.dependencyGraph) return null;
-
-    const roots = packageNames
-      .map((packageName) => this.findGraphRoot(packageName))
-      .filter((node): node is InstalledPackageNode => node !== null);
-    if (roots.length === 0) return null;
+    if (!this.dependencyGraph || rootIds.length === 0) return null;
 
     const excludeSet = new Set(excludePackages);
     const visited = new Set<string>();
     const collected: Array<{ name: string; path: string }> = [];
-    const stack = roots.map((root) => root.id);
+    const stack = [...new Set(rootIds)];
 
     while (stack.length > 0) {
       const nodeId = stack.pop();
@@ -1622,13 +1606,6 @@ export class DependencyAnalyzer {
       return cached;
     }
 
-    const graphInstances = this.collectGraphRelatedPackageInstances(packageNames, excludePackages);
-    if (graphInstances) {
-      const result = [...new Set(graphInstances.map((instance) => instance.name))];
-      this.collectCache.set(cacheKey, result);
-      return result;
-    }
-
     const collected = new Set<string>();
     const visited = new Set<string>();
     const excludeSet = new Set(excludePackages);
@@ -1676,16 +1653,9 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      // 过滤掉 optional 的请求
       for (const request of requests) {
-        const requestedBy = request.path[0];
+        const requestedBy = request.path.join('>');
         if (!requestedBy) continue;
-
-        const depInfo = this.analyzedDependencies.get(requestedBy);
-        const isOptional = depInfo?.peerDependenciesMeta?.[peerName]?.optional === true;
-        if (isOptional) {
-          continue;
-        }
 
         // 未声明：缺失（不自动安装，只提示）
         missing.push({

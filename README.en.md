@@ -230,7 +230,7 @@ Run `pnpm bench:scale` to measure repeated ranges, multiple importers and packag
 
 ### 1. Dependency Analysis
 
-The plugin recursively builds the runtime graph to determine redirect scope. New aliases are triggered only by first-level peers of the selected packages. For a peer declared only by a transitive dependency, select that package explicitly and ensure it is resolvable from projectRoot:
+The plugin resolves configured packages from `projectRoot` and follows the host's installed workspace runtime dependencies to find additional instances. When a reachable workspace package directly declares a configured package, the plugin resolves it from that workspace package's directory. Each entry instance supplies its own peer requirements and redirect scope. Peers of ordinary transitive dependencies do not independently trigger alias installation.
 
 ```
 package-a
@@ -277,7 +277,7 @@ import Vue from 'vue'; // → resolves to vue (3.x)
 
 ### Behavioral Boundaries
 
-- **Conflict Detection Scope**: Only the first-level `peerDependencies` of user-specified `dependencies` are checked for version conflicts against the host project. Sub-dependency `peerDependencies` still contribute to graph construction and runtime redirect matching, but do not independently trigger alias installation. First-level peers marked `optional: true` are skipped entirely: they produce no conflict, missing-peer warning, or alias.
+- **Conflict Detection Scope**: The resolver checks each entry instance selected by `dependencies` for peer conflicts against the host project. Transitive peers contribute to the installed graph and redirect matching. Entry peers marked `optional: true` are skipped entirely and produce no conflict, missing-peer warning, or alias.
 - **Redirect Scope**: Packages that declare conflicting peers and all their sub-dependencies (`dependencies` + `peerDependencies` recursively) are added to the redirect candidate list. The conflict target packages themselves (e.g., `vue`, `vue-router`) are automatically excluded during collection to prevent host project imports from being incorrectly redirected.
 - **Nested Versions**: The installed dependency graph is keyed by normalized package directories, and each child is resolved relative to its owning package. Nested instances with the same name but different versions remain distinct; generated redirect rules prefer importer-path matching. Consequently, `excludeRedirects` applies to concrete package instances and their subtrees rather than globally deduplicating by name.
 - **`excludeRedirects`**: Removes specified packages from the redirect candidate list. Useful for shared packages (e.g., `vue-demi`, `pinia`) that actually use the host's Vue 3 version at runtime.

@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { findPackagePath, readPackageJsonCached } from '../utils/fs';
 
 export interface InstalledPackageNode {
@@ -17,8 +17,15 @@ export interface InstalledPackageNode {
 export interface InstalledDependencyGraph {
   nodes: Map<string, InstalledPackageNode>;
   roots: string[];
-  /** Logical root requests remain distinct even when they share one instance. */
-  rootRequests: Map<string, string>;
+  /** Configured name -> physical package directory -> dependency path from the host. */
+  rootRequests: Map<string, Map<string, string[]>>;
+}
+
+interface PackageRequest {
+  name: string;
+  baseDir: string;
+  parentId: string | null;
+  rootPath?: string[];
 }
 
 function normalizePackagePath(packagePath: string): string {
@@ -29,6 +36,59 @@ function normalizePackagePath(packagePath: string): string {
   }
 }
 
+function findRootRequests(
+  packageNames: string[],
+  projectRoot: string,
+  workspaceRoot: string | null,
+  watchFiles?: Set<string>,
+): PackageRequest[] {
+  const names = new Set(packageNames.filter(Boolean));
+  const requests: PackageRequest[] = [...names].map((name) => ({
+    name,
+    baseDir: projectRoot,
+    parentId: null,
+    rootPath: [name],
+  }));
+  if (!workspaceRoot || names.size === 0) return requests;
+
+  const workspace = normalizePackagePath(workspaceRoot);
+  const pending: Array<{ directory: string; path: string[] }> = [
+    { directory: normalizePackagePath(projectRoot), path: [] },
+  ];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const { directory, path } = pending.pop()!;
+    if (visited.has(directory)) continue;
+    visited.add(directory);
+    watchFiles?.add(join(directory, 'package.json'));
+    const manifest = readPackageJsonCached(directory);
+    if (!manifest) continue;
+
+    const dependencies = { ...manifest.dependencies, ...manifest.optionalDependencies };
+    for (const [name, spec] of Object.entries(dependencies)) {
+      const dependencyPath = findPackagePath(name, directory);
+      if (!dependencyPath) continue;
+      const dependency = normalizePackagePath(dependencyPath);
+      const requestPath = [...path, name];
+      if (path.length > 0 && names.has(name)) {
+        requests.push({ name, baseDir: directory, parentId: null, rootPath: requestPath });
+      }
+
+      // Follow installed workspace links. Explicit workspace dependencies can
+      // also be injected copies under node_modules.
+      const location = relative(workspace, dependency);
+      if (isAbsolute(location) || location === '..' || location.startsWith('..' + sep)) continue;
+      const workspaceSpec = typeof spec === 'string' && spec.startsWith('workspace:');
+      if (location.split(sep).includes('node_modules') && !workspaceSpec) {
+        continue;
+      }
+      pending.push({ directory: dependency, path: requestPath });
+    }
+  }
+
+  return requests;
+}
+
 /**
  * Traverse installed packages while preserving each package directory as the
  * identity of a node. Package resolution for a child starts at its parent's
@@ -37,16 +97,15 @@ function normalizePackagePath(packagePath: string): string {
 export function buildInstalledDependencyGraph(
   packageNames: string[],
   projectRoot: string,
+  workspaceRoot: string | null = null,
+  watchFiles?: Set<string>,
 ): InstalledDependencyGraph {
   const nodes = new Map<string, InstalledPackageNode>();
-  const roots: string[] = [];
-  const rootRequests = new Map<string, string>();
-  const stack: Array<{ name: string; baseDir: string; parentId: string | null; root: boolean }> =
-    [];
-  for (let index = packageNames.length - 1; index >= 0; index--) {
-    const name = packageNames[index];
-    if (name) stack.push({ name, baseDir: projectRoot, parentId: null, root: true });
-  }
+  const roots = new Set<string>();
+  const rootRequests = new Map<string, Map<string, string[]>>();
+  const requests = findRootRequests(packageNames, projectRoot, workspaceRoot, watchFiles);
+  const stack: PackageRequest[] = [];
+  for (let index = requests.length - 1; index >= 0; index--) stack.push(requests[index]!);
 
   while (stack.length > 0) {
     const item = stack.pop();
@@ -56,23 +115,18 @@ export function buildInstalledDependencyGraph(
     if (!packagePath) continue;
 
     const normalizedPath = normalizePackagePath(packagePath);
-    if (item.root) rootRequests.set(item.name, normalizedPath);
-    if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);
     const existingNode = nodes.get(normalizedPath);
-    if (existingNode) {
-      if (item.root) {
-        // A root request can resolve to a package already discovered through a
-        // dependency edge. The physical package is still root-visible, so
-        // remove the incidental parent edge before recording the root.
-        existingNode.parentId = null;
-      }
-      if (item.root && !roots.includes(normalizedPath)) {
-        roots.push(normalizedPath);
-      }
-      continue;
+    const packageJson = existingNode ? null : readPackageJsonCached(normalizedPath);
+    if (!existingNode && !packageJson) continue;
+    if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);
+    if (item.rootPath) {
+      const instances = rootRequests.get(item.name) ?? new Map<string, string[]>();
+      if (!instances.has(normalizedPath)) instances.set(normalizedPath, item.rootPath);
+      rootRequests.set(item.name, instances);
+      roots.add(normalizedPath);
+      if (existingNode) existingNode.parentId = null;
     }
 
-    const packageJson = readPackageJsonCached(normalizedPath);
     if (!packageJson) continue;
 
     const dependencyNames = Object.keys({
@@ -92,7 +146,6 @@ export function buildInstalledDependencyGraph(
     };
 
     nodes.set(normalizedPath, node);
-    if (item.root) roots.push(normalizedPath);
 
     const childNames = [...dependencyNames, ...peerDependencyNames];
     for (let index = childNames.length - 1; index >= 0; index--) {
@@ -102,11 +155,10 @@ export function buildInstalledDependencyGraph(
           name: childName,
           baseDir: normalizedPath,
           parentId: normalizedPath,
-          root: false,
         });
       }
     }
   }
 
-  return { nodes, roots, rootRequests };
+  return { nodes, roots: [...roots], rootRequests };
 }

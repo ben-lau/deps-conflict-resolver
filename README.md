@@ -230,7 +230,7 @@ Vite 的隐式 projectRoot 使用最终配置的 root，支持其他 config 钩�
 
 ### 1. 依赖分析
 
-插件会递归构建指定依赖的运行时关系图，用于确定重定向范围。新 alias 只由指定依赖自身的第一层 peer 冲突触发；如果 peer 仅声明在子依赖中，需要显式选择相应包作为分析入口，并确保该包可从 projectRoot 解析：
+插件从 `projectRoot` 解析配置中的包，并沿宿主已安装的 workspace 运行时依赖查找这些包的其他实例。可达的 workspace 包直接声明了某个配置包时，插件从该 workspace 包目录解析它。每份入口实例分别参与 peer 冲突检测，并沿自己的依赖图生成重定向范围。普通传递依赖自身的 peer 冲突不会单独触发 alias 安装。
 
 ```
 package-a
@@ -277,7 +277,7 @@ import Vue from 'vue'; // → 解析到 vue (3.x)
 
 ### 行为边界
 
-- **冲突检测范围**：只检测用户指定的 `dependencies` 的第一层 `peerDependencies` 与主工程的版本冲突。子依赖的 `peerDependencies` 会参与依赖图构建和运行时重定向判断，但不会单独触发别名安装。标记为 `optional: true` 的第一层 peer 会完全跳过，不产生冲突、missing 警告或 alias。
+- **冲突检测范围**：只检测用户指定的 `dependencies` 所选入口实例的 `peerDependencies` 与主工程的版本冲突。子依赖的 `peerDependencies` 会参与依赖图构建和运行时重定向判断，但不会单独触发别名安装。标记为 `optional: true` 的入口 peer 会完全跳过，不产生冲突、missing 警告或 alias。
 - **重定向范围**：冲突 peer 的声明包及其 `dependencies`/`peerDependencies` 会递归加入重定向候选列表；冲突目标包自身（如 `vue`、`vue-router`）会被排除，避免主工程引用被误重定向。
 - **嵌套版本**：依赖图以规范化的实际安装目录为节点，并从所属包目录解析子依赖。同名但不同版本的嵌套实例会保留为不同节点，生成的重定向规则优先按 importer 路径匹配；因此 `excludeRedirects` 也会作用于具体实例及其子树，而不是简单按包名全局去重。
 - **`excludeRedirects`**：从重定向候选列表中剔除指定包，适用于运行时实际使用宿主 Vue 3 版本的共享包（如 `vue-demi`、`pinia`）。

@@ -2,9 +2,10 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import webpack from 'webpack';
-import { build } from 'vite';
+import { build, optimizeDeps, resolveConfig } from 'vite';
 import vitePlugin from '../../src/plugins/vite';
 import { DepsConflictResolverWebpackPlugin } from '../../src/plugins/webpack';
 import { clearPackageJsonCache } from '../../src/utils/fs';
@@ -64,7 +65,105 @@ function fixture(commonjs: boolean, subpath: string) {
   return app;
 }
 
-async function bundle(app: string, tool: 'webpack' | 'vite'): Promise<string> {
+function workspaceFixture(): string {
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'deps-workspace-resolution-')));
+  roots.push(workspace);
+  json(workspace, { name: 'workspace', private: true });
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), 'packages: [apps/*, packages/*]\n');
+  const app = join(workspace, 'apps/host');
+  json(app, {
+    name: 'app',
+    dependencies: {
+      legacy: '1.0.0',
+      'shared-ui': 'workspace:*',
+      'modern-ui': 'workspace:*',
+      vue: '3.5.0',
+      vue2: 'npm:vue@2.7.16',
+      'vue-router': '4.5.0',
+      router3: 'npm:vue-router@3.6.5',
+    },
+  });
+
+  function entry(directory: string, manifest: object, code: string): void {
+    json(directory, { type: 'module', main: './index.js', ...manifest });
+    writeFileSync(join(directory, 'index.js'), code);
+  }
+
+  const appModules = join(app, 'node_modules');
+  for (const [key, name, version] of [
+    ['vue', 'vue', '3.5.0'],
+    ['vue2', 'vue', '2.7.16'],
+    ['vue-router', 'vue-router', '4.5.0'],
+    ['router3', 'vue-router', '3.6.5'],
+  ]) {
+    entry(join(appModules, key!), { name, version }, `export const version = '${version}';`);
+  }
+  for (const owner of ['app', 'shared-ui', 'modern-ui']) {
+    const modern = owner === 'modern-ui';
+    const version = modern ? '2.0.0' : '1.0.0';
+    const modules = join(
+      workspace,
+      'node_modules/.pnpm',
+      `legacy@${version}_${owner}`,
+      'node_modules',
+    );
+    entry(
+      join(modules, 'legacy'),
+      {
+        name: 'legacy',
+        version,
+        dependencies: { 'legacy-core': '1.0.0' },
+        peerDependencies: { vue: modern ? '^3' : '^2', 'vue-router': modern ? '^4' : '^3' },
+      },
+      'export { versions } from "legacy-core";',
+    );
+    // pnpm links dependencies into the virtual store, beside their consumer.
+    const core = join(
+      workspace,
+      'node_modules/.pnpm',
+      `legacy-core@1.0.0_${owner}`,
+      'node_modules',
+    );
+    entry(
+      join(core, 'legacy-core'),
+      { name: 'legacy-core', version: '1.0.0' },
+      'import { version as vue } from "vue"; import { version as router } from "vue-router"; export const versions = [vue, router];',
+    );
+    symlinkSync(join(core, 'legacy-core'), join(modules, 'legacy-core'), 'junction');
+    for (const peer of ['vue', 'vue-router']) {
+      symlinkSync(join(appModules, peer), join(modules, peer), 'junction');
+      symlinkSync(join(appModules, peer), join(core, peer), 'junction');
+    }
+
+    let ownerModules = appModules;
+    if (owner !== 'app') {
+      const ownerPath = join(workspace, 'packages', owner);
+      entry(
+        ownerPath,
+        { name: owner, dependencies: { legacy: version } },
+        'export { versions } from "legacy";',
+      );
+      ownerModules = join(ownerPath, 'node_modules');
+      mkdirSync(ownerModules);
+      symlinkSync(ownerPath, join(appModules, owner), 'junction');
+    }
+    symlinkSync(join(modules, 'legacy'), join(ownerModules, 'legacy'), 'junction');
+  }
+  writeFileSync(
+    join(app, 'entry.mjs'),
+    [
+      'import { versions as direct } from "legacy";',
+      'import { versions as shared } from "shared-ui";',
+      'import { versions as modern } from "modern-ui";',
+      'import { version as host } from "vue";',
+      'export const version = { direct, shared, modern, host };',
+    ].join('\n'),
+  );
+  writeFileSync(join(app, 'entry.cjs'), 'module.exports = require("./entry.mjs").version;');
+  return app;
+}
+
+async function bundle(app: string, tool: 'webpack' | 'vite'): Promise<unknown> {
   const options = { projectRoot: app, dependencies: ['legacy'], offline: true, strict: true };
   const outDir = join(app, 'dist');
   if (tool === 'vite') {
@@ -128,4 +227,59 @@ describe.each(['webpack', 'vite'] as const)('linked aliases in %s', (tool) => {
   it('continues to reject unexported subpaths', async () => {
     await expect(bundle(fixture(false, '/private.js'), tool)).rejects.toThrow();
   });
+
+  it('redirects each configured instance used by the host and its workspace packages', async () => {
+    expect(await bundle(workspaceFixture(), tool)).toEqual({
+      direct: ['2.7.16', '3.6.5'],
+      shared: ['2.7.16', '3.6.5'],
+      modern: ['3.5.0', '4.5.0'],
+      host: '3.5.0',
+    });
+  });
+});
+
+it('prebundles separate workspace instances with their matching peer providers', async () => {
+  const app = workspaceFixture();
+  const config = await resolveConfig(
+    {
+      root: app,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [vitePlugin({ dependencies: ['legacy'], offline: true, strict: true })],
+      optimizeDeps: {
+        noDiscovery: true,
+        include: ['legacy', 'shared-ui > legacy', 'modern-ui > legacy', 'vue'],
+      },
+    },
+    'serve',
+  );
+  const { optimized } = await optimizeDeps(config, true);
+  for (const [name, expected] of [
+    ['legacy', ['2.7.16', '3.6.5']],
+    ['shared-ui > legacy', ['2.7.16', '3.6.5']],
+    ['modern-ui > legacy', ['3.5.0', '4.5.0']],
+  ] as const) {
+    const module = await import(pathToFileURL(optimized[name]!.file).href);
+    expect(module.versions).toEqual(expected);
+  }
+  const host = await import(pathToFileURL(optimized.vue!.file).href);
+  expect(host.version).toBe('3.5.0');
+});
+
+it('formats workspace entry paths cleanly for Vite SSR auto configuration', async () => {
+  const app = workspaceFixture();
+  const config = await resolveConfig(
+    {
+      root: app,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [vitePlugin({ dependencies: ['legacy'], ssr: 'auto', offline: true, strict: true })],
+    },
+    'serve',
+  );
+  expect(config.ssr.noExternal).toEqual(expect.arrayContaining(['legacy', 'shared-ui']));
+  expect(config.ssr.optimizeDeps?.include).toEqual(
+    expect.arrayContaining(['legacy', 'shared-ui > legacy']),
+  );
+  expect(config.ssr.optimizeDeps?.include).not.toContain('shared-ui');
 });

@@ -32,7 +32,7 @@ export function validateSharedPeerContexts(
   diagnostics: ResolverDiagnostic[],
   watchFiles?: Set<string>,
 ): void {
-  if (mappings.length === 0 || graph.rootRequests.size < 2) return;
+  if (mappings.length === 0 || graph.roots.length < 2) return;
   const readManifest = (directory: string): PackageJson | null => {
     watchFiles?.add(join(directory, 'package.json'));
     return readPackageJsonCached(directory);
@@ -66,11 +66,15 @@ export function validateSharedPeerContexts(
   });
   const aliasPaths = new Set([...aliases.values()].map((provider) => provider.path));
   const originals = new Set(installedMappings.map((mapping) => mapping.originalName));
+  const requests: Array<[string, string[]]> = [];
+  for (const instances of graph.rootRequests.values()) {
+    for (const request of instances) requests.push(request);
+  }
 
   for (const peer of originals) {
     const hasExclusions = (options.excludeRedirects[peer]?.length ?? 0) > 0;
     const roots: Array<{ nodeId: string; consumer: string; provider: Provider }> = [];
-    for (const [consumer, nodeId] of graph.rootRequests) {
+    for (const [nodeId, requestPath] of requests) {
       const node = graph.nodes.get(nodeId);
       if (!node) continue;
       const manifest = readManifest(node.packagePath);
@@ -93,7 +97,7 @@ export function validateSharedPeerContexts(
           };
       }
       if (provider && satisfies(provider.version, range))
-        roots.push({ nodeId, consumer, provider });
+        roots.push({ nodeId, consumer: requestPath.join('>'), provider });
     }
     if (new Set(roots.map(({ provider }) => provider.path)).size < 2) continue;
 

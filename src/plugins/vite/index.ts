@@ -151,18 +151,25 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     for (const mapping of analysisResult.aliasMappings) {
       if (!activeNames.has(mapping.aliasName)) continue;
       const excluded = new Set(resolverOptions.excludeRedirects?.[mapping.originalName] ?? []);
+      const usedBySegments = mapping.usedBy.flatMap((path) => path.split('>'));
+      const usedByOptimizerIds = mapping.usedBy
+        .map((path) => path.split('>'))
+        .filter((segments) => !segments.some((segment) => excluded.has(segment)))
+        .map((segments) => segments.join(' > '));
       for (const name of [
         ...mapping.allDependents,
-        ...mapping.usedBy.map((path) => path.split('>')[0]!),
+        ...usedBySegments,
         ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
       ]) {
         if (!excluded.has(name)) ssrPackages.add(name);
       }
       for (const name of [
-        ...mapping.usedBy.map((path) => path.split('>')[0]!),
-        ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
+        ...usedByOptimizerIds,
+        ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []).filter(
+          (entry) => !excluded.has(entry),
+        ),
       ]) {
-        if (!excluded.has(name)) ssrOptimizerPackages.add(name);
+        ssrOptimizerPackages.add(name);
       }
     }
 
@@ -187,9 +194,17 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         : manualNoExternal && (!Array.isArray(manualNoExternal) || manualNoExternal.length > 0)
           ? createFilter(manualNoExternal, undefined, { resolve: false })
           : () => false;
-    const allowsSsrOptimization = (name: string) =>
-      (external !== true || keepsInternal(name)) &&
-      !ssrExcluded.some((excluded) => name === excluded || name.startsWith(excluded + '/'));
+    const allowsSsrOptimization = (name: string) => {
+      const segments = name.split(' > ');
+      return (
+        (external !== true || segments.some((segment) => keepsInternal(segment))) &&
+        !segments.some((segment) =>
+          ssrExcluded.some(
+            (excluded) => segment === excluded || segment.startsWith(excluded + '/'),
+          ),
+        )
+      );
+    };
 
     logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 
