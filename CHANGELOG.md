@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.1...v1.1.2) (2026-12-04)
+
+
+### Bug Fixes
+
+* **core:** resolve dependency conflicts using package paths and importer-specific dependency graphs ([67f1afe](https://github.com/ben-lau/deps-conflict-resolver/commit/67f1afe67bfa428ee2066da95b87624d52191ce4))
+* **core:** preserve root-visible dependencies and scoped include rules ([c2cd33c](https://github.com/ben-lau/deps-conflict-resolver/commit/c2cd33c4293a6dcc4a600c55f7b2024f37065c23))
+
 ## [1.1.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.0...v1.1.1) (2026-12-01)
 
 
