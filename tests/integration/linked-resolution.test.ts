@@ -236,6 +236,62 @@ describe.each(['webpack', 'vite'] as const)('linked aliases in %s', (tool) => {
       host: '3.5.0',
     });
   });
+
+  it('keeps host-compatible descendants on the host runtime without excludeRedirects', async () => {
+    const app = realpathSync(mkdtempSync(join(tmpdir(), 'deps-host-descendant-')));
+    roots.push(app);
+    json(app, {
+      name: 'app',
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.6.14' },
+    });
+    const modules = join(app, 'node_modules');
+    const writePkg = (directory: string, manifest: object, code: string) => {
+      json(directory, { type: 'module', main: './index.js', ...manifest });
+      writeFileSync(join(directory, 'index.js'), code);
+    };
+    writePkg(join(modules, 'vue'), { name: 'vue', version: '3.5.0' }, 'export const v = "3.5.0";');
+    writePkg(
+      join(modules, 'vue2'),
+      { name: 'vue', version: '2.6.14' },
+      'export const v = "2.6.14";',
+    );
+    writePkg(
+      join(modules, 'modern-helper'),
+      { name: 'modern-helper', version: '1.0.0' },
+      'import { v } from "vue"; export const helper = v;',
+    );
+    writePkg(
+      join(modules, 'modern-icons'),
+      {
+        name: 'modern-icons',
+        version: '1.0.0',
+        dependencies: { 'modern-helper': '1.0.0' },
+        peerDependencies: { vue: '3.x' },
+      },
+      'import { v } from "vue"; import { helper } from "modern-helper"; export const icons = [v, helper];',
+    );
+    writePkg(
+      join(modules, 'legacy'),
+      {
+        name: 'legacy',
+        version: '1.0.0',
+        dependencies: { 'modern-icons': '1.0.0' },
+        peerDependencies: { vue: '^2.0.0' },
+      },
+      'import { v } from "vue"; import { icons } from "modern-icons"; export const result = { legacy: v, icons };',
+    );
+    writeFileSync(
+      join(app, 'entry.mjs'),
+      'import { result } from "legacy"; import { v as host } from "vue"; export const version = { ...result, host };',
+    );
+    writeFileSync(join(app, 'entry.cjs'), 'module.exports = require("./entry.mjs").version;');
+
+    expect(await bundle(app, tool)).toEqual({
+      legacy: '2.6.14',
+      icons: ['3.5.0', '3.5.0'],
+      host: '3.5.0',
+    });
+  });
 });
 
 it('prebundles separate workspace instances with their matching peer providers', async () => {

@@ -22,6 +22,8 @@ import type { InstalledPackageInfo } from '../types';
 import { createWorkspaceDetector, WorkspaceDetector } from './workspace-detector';
 import {
   satisfies,
+  isValidVersion,
+  rangesIntersect,
   findBestVersion,
   generateAliasName,
   createAliasInstallSpec,
@@ -1181,15 +1183,24 @@ export class DependencyAnalyzer {
     const usedBy = group.map((r) => r.path.join('>'));
 
     const rootIds = group.flatMap(({ packagePath }) => (packagePath ? [packagePath] : []));
+    const target = {
+      packageName,
+      aliasVersion: version,
+      hostVersion: this.isDeclaredInMainProject(packageName)
+        ? this.getMainProjectVersion(packageName)
+        : null,
+    };
     const graphInstances = this.collectGraphRelatedPackageInstances(
       rootIds,
       allConflictPackageNames,
+      target,
     );
     const allDependents = graphInstances
       ? [...new Set(graphInstances.map((instance) => instance.name))]
       : this.collectAllRelatedPackages(
           group.flatMap(({ path }) => (path[0] ? [path[0]] : [])),
           allConflictPackageNames,
+          target,
         );
 
     return {
@@ -1476,19 +1487,44 @@ export class DependencyAnalyzer {
   }
 
   /**
+   * 判断一个非根后代包是否明确声明了仅兼容宿主版本、且与当前目标别名不兼容的约束。
+   * 例如 Vue 2 组件依赖树中通过传递边触达的 Vue 3 图标库（peerDependencies: { vue: "3.x" }），
+   * 不应被纳入 Vue 2 别名重定向范围，也不应沿它向下传播该别名规则。
+   */
+  private isDescendantIncompatibleWithAlias(
+    manifest: Pick<PackageJson, 'dependencies' | 'peerDependencies'> | null | undefined,
+    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
+  ): boolean {
+    if (!manifest || !target?.hostVersion) return false;
+    const rawRange =
+      manifest.peerDependencies?.[target.packageName] ??
+      manifest.dependencies?.[target.packageName];
+    if (!rawRange) return false;
+    const range =
+      this.workspaceDetector.resolveVersionSpec(target.packageName, rawRange) ?? rawRange;
+    if (!satisfies(target.hostVersion, range)) return false;
+    const aliasCompatible = isValidVersion(target.aliasVersion)
+      ? satisfies(target.aliasVersion, range)
+      : rangesIntersect(target.aliasVersion, range);
+    return !aliasCompatible;
+  }
+
+  /**
    * 收集图中指定根实例的所有后代实例。返回 null 表示当前分析没有
    * 对应的图根，调用方可为兼容旧测试/旧调用回退到名称遍历。
    */
   private collectGraphRelatedPackageInstances(
     rootIds: string[],
     excludePackages: string[] = [],
+    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
   ): Array<{ name: string; path: string }> | null {
     if (!this.dependencyGraph || rootIds.length === 0) return null;
 
     const excludeSet = new Set(excludePackages);
+    const rootSet = new Set(rootIds);
     const visited = new Set<string>();
     const collected: Array<{ name: string; path: string }> = [];
-    const stack = [...new Set(rootIds)];
+    const stack = [...rootSet];
 
     while (stack.length > 0) {
       const nodeId = stack.pop();
@@ -1497,6 +1533,16 @@ export class DependencyAnalyzer {
 
       const node = this.dependencyGraph.nodes.get(nodeId);
       if (!node || excludeSet.has(node.name)) continue;
+
+      if (
+        !rootSet.has(node.id) &&
+        this.isDescendantIncompatibleWithAlias(readPackageJsonCached(node.packagePath), target)
+      ) {
+        logger.debug(
+          `Skipping descendant ${node.name}@${node.version} (${node.packagePath}): declared ${target!.packageName} requirement matches host ${target!.hostVersion} but not alias ${target!.aliasVersion}`,
+        );
+        continue;
+      }
 
       collected.push({ name: node.name, path: node.packagePath });
       for (const dependencyName of [...node.dependencyNames, ...node.peerDependencyNames]) {
@@ -1529,6 +1575,8 @@ export class DependencyAnalyzer {
     collected: Set<string>,
     baseDir: string,
     excludeTraversal?: Set<string>,
+    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
+    rootPackages?: Set<string>,
   ): void {
     const stack: Array<{ name: string; baseDir: string }> = [{ name: packageName, baseDir }];
 
@@ -1543,8 +1591,6 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      collected.add(name);
-
       // 优先从已分析的内存数据中读取依赖信息，避免重复 resolvePackageJson 磁盘 I/O
       const analyzed = this.analyzedDependencies.get(name);
       if (analyzed) {
@@ -1552,6 +1598,12 @@ export class DependencyAnalyzer {
           continue;
         }
         visited.add(name);
+
+        if (!rootPackages?.has(name) && this.isDescendantIncompatibleWithAlias(analyzed, target)) {
+          continue;
+        }
+
+        collected.add(name);
 
         for (const depName of Object.keys(analyzed.dependencies)) {
           stack.push({ name: depName, baseDir: currentBaseDir });
@@ -1568,6 +1620,7 @@ export class DependencyAnalyzer {
         logger.debug(
           `Package not found for dependency collection: ${name} (from ${currentBaseDir})`,
         );
+        collected.add(name);
         continue;
       }
 
@@ -1577,8 +1630,15 @@ export class DependencyAnalyzer {
       visited.add(packagePath);
 
       if (!pkgJson) {
+        collected.add(name);
         continue;
       }
+
+      if (!rootPackages?.has(name) && this.isDescendantIncompatibleWithAlias(pkgJson, target)) {
+        continue;
+      }
+
+      collected.add(name);
 
       const deps = { ...pkgJson.dependencies, ...pkgJson.optionalDependencies };
       const peerDeps = pkgJson.peerDependencies ?? {};
@@ -1599,8 +1659,13 @@ export class DependencyAnalyzer {
   private collectAllRelatedPackages(
     packageNames: string[],
     excludePackages: string[] = [],
+    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
   ): string[] {
-    const cacheKey = JSON.stringify([packageNames.slice().sort(), excludePackages.slice().sort()]);
+    const cacheKey = JSON.stringify([
+      packageNames.slice().sort(),
+      excludePackages.slice().sort(),
+      target ?? null,
+    ]);
     const cached = this.collectCache.get(cacheKey);
     if (cached) {
       return cached;
@@ -1609,6 +1674,7 @@ export class DependencyAnalyzer {
     const collected = new Set<string>();
     const visited = new Set<string>();
     const excludeSet = new Set(excludePackages);
+    const rootSet = new Set(packageNames);
 
     for (const pkgName of packageNames) {
       this.collectAllSubDependenciesRecursive(
@@ -1617,6 +1683,8 @@ export class DependencyAnalyzer {
         collected,
         this.options.projectRoot,
         excludeSet,
+        target,
+        rootSet,
       );
     }
 

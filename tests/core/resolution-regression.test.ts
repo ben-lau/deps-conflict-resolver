@@ -523,6 +523,40 @@ describe('resolution correctness with installed packages', () => {
     expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue26');
   });
 
+  it('skips host-only descendants that conflict with the selected alias while preserving compatible and shared subtrees', async () => {
+    const root = project({
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.6.14' },
+    });
+    const legacy = pkg(root, 'legacy', {
+      dependencies: { 'legacy-core': '1.0.0', 'modern-icons': '1.0.0', 'shared-util': '1.0.0' },
+      peerDependencies: { vue: '>=2.5.0 <2.7.0' },
+    });
+    const legacyCore = pkg(root, 'legacy-core', {
+      peerDependencies: { vue: '*' },
+    });
+    const modernIcons = pkg(root, 'modern-icons', {
+      dependencies: { 'modern-helper': '1.0.0', 'shared-util': '1.0.0' },
+      peerDependencies: { vue: '3.x' },
+    });
+    const modernHelper = pkg(root, 'modern-helper', {});
+    const sharedUtil = pkg(root, 'shared-util', {});
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.6.14' });
+
+    const resolver = await createResolver({ ...baseOptions(root), offline: true, strict: true });
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(legacyCore, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(sharedUtil, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(modernIcons, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(modernHelper, 'index.js'))).toBeNull();
+    const mapping = resolver.getAnalysisResult()?.aliasMappings[0];
+    expect(mapping?.allDependents).toContain('legacy');
+    expect(mapping?.allDependents).toContain('legacy-core');
+    expect(mapping?.allDependents).toContain('shared-util');
+    expect(mapping?.allDependents).not.toContain('modern-icons');
+    expect(mapping?.allDependents).not.toContain('modern-helper');
+  });
+
   it('uses the selected alias manifest for peer closure instead of the host manifest', async () => {
     const root = project({
       dependencies: {

@@ -278,7 +278,7 @@ import Vue from 'vue'; // → 解析到 vue (3.x)
 ### 行为边界
 
 - **冲突检测范围**：只检测用户指定的 `dependencies` 所选入口实例的 `peerDependencies` 与主工程的版本冲突。子依赖的 `peerDependencies` 会参与依赖图构建和运行时重定向判断，但不会单独触发别名安装。标记为 `optional: true` 的入口 peer 会完全跳过，不产生冲突、missing 警告或 alias。
-- **重定向范围**：冲突 peer 的声明包及其 `dependencies`/`peerDependencies` 会递归加入重定向候选列表；冲突目标包自身（如 `vue`、`vue-router`）会被排除，避免主工程引用被误重定向。
+- **重定向范围**：冲突 peer 的声明包及其 `dependencies`/`peerDependencies` 会递归加入重定向候选列表；冲突目标包自身（如 `vue`、`vue-router`），以及明确声明仅兼容宿主版本而不兼容目标别名的子依赖（如 Vue 2 依赖树中触达的 `peerDependencies: { vue: "3.x" }` 包及其专有子树）会自动跳过，避免主工程或宿主生态包被误重定向。
 - **嵌套版本**：依赖图以规范化的实际安装目录为节点，并从所属包目录解析子依赖。同名但不同版本的嵌套实例会保留为不同节点，生成的重定向规则优先按 importer 路径匹配；因此 `excludeRedirects` 也会作用于具体实例及其子树，而不是简单按包名全局去重。
 - **`excludeRedirects`**：从重定向候选列表中剔除指定包，适用于运行时实际使用宿主 Vue 3 版本的共享包（如 `vue-demi`、`pinia`）。
 - **`includeRedirects`**：将指定包强制加入重定向列表，适用于 semver 范围写得过宽（如 `vue: ">=2.5.0"` 同时满足 Vue 2/3），但运行时仍需要使用旧版本的包。`includeRedirects` 在 `excludeRedirects` 之前应用。

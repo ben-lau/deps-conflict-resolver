@@ -57,6 +57,17 @@ export function findBestVersion(versions: string[], ranges: string[]): string | 
 }
 
 /**
+ * 检查字符串是否为有效的精确 semver 版本号
+ */
+export function isValidVersion(version: string): boolean {
+  try {
+    return semver.valid(version) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 检查两个版本范围是否有交集
  */
 export function rangesIntersect(range1: string, range2: string): boolean {
