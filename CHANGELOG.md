@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.2...v1.2.0) (2026-12-14)
+
+
+### Features
+
+* **core:** add indexed resolution and deterministic preparation ([bc499c6](https://github.com/ben-lau/deps-conflict-resolver/commit/bc499c6a5f086874ac6e3ef68e45ab9e4e43267b))
+
 ## [1.1.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.1...v1.1.2) (2026-12-04)
 
 
