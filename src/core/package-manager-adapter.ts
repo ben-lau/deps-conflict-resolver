@@ -108,8 +108,7 @@ export function createPackageManagerAdapter(
           rootFlag = '-w';
         } else if (options.packageManager === 'yarn') {
           const manifest = readPackageJsonCached(options.projectRoot);
-          const scopedOverride = options.registry && scopes.size > 0;
-          if (scopedOverride || (atWorkspaceRoot && manifest?.workspaces)) {
+          if ((registry && scopes.size > 0) || (atWorkspaceRoot && manifest?.workspaces)) {
             const pinnedManager =
               manifest?.packageManager ??
               (workspace.workspaceRoot &&
@@ -119,14 +118,16 @@ export function createPackageManagerAdapter(
               ? pinnedMajor === '1'
               : await isYarnClassic(invocation, options.projectRoot, env);
             if (classic && atWorkspaceRoot && manifest?.workspaces) rootFlag = '-W';
-            if (!classic && scopedOverride) {
-              const problem = await checkYarnRegistry(
-                invocation,
-                options.projectRoot,
-                env,
-                scopes,
-                options.registry!,
-              );
+            if (registry && scopes.size > 0) {
+              const problem = classic
+                ? await checkClassicYarnRegistry(
+                    invocation,
+                    options.projectRoot,
+                    env,
+                    scopes,
+                    registry,
+                  )
+                : await checkYarnRegistry(invocation, options.projectRoot, env, scopes, registry);
               if (problem)
                 return {
                   success: false,
@@ -259,6 +260,78 @@ function isYarnClassic(
   });
 }
 
+function readYarnConfig(
+  invocation: PackageManagerInvocation,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  args: string[],
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      invocation.command,
+      [...invocation.argsPrefix, 'config', ...args, '--json'],
+      { cwd, env, timeout: 5_000, windowsHide: true },
+      (error, stdout) => resolve(error ? undefined : stdout.trim()),
+    );
+  });
+}
+
+function sameRegistry(value: unknown, registry: string): boolean {
+  return (
+    typeof value === 'string' &&
+    new URL(value).href.replace(/\/+$/, '') === new URL(registry).href.replace(/\/+$/, '')
+  );
+}
+
+function exactYarnScope(scope: string): boolean {
+  // Classic lowercases configuration keys, rewrites underscores, and treats
+  // dots as object paths when reading environment variables.
+  return scope === scope.toLowerCase() && !/[_.]/.test(scope);
+}
+
+async function checkClassicYarnRegistry(
+  invocation: PackageManagerInvocation,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  scopes: ReadonlySet<string>,
+  registry: string,
+): Promise<string | undefined> {
+  const unverified = [...scopes].filter((scope) => !exactYarnScope(scope));
+  if (unverified.length === 0) return undefined;
+  const output = await readYarnConfig(invocation, cwd, env, ['list']);
+  try {
+    // Classic prints the Yarn and npm dictionaries in that order. Requests
+    // prefer the npm scoped entry, unlike `yarn config get`.
+    const configs = output?.split(/\r?\n/).flatMap((line) => {
+      const record = JSON.parse(line) as { type: string; data: Record<string, unknown> };
+      return record.type === 'inspect' ? [record.data] : [];
+    });
+    if (configs?.length === 2) {
+      const [yarn, npm] = configs;
+      if (yarn && npm && typeof yarn === 'object' && typeof npm === 'object') {
+        for (const scope of unverified) {
+          const key = scope + ':registry';
+          const effective = [npm[key], yarn[key], npm.registry, yarn.registry].find(Boolean);
+          if (sameRegistry(effective, registry)) continue;
+          return (
+            'The explicit registry conflicts with the Yarn Classic registry for ' +
+            scope +
+            '. Set the exact scope registry in .npmrc to the requested registry before installing.'
+          );
+        }
+        return undefined;
+      }
+    }
+  } catch {
+    // Configuration output may contain credentials. Only report the scope.
+  }
+  return (
+    'Could not verify the Yarn Classic registry for ' +
+    unverified.join(', ') +
+    '. Check the exact scope registry in .npmrc before installing.'
+  );
+}
+
 async function checkYarnRegistry(
   invocation: PackageManagerInvocation,
   cwd: string,
@@ -270,23 +343,12 @@ async function checkYarnRegistry(
   // configured in npmScopes takes precedence and cannot be overridden that way.
   for (const scope of scopes) {
     const key = 'npmScopes[' + JSON.stringify(scope.slice(1)) + '].npmRegistryServer';
-    const output = await new Promise<string | undefined>((resolve) => {
-      execFile(
-        invocation.command,
-        [...invocation.argsPrefix, 'config', 'get', key, '--json'],
-        { cwd, env, timeout: 5_000, windowsHide: true },
-        (error, stdout) => resolve(error ? undefined : stdout.trim()),
-      );
-    });
+    const output = await readYarnConfig(invocation, cwd, env, ['get', key]);
     if (output === 'undefined' || output === 'null') continue;
     try {
       if (output !== undefined) {
         const scoped: unknown = JSON.parse(output);
-        if (
-          typeof scoped === 'string' &&
-          new URL(scoped).href.replace(/\/+$/, '') === new URL(registry).href.replace(/\/+$/, '')
-        )
-          continue;
+        if (sameRegistry(scoped, registry)) continue;
         if (typeof scoped === 'string')
           return (
             'The explicit registry conflicts with Yarn npmScopes for ' +
@@ -593,7 +655,9 @@ function registryEnvironment(
     ...(packageManager === 'yarn' && {
       YARN_NPM_REGISTRY_SERVER: registry,
       ...Object.fromEntries(
-        [...scopes].map((scope) => ['npm_config_' + scope + ':registry', registry]),
+        [...scopes]
+          .filter(exactYarnScope)
+          .map((scope) => ['npm_config_' + scope + ':registry', registry]),
       ),
     }),
   };

@@ -155,7 +155,7 @@ The plugin supports automatic detection of the package manager and registry:
 3. User-level `.npmrc` and pnpm's `.pnpmrc`
 4. Falls back to `https://registry.npmjs.org`
 
-Version queries use the detected registry. Alias installation inherits the package manager's own configuration. An explicit `registry` applies to both version queries and installation.
+Version queries use the detected registry. Alias installation inherits the package manager's own configuration. An explicit `registry` applies to both version queries and installation. Yarn Classic cannot override scope keys containing underscores or dots through environment variables. If the effective scope registry differs, align the exact scope registry in `.npmrc` before installing.
 
 ## Diagnose, Prepare, and Build Offline
 

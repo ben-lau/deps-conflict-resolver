@@ -97,6 +97,57 @@ describe('createPackageManagerAdapter', () => {
   });
 
   it.skipIf(process.platform === 'win32').each([
+    { scope: '@upstream_team', npm: 'https://old.example.test', success: false },
+    { scope: '@upstream.team', npm: 'https://old.example.test', success: false },
+    { scope: '@upstream_team', npm: options.registry + '/', success: true },
+    { scope: '@upstream_team', success: true },
+  ])('verifies the effective Classic Yarn registry for $scope (install=$success)', async (test) => {
+    const root = await mkdtemp(join(tmpdir(), 'deps-yarn-classic-registry-'));
+    try {
+      await writeFile(join(root, 'package.json'), '{"packageManager":"yarn@1.22.22"}');
+      const key = test.scope + ':registry';
+      vi.mocked(execFile).mockImplementationOnce((...args) => {
+        const callback = args.at(-1) as (error: null, stdout: string, stderr: string) => void;
+        const output = [
+          { type: 'inspect', data: { ...(test.npm && { [key]: options.registry }) } },
+          {
+            type: 'inspect',
+            data: {
+              registry: options.registry,
+              [key]: test.npm,
+              '@upstream-team:registry': 'https://neighbor.example.test',
+              '//old.example.test/:_authToken': 'registry-secret',
+            },
+          },
+        ];
+        callback(null, output.map((record) => JSON.stringify(record)).join('\n'), '');
+        return {} as ReturnType<typeof execFile>;
+      });
+      vi.mocked(spawn).mockImplementation(() => createChildProcess(0) as never);
+      const adapter = createPackageManagerAdapter({
+        ...options,
+        projectRoot: root,
+        packageManager: 'yarn',
+      });
+      const result = await adapter.install(['runtime@npm:' + test.scope + '/runtime@2.7.16']);
+      expect(result.success).toBe(test.success);
+      expect(execFile).toHaveBeenCalledOnce();
+      const [, args, command] = vi.mocked(execFile).mock.lastCall!;
+      expect(args).toEqual(['config', 'list', '--json']);
+      expect(command).toHaveProperty('env.npm_config_registry', options.registry);
+      expect(command).not.toHaveProperty(['env', 'npm_config_' + key]);
+      expect(spawn).toHaveBeenCalledTimes(test.success ? 1 : 0);
+      if (!test.success) {
+        expect(result.stderr).toContain('Yarn Classic');
+        expect(result.stderr).toContain(test.scope);
+        expect(result.stderr).not.toContain('registry-secret');
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32').each([
     ['npm', '--'],
     ['pnpm', '--config.'],
   ] as const)(

@@ -155,7 +155,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 3. 用户级 `.npmrc` 和 pnpm 的 `.pnpmrc`
 4. 默认使用 `https://registry.npmjs.org`
 
-版本查询使用自动检测的结果，别名安装继承包管理器自己的配置。显式设置 `registry` 时，版本查询和别名安装优先使用该设置。使用现代 Yarn 时，如目标 scope 的 `npmRegistryServer` 与显式地址冲突，安装前需先将两者对齐。
+版本查询使用自动检测的结果，别名安装继承包管理器自己的配置。显式设置 `registry` 时，版本查询和别名安装优先使用该设置。使用现代 Yarn 时，如目标 scope 的 `npmRegistryServer` 与显式地址冲突，安装前需先将两者对齐。Yarn Classic 无法通过环境变量覆盖含下划线或点号的 scope 键，遇到冲突时请在 `.npmrc` 中对齐该 scope 的源地址。
 
 ## 诊断、准备与离线构建
 
