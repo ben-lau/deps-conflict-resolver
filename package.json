@@ -93,6 +93,7 @@
     "test:integration": "vitest run tests/integration",
     "test:coverage": "vitest run --coverage",
     "test:compat:vite": "node tests/compat/vite.mjs",
+    "bench:resolve": "pnpm build && node benchmarks/resolve.cjs",
     "lint": "oxlint --type-aware --deny-warnings .",
     "lint:fix": "oxlint --type-aware --fix --deny-warnings .",
     "fmt": "oxfmt .",
