@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -591,19 +592,23 @@ try {
   link(join(watchRoot, 'linked'), join(watchRoot, 'node_modules/legacy'));
   writeFileSync(join(watchRoot, 'linked/index.js'), 'export { version } from "vue";');
   writeFileSync(join(watchRoot, 'entry.mjs'), 'export { version } from "legacy";');
-  const watcher = await vite.build({
-    root: watchRoot,
-    configFile: false,
-    logLevel: 'silent',
-    plugins: [depsConflictResolverVitePlugin({ dependencies: ['legacy'], offline: true, strict })],
-    build: {
-      minify: false,
-      outDir: join(watchRoot, 'dist'),
-      lib: { entry: join(watchRoot, 'entry.mjs'), formats: ['cjs'], fileName: () => 'watch.cjs' },
-      rollupOptions: { output: { entryFileNames: 'watch.cjs' } },
-      watch: { chokidar: { usePolling: true, interval: 30 } },
-    },
-  });
+  const startWatch = () =>
+    vite.build({
+      root: watchRoot,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [
+        depsConflictResolverVitePlugin({ dependencies: ['legacy'], offline: true, strict }),
+      ],
+      build: {
+        minify: false,
+        outDir: join(watchRoot, 'dist'),
+        lib: { entry: join(watchRoot, 'entry.mjs'), formats: ['cjs'], fileName: () => 'watch.cjs' },
+        rollupOptions: { output: { entryFileNames: 'watch.cjs' } },
+        watch: { chokidar: { usePolling: true, interval: 30 } },
+      },
+    });
+  const watcher = await startWatch();
   const watchOutput = join(watchRoot, 'dist/watch.cjs');
   const watchVersions = [];
   let timeout;
@@ -636,6 +641,60 @@ try {
     clearTimeout(edit);
     await watcher.close();
   }
+
+  peer('^2');
+  const installedAlias = join(watchRoot, 'node_modules/vue2');
+  const oldProvider = join(watchRoot, 'old-provider');
+  const newProvider = join(watchRoot, 'new-provider');
+  renameSync(installedAlias, oldProvider);
+  link(oldProvider, installedAlias);
+  cpSync(oldProvider, newProvider, { recursive: true });
+  writeFileSync(join(newProvider, 'index.js'), 'export const version = "retargeted";');
+  const replacing = await startWatch();
+  const nativeWatch = Number(vite.version.split('.')[0]) >= 8;
+  let retargetedProvider;
+  edit = undefined;
+  try {
+    retargetedProvider = await new Promise((complete, reject) => {
+      timeout = setTimeout(() => reject(new Error('Alias replacement did not wake watch')), 5000);
+      replacing.on('event', (event) => {
+        if (event.code === 'ERROR') {
+          if (nativeWatch && /Restart vite build --watch/.test(String(event.error))) {
+            complete('restart required');
+          } else {
+            reject(event.error);
+          }
+        }
+        if (event.code !== 'END') return;
+        try {
+          delete repositoryRequire.cache[watchOutput];
+          const version = repositoryRequire(watchOutput).version;
+          if (version === 'retargeted') {
+            complete(version);
+          } else if (!edit) {
+            assert.equal(version, '2.7.16');
+            edit = setTimeout(() => {
+              try {
+                const replacement = join(watchRoot, 'node_modules/vue2-replacement');
+                link(newProvider, replacement);
+                if (process.platform === 'win32') rmSync(installedAlias);
+                renameSync(replacement, installedAlias);
+              } catch (error) {
+                reject(error);
+              }
+            }, 250);
+          }
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    assert.equal(retargetedProvider, nativeWatch ? 'restart required' : 'retargeted');
+  } finally {
+    clearTimeout(timeout);
+    clearTimeout(edit);
+    await replacing.close();
+  }
   process.stdout.write(
     JSON.stringify(
       {
@@ -653,6 +712,7 @@ try {
         lateRoot,
         workers,
         watchVersions,
+        retargetedProvider,
       },
       null,
       2,

@@ -60,6 +60,8 @@ interface EnvironmentWatch {
   published?: string;
   fingerprint: string;
   rulesChanged: boolean;
+  providerPaths?: ReadonlyMap<string, string>;
+  publishedProviderPaths?: ReadonlyMap<string, string>;
 }
 
 function watchInstalledProviders(config: ResolvedConfig, files: ReadonlySet<string>): void {
@@ -588,13 +590,32 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         session.fingerprint = fingerprint;
         // Each environment has its own module cache. A custom redirect can
         // change the resolution without changing the dependency plan.
-        const published = session.environments.get(environment)?.published;
+        const previous = session.environments.get(environment);
+        const mappings = viteMajor >= 8 || filterRequests ? active.getAliasPathMappings() : [];
+        const providers =
+          viteMajor >= 8
+            ? new Map(mappings.map(({ aliasName, path }) => [aliasName, path]))
+            : undefined;
+        for (const [name, previousPath] of previous?.publishedProviderPaths ?? []) {
+          const currentPath = providers?.get(name);
+          if (currentPath && currentPath !== previousPath) {
+            // Native resolution may retain the old realpath after an atomic
+            // symlink replacement reported as an update. Restart before emitting.
+            throw new Error(
+              'The installed alias ' +
+                name +
+                ' changed paths. Restart vite build --watch to reload its provider.',
+            );
+          }
+        }
         session.environments.set(environment, {
-          published,
+          published: previous?.published,
+          publishedProviderPaths: previous?.publishedProviderPaths,
+          providerPaths: providers,
           fingerprint,
-          rulesChanged: hasResolveHook || published !== fingerprint,
+          rulesChanged: hasResolveHook || previous?.published !== fingerprint,
         });
-        if (filterRequests) requestFilter = aliasRequestFilter(active.getAliasPathMappings());
+        if (filterRequests) requestFilter = aliasRequestFilter(mappings);
         if (resolverOptions.strict) verifyBuild.set(environment, build.guardGeneration());
       } finally {
         const { analysis, watchFiles } = build.snapshot();
@@ -611,10 +632,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
             continue;
           this.addWatchFile(file);
         }
-        if (viteMajor < 8) {
-          for (const directory of watchFiles?.providerDirectories ?? [])
-            this.addWatchFile(directory);
-        }
+        for (const directory of watchFiles?.providerDirectories ?? []) this.addWatchFile(directory);
       }
     },
     generateBundle: {
@@ -626,7 +644,10 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     writeBundle() {
       if (!configured || !this.meta.watchMode) return;
       const state = watch?.environments.get(this.environment ?? configured);
-      if (state) state.published = state.fingerprint;
+      if (state) {
+        state.published = state.fingerprint;
+        state.publishedProviderPaths = state.providerPaths;
+      }
     },
     ...(viteMajor < 8
       ? ({
@@ -641,7 +662,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       // per-module input dependencies, as they can reuse transformed modules.
       if (!watch || !this.meta.watchMode || viteMajor < 8 || !/^(?:\/|[A-Za-z]:[\\/])/.test(id))
         return null;
-      const build = configured?.build as
+      const build = (this.environment?.config.build ?? configured?.build) as
         | { rolldownOptions?: { experimental?: { incrementalBuild?: boolean } } }
         | undefined;
       if (build?.rolldownOptions?.experimental?.incrementalBuild) {
