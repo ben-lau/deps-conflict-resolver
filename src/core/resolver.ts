@@ -1016,8 +1016,13 @@ export class DepsConflictResolver {
     this.snapshotCurrent();
     const revision = this.preparation?.revision;
     const generation = this.snapshotGeneration;
+    const fingerprint = this.snapshotSignature;
     return () => {
-      if (revision !== this.preparation?.revision || generation !== this.snapshotGeneration) {
+      if (
+        revision !== this.preparation?.revision ||
+        generation !== this.snapshotGeneration ||
+        fingerprint !== this.snapshotSignature
+      ) {
         throw this.projectChanged('Dependencies changed during compilation. Run the build again.');
       }
       this.snapshotCurrent();

@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createResolver } from '../../src/core/resolver';
+import { createResolver, getResolverBuild } from '../../src/core/resolver';
 import { getProjectPreparation, withProjectPreparation } from '../../src/core/project-preparation';
 import { mockRegistry } from '../support/registry';
 import * as packageManager from '../../src/core/package-manager-adapter';
@@ -82,6 +82,26 @@ afterEach(() => {
 });
 
 describe('project preparation and published rules', () => {
+  it('invalidates a build guard when an offline refresh changes redirects without a writer', async () => {
+    const { root, options, install } = fixture();
+    manifest(root, { name: 'host', dependencies: { a: '1', vue: '3', vue2: 'npm:vue@2.6.14' } });
+    manifest(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.6.14' });
+    const resolver = await createResolver({ ...options, offline: true });
+    const verify = getResolverBuild(resolver).guardGeneration();
+    const importer = join(root, 'node_modules/a/index.js');
+    expect(resolver.resolveModule('vue', importer)).toBe('vue2');
+
+    manifest(join(root, 'node_modules/a'), {
+      name: 'a',
+      version: '1.0.0',
+      peerDependencies: { vue: '^3' },
+    });
+    await resolver.installDependencies();
+    expect(resolver.resolveModule('vue', importer)).toBeNull();
+    expect(install).not.toHaveBeenCalled();
+    expect(verify).toThrow('Dependencies changed during compilation');
+  });
+
   it.each(process.platform === 'win32' ? [false] : [false, true])(
     'uses hoisted metadata past a leftover directory: symlink=%s',
     async (symlink) => {
