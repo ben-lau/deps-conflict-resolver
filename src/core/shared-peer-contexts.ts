@@ -109,6 +109,7 @@ export function validateSharedPeerContexts(
     const peerMappings = installedMappings.filter((mapping) => mapping.originalName === peer);
     if (peerMappings.length === 1 && peerMappings[0]!.importerPaths) {
       const positivePaths = new Set(peerMappings[0]!.importerPaths);
+      const prunedPaths = new Set(peerMappings[0]!.excludedImporterPaths ?? []);
       const isRootExcluded = (name: string, packagePath: string) =>
         excludedForPeer.some(
           (excluded) =>
@@ -118,7 +119,9 @@ export function validateSharedPeerContexts(
       if (
         candidateRoots.every(
           ({ nodeName, packagePath }) =>
-            positivePaths.has(packagePath) && !isRootExcluded(nodeName, packagePath),
+            positivePaths.has(packagePath) &&
+            !prunedPaths.has(packagePath) &&
+            !isRootExcluded(nodeName, packagePath),
         )
       ) {
         continue;

@@ -748,6 +748,69 @@ describe('resolution correctness with installed packages', () => {
     expect(mapping?.allDependents).not.toContain('modern-helper');
   });
 
+  it('prevents ancestor alias rules from leaking into pruned nested node_modules without poisoning sibling aliases', async () => {
+    const root = project({
+      dependencies: {
+        'legacy-26': '1.0.0',
+        'child-27': '1.0.0',
+        vue: '3.5.0',
+        vue26: 'npm:vue@2.6.14',
+        vue27: 'npm:vue@2.7.16',
+      },
+    });
+    const legacy26 = pkg(root, 'legacy-26', {
+      dependencies: { 'modern-icons': '1.0.0', 'child-27': '1.0.0' },
+      peerDependencies: { vue: '>=2.5.0 <2.7.0' },
+    });
+    // Nested inside legacy-26/node_modules (npm/yarn/hoisted conflict layout)
+    const modernIcons = pkg(legacy26, 'modern-icons', {
+      dependencies: { 'modern-helper': '1.0.0' },
+      peerDependencies: { vue: '3.x' },
+    });
+    const modernHelper = pkg(modernIcons, 'modern-helper', {});
+    // Nested package incompatible with vue26, but directly targeted by vue27
+    const child27 = pkg(legacy26, 'child-27', {
+      peerDependencies: { vue: '^2.7.0' },
+    });
+    symlinkSync(
+      child27,
+      join(root, 'node_modules', 'child-27'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue26', { name: 'vue', version: '2.6.14' });
+    pkg(root, 'vue27', { name: 'vue', version: '2.7.16' });
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['legacy-26', 'child-27']),
+      offline: true,
+      strict: true,
+    });
+    expect(resolver.resolveModule('vue', join(legacy26, 'index.js'))).toBe('vue26');
+    expect(resolver.resolveModule('vue', join(modernIcons, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(modernHelper, 'index.js'))).toBeNull();
+    // Negative boundary for vue26 must not poison vue27's own match on child-27.
+    expect(resolver.resolveModule('vue', join(child27, 'index.js'))).toBe('vue27');
+
+    // Explicit includeRedirects on legacy-26 must not undo pruning of nested modern-icons,
+    // while explicit includeRedirects on modern-icons itself still overrides pruning.
+    const withParentInclude = await createResolver({
+      ...baseOptions(root, ['legacy-26']),
+      includeRedirects: { vue: ['legacy-26'] },
+      offline: true,
+      strict: true,
+    });
+    expect(withParentInclude.resolveModule('vue', join(modernIcons, 'index.js'))).toBeNull();
+
+    const withTargetInclude = await createResolver({
+      ...baseOptions(root, ['legacy-26']),
+      includeRedirects: { vue: ['modern-icons'] },
+      offline: true,
+      strict: true,
+    });
+    expect(withTargetInclude.resolveModule('vue', join(modernIcons, 'index.js'))).toBe('vue26');
+  });
+
   it('preserves all workspace entry paths sharing a hoisted physical package for Vite SSR and uses shortest BFS paths', async () => {
     const workspace = project({
       name: 'ws-hoisted-shared-root',
@@ -863,6 +926,39 @@ describe('resolution correctness with installed packages', () => {
       'serve',
     );
     expect(externalLeafConfig.ssr.optimizeDeps?.include).not.toContain('ws-b > legacy');
+  });
+
+  it('preserves descendants with private nested incompatible versions or aliased dependencies', async () => {
+    const root = project({
+      dependencies: {
+        legacy: '1.0.0',
+        foo: '3.5.0',
+        foo2: 'npm:foo@2.0.0',
+      },
+    });
+    const legacy = pkg(root, 'legacy', {
+      dependencies: { 'v1-consumer': '1.0.0', 'aliased-consumer': '1.0.0' },
+      peerDependencies: { foo: '^2.0.0' },
+    });
+    const v1Consumer = pkg(root, 'v1-consumer', {
+      dependencies: { foo: '^1.0.0' },
+    });
+    pkg(v1Consumer, 'foo', { version: '1.0.0' });
+    const aliasedConsumer = pkg(root, 'aliased-consumer', {
+      dependencies: { foo: 'npm:other-pkg@3.5.0' },
+    });
+    pkg(aliasedConsumer, 'foo', { name: 'other-pkg', version: '3.5.0' });
+    pkg(root, 'foo', { version: '3.5.0' });
+    pkg(root, 'foo2', { name: 'foo', version: '2.0.0' });
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['legacy']),
+      offline: true,
+      strict: true,
+    });
+    expect(resolver.resolveModule('foo', join(legacy, 'index.js'))).toBe('foo2');
+    expect(resolver.resolveModule('foo', join(v1Consumer, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('foo', join(aliasedConsumer, 'index.js'))).toBeNull();
   });
 
   it('uses the selected alias manifest for peer closure instead of the host manifest', async () => {

@@ -45,6 +45,14 @@ export interface AliasMapping {
    */
   importerPaths?: string[];
 
+  /**
+   * Normalized installed package directories pruned from this alias scope
+   * (for example descendants whose declared constraints match their natural
+   * provider but not this alias). Prevents nested `node_modules` directories
+   * from inheriting an ancestor's positive rule.
+   */
+  excludedImporterPaths?: string[];
+
   /** Alias-owned importer paths, used to remove failed aliases from peer scopes. */
   peerImporterPaths?: Record<string, string[]>;
 }

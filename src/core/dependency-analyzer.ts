@@ -983,25 +983,46 @@ export class DependencyAnalyzer {
       return [];
     }
 
+    const plannedGroups: Array<{
+      aliasName: string;
+      version: string;
+      installSpec: string;
+      requests: DependencyPath[];
+    }> = [];
+
     for (const reusedGroup of reusedAliasGroups.values()) {
       logger.info(
         `    Reusing ${reusedGroup.alias.scope} alias: ${reusedGroup.alias.name}@${reusedGroup.alias.version}`,
       );
-      mappings.push(
-        this.buildAliasMapping(
-          packageName,
-          reusedGroup.alias.name,
-          reusedGroup.alias.version,
-          '', // 不需要安装
-          reusedGroup.requests,
-          allConflictPackageNames,
-        ),
-      );
+      plannedGroups.push({
+        aliasName: reusedGroup.alias.name,
+        version: reusedGroup.alias.version,
+        installSpec: '', // 不需要安装
+        requests: reusedGroup.requests,
+      });
     }
+
+    const finalizeMappings = () => {
+      const allAliasVersions = plannedGroups.map((entry) => entry.version);
+      for (const entry of plannedGroups) {
+        mappings.push(
+          this.buildAliasMapping(
+            packageName,
+            entry.aliasName,
+            entry.version,
+            entry.installSpec,
+            entry.requests,
+            allConflictPackageNames,
+            allAliasVersions,
+          ),
+        );
+      }
+      return mappings;
+    };
 
     // 没有未匹配的请求时，不访问 registry。
     if (unresolvedRequests.length === 0) {
-      return mappings;
+      return finalizeMappings();
     }
 
     if (this.options.offline) {
@@ -1012,7 +1033,7 @@ export class DependencyAnalyzer {
         requestedBy: unresolvedRequests.map((request) => request.path.join('>')),
         message: 'No installed alias satisfies ' + packageName + ' in offline mode',
       });
-      return mappings;
+      return finalizeMappings();
     }
 
     // 只为未匹配请求获取远程版本；registry 失败时保留前面已经生成的复用映射。
@@ -1027,7 +1048,7 @@ export class DependencyAnalyzer {
         message: 'Failed to fetch versions for ' + packageName + ': ' + String(error),
       });
       logger.warn(`Failed to fetch versions for ${packageName}: ${String(error)}`);
-      return mappings;
+      return finalizeMappings();
     }
 
     if (versions.length === 0) {
@@ -1038,7 +1059,7 @@ export class DependencyAnalyzer {
         message: 'No versions available for ' + packageName,
       });
       logger.warn(`No versions found for ${packageName}`);
-      return mappings;
+      return finalizeMappings();
     }
 
     for (const request of unresolvedRequests) {
@@ -1057,7 +1078,7 @@ export class DependencyAnalyzer {
     const rangeGroups = this.groupRangesByCompatibility(unresolvedRequests, versions);
     logger.info(`Creating alias for "${packageName}": ${rangeGroups.length} version groups`);
 
-    // 为每组创建别名映射
+    // 为每组规划别名映射，待所有版本确定后再统一构建作用域（以便跨版本别名剪枝）
     for (let i = 0; i < rangeGroups.length; i++) {
       const group = rangeGroups[i];
       if (!group || group.length === 0) continue;
@@ -1066,24 +1087,23 @@ export class DependencyAnalyzer {
 
       logger.debug(`  Group ${i + 1}: ${groupRanges.join(', ')}`);
 
-      const mapping = this.createAliasMappingForGroup(
+      const planned = this.planAliasMappingForGroup(
         packageName,
         group,
         groupRanges,
         versions,
         existingAliasNames,
         usedAliasNames,
-        allConflictPackageNames,
       );
 
-      if (mapping) {
-        mappings.push(mapping);
+      if (planned) {
+        plannedGroups.push(planned);
         // 记录已使用的别名名称
-        usedAliasNames.add(mapping.aliasName);
+        usedAliasNames.add(planned.aliasName);
       }
     }
 
-    return mappings;
+    return finalizeMappings();
   }
 
   /**
@@ -1134,33 +1154,35 @@ export class DependencyAnalyzer {
   }
 
   /**
-   * 为一个兼容组创建别名映射
+   * 为一个兼容组规划别名名称与目标版本
    */
-  private createAliasMappingForGroup(
+  private planAliasMappingForGroup(
     packageName: string,
     group: DependencyPath[],
     groupRanges: string[],
     versions: string[],
     existingAliasNames: Set<string>,
     usedAliasNames: Set<string>,
-    allConflictPackageNames: string[],
-  ): AliasMapping | null {
+  ): {
+    aliasName: string;
+    version: string;
+    installSpec: string;
+    requests: DependencyPath[];
+  } | null {
     // 1. 先检查是否有现有别名可复用（包括 workspace 级别）
     const existingAlias = this.findExistingAliasForRanges(packageName, groupRanges, usedAliasNames);
 
     if (existingAlias) {
-      logger.debug(
-        `    Reusing: ${existingAlias.name}@${existingAlias.version}${existingAlias.isWorkspaceAlias ? ' (workspace)' : ''}`,
+      logger.info(
+        `    Reusing ${existingAlias.scope} alias: ${existingAlias.name}@${existingAlias.version}`,
       );
 
-      return this.buildAliasMapping(
-        packageName,
-        existingAlias.name,
-        existingAlias.version,
-        '', // 不需要安装
-        group,
-        allConflictPackageNames,
-      );
+      return {
+        aliasName: existingAlias.name,
+        version: existingAlias.version,
+        installSpec: '', // 不需要安装
+        requests: group,
+      };
     }
 
     // 2. 找到满足该组所有范围的最佳版本
@@ -1184,14 +1206,12 @@ export class DependencyAnalyzer {
 
     logger.info(`    New alias: ${aliasName}@${bestVersion}`);
 
-    return this.buildAliasMapping(
-      packageName,
+    return {
       aliasName,
-      bestVersion,
+      version: bestVersion,
       installSpec,
-      group,
-      allConflictPackageNames,
-    );
+      requests: group,
+    };
   }
 
   /**
@@ -1204,6 +1224,7 @@ export class DependencyAnalyzer {
     installSpec: string,
     group: DependencyPath[],
     allConflictPackageNames: string[],
+    allAliasVersions: string[] = [version],
   ): AliasMapping {
     // usedBy 包含声明 peerDependency 的包路径
     const usedBy = group.map((r) => r.path.join('>'));
@@ -1215,12 +1236,14 @@ export class DependencyAnalyzer {
       hostVersion: this.isDeclaredInMainProject(packageName)
         ? this.getMainProjectVersion(packageName)
         : null,
+      allAliasVersions,
     };
-    const graphInstances = this.collectGraphRelatedPackageInstances(
+    const graphResult = this.collectGraphRelatedPackageInstances(
       rootIds,
       allConflictPackageNames,
       target,
     );
+    const graphInstances = graphResult?.collected ?? null;
     const allDependents = graphInstances
       ? [...new Set(graphInstances.map((instance) => instance.name))]
       : this.collectAllRelatedPackages(
@@ -1228,6 +1251,14 @@ export class DependencyAnalyzer {
           allConflictPackageNames,
           target,
         );
+    const importerPaths =
+      graphInstances && graphInstances.length > 0
+        ? [...new Set(graphInstances.map((instance) => instance.path))]
+        : undefined;
+    const importerPathSet = new Set(importerPaths ?? []);
+    const excludedImporterPaths = graphResult
+      ? [...new Set(graphResult.excludedPaths)].filter((path) => !importerPathSet.has(path))
+      : [];
 
     return {
       originalName: packageName,
@@ -1236,9 +1267,8 @@ export class DependencyAnalyzer {
       resolvedVersion: version,
       usedBy,
       allDependents,
-      ...(graphInstances && graphInstances.length > 0
-        ? { importerPaths: [...new Set(graphInstances.map((instance) => instance.path))] }
-        : {}),
+      ...(importerPaths ? { importerPaths } : {}),
+      ...(excludedImporterPaths.length > 0 ? { excludedImporterPaths } : {}),
     };
   }
 
@@ -1505,54 +1535,94 @@ export class DependencyAnalyzer {
   }
 
   /**
-   * 判断一个非根后代包是否明确声明了仅兼容宿主版本、且与当前目标别名不兼容的约束。
+   * 判断一个非根后代包是否明确声明了仅兼容其自然解析提供方、且与当前目标别名不兼容的约束。
    * 例如 Vue 2 组件依赖树中通过传递边触达的 Vue 3 图标库（peerDependencies: { vue: "3.x" }），
-   * 不应被纳入 Vue 2 别名重定向范围，也不应沿它向下传播该别名规则。
+   * 或在私有嵌套 node_modules 中自带不兼容版本（dependencies: { foo: "^1.0.0" }）的子包，
+   * 不应被纳入目标别名重定向范围，也不应沿它向下传播该别名规则。
    */
   private isDescendantIncompatibleWithAlias(
     manifest:
       | Pick<PackageJson, 'name' | 'version' | 'dependencies' | 'peerDependencies'>
       | null
       | undefined,
-    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
+    target?: {
+      packageName: string;
+      aliasVersion: string;
+      hostVersion: string | null;
+      allAliasVersions?: string[];
+    },
     descendantName?: string,
     descendantVersion?: string,
+    naturalProvider?: { name?: string; version?: string | null },
   ): boolean {
-    if (!target?.hostVersion) return false;
+    if (!target) return false;
     const overrides = resolvePeerOverridesForPackage(
       this.options.peerOverrides,
       { packageName: descendantName, manifestName: manifest?.name },
       descendantVersion ?? manifest?.version,
     );
-    const rawRange =
-      overrides?.[target.packageName] ??
-      manifest?.peerDependencies?.[target.packageName] ??
-      manifest?.dependencies?.[target.packageName];
+    const peerRange =
+      overrides?.[target.packageName] ?? manifest?.peerDependencies?.[target.packageName];
+    const depRange =
+      peerRange === undefined ? manifest?.dependencies?.[target.packageName] : undefined;
+    const rawRange = peerRange ?? depRange;
     if (!rawRange) return false;
+
+    // If dependencies[target.packageName] aliases a different package (e.g.
+    // "vue": "npm:other-pkg@3.5.0"), keep it on its own provider.
+    if (depRange?.startsWith('npm:')) {
+      const parsed = parseNpmAlias(depRange);
+      if (parsed && parsed[0] !== target.packageName) return true;
+    }
+    if (naturalProvider?.name && naturalProvider.name !== target.packageName) {
+      return true;
+    }
+
     const range =
       this.workspaceDetector.resolveVersionSpec(target.packageName, rawRange) ?? rawRange;
-    if (!satisfies(target.hostVersion, range)) return false;
     const aliasCompatible = isValidVersion(target.aliasVersion)
       ? satisfies(target.aliasVersion, range)
       : rangesIntersect(target.aliasVersion, range);
-    return !aliasCompatible;
+    if (aliasCompatible) return false;
+
+    const naturalVersion =
+      naturalProvider?.version && isValidVersion(naturalProvider.version)
+        ? naturalProvider.version
+        : target.hostVersion;
+    if (naturalVersion && satisfies(naturalVersion, range)) {
+      return true;
+    }
+
+    const otherAliasVersions = (target.allAliasVersions ?? []).filter(
+      (version) => version !== target.aliasVersion,
+    );
+    return otherAliasVersions.some((version) =>
+      isValidVersion(version) ? satisfies(version, range) : rangesIntersect(version, range),
+    );
   }
 
   /**
-   * 收集图中指定根实例的所有后代实例。返回 null 表示当前分析没有
-   * 对应的图根，调用方可为兼容旧测试/旧调用回退到名称遍历。
+   * 收集图中指定根实例的所有后代实例，同时记录被剪枝节点的物理路径，
+   * 以便在嵌套 node_modules 布局下阻止祖先规则向被剪枝目录穿透。
+   * 返回 null 表示当前分析没有对应的图根，调用方可回退到名称遍历。
    */
   private collectGraphRelatedPackageInstances(
     rootIds: string[],
     excludePackages: string[] = [],
-    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
-  ): Array<{ name: string; path: string }> | null {
+    target?: {
+      packageName: string;
+      aliasVersion: string;
+      hostVersion: string | null;
+      allAliasVersions?: string[];
+    },
+  ): { collected: Array<{ name: string; path: string }>; excludedPaths: string[] } | null {
     if (!this.dependencyGraph || rootIds.length === 0) return null;
 
     const excludeSet = new Set(excludePackages);
     const rootSet = new Set(rootIds);
     const visited = new Set<string>();
     const collected: Array<{ name: string; path: string }> = [];
+    const excludedPaths: string[] = [];
     const stack = [...rootSet];
 
     while (stack.length > 0) {
@@ -1563,19 +1633,29 @@ export class DependencyAnalyzer {
       const node = this.dependencyGraph.nodes.get(nodeId);
       if (!node || excludeSet.has(node.name)) continue;
 
-      if (
-        !rootSet.has(node.id) &&
-        this.isDescendantIncompatibleWithAlias(
-          readPackageJsonCached(node.packagePath),
-          target,
-          node.name,
-          node.version,
-        )
-      ) {
-        logger.debug(
-          `Skipping descendant ${node.name}@${node.version} (${node.packagePath}): declared ${target!.packageName} requirement matches host ${target!.hostVersion} but not alias ${target!.aliasVersion}`,
-        );
-        continue;
+      if (!rootSet.has(node.id) && target) {
+        const naturalNode = this.findGraphChildNode(node, target.packageName);
+        const naturalManifest = naturalNode ? readPackageJsonCached(naturalNode.packagePath) : null;
+        if (
+          this.isDescendantIncompatibleWithAlias(
+            readPackageJsonCached(node.packagePath),
+            target,
+            node.name,
+            node.version,
+            naturalNode
+              ? {
+                  name: naturalManifest?.name,
+                  version: naturalManifest?.version ?? naturalNode.version,
+                }
+              : undefined,
+          )
+        ) {
+          logger.debug(
+            `Skipping descendant ${node.name}@${node.version} (${node.packagePath}): declared ${target.packageName} requirement matches its natural provider but not alias ${target.aliasVersion}`,
+          );
+          excludedPaths.push(node.packagePath);
+          continue;
+        }
       }
 
       collected.push({ name: node.name, path: node.packagePath });
@@ -1585,7 +1665,7 @@ export class DependencyAnalyzer {
       }
     }
 
-    return collected;
+    return { collected, excludedPaths };
   }
 
   /**
@@ -1609,7 +1689,12 @@ export class DependencyAnalyzer {
     collected: Set<string>,
     baseDir: string,
     excludeTraversal?: Set<string>,
-    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
+    target?: {
+      packageName: string;
+      aliasVersion: string;
+      hostVersion: string | null;
+      allAliasVersions?: string[];
+    },
     rootPackages?: Set<string>,
   ): void {
     const stack: Array<{ name: string; baseDir: string }> = [{ name: packageName, baseDir }];
@@ -1699,7 +1784,12 @@ export class DependencyAnalyzer {
   private collectAllRelatedPackages(
     packageNames: string[],
     excludePackages: string[] = [],
-    target?: { packageName: string; aliasVersion: string; hostVersion: string | null },
+    target?: {
+      packageName: string;
+      aliasVersion: string;
+      hostVersion: string | null;
+      allAliasVersions?: string[];
+    },
   ): string[] {
     const cacheKey = JSON.stringify([
       packageNames.slice().sort(),

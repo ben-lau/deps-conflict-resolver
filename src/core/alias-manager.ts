@@ -34,8 +34,13 @@ interface AliasRule {
   excludedPackages: Set<string>;
   pathScoped: boolean;
 }
+interface PathScopeEntry {
+  rule: AliasRule;
+  scope: PackageScope;
+  pruned?: boolean;
+}
 interface RuleIndex {
-  paths: Map<string, Array<{ rule: AliasRule; scope: PackageScope }>>;
+  paths: Map<string, PathScopeEntry[]>;
   rules: AliasRule[];
 }
 interface ImporterInfo {
@@ -47,6 +52,10 @@ interface RuleMatch {
   specificity: number;
   scopes: PackageScope[];
   excluded: boolean;
+}
+interface PrunedMatch {
+  specificity: number;
+  scopes: PackageScope[];
 }
 interface Decision {
   reason: ResolutionExplanation['reason'];
@@ -131,6 +140,17 @@ export class AliasManager {
         for (const candidate of candidates) {
           const entries = index.paths.get(candidate) ?? [];
           entries.push({ rule, scope: { path: candidate, name } });
+          index.paths.set(candidate, entries);
+        }
+      }
+      for (const packagePath of mapping.excludedImporterPaths ?? []) {
+        const candidates = this.pathCandidates(packagePath);
+        const name =
+          packageInstances(normalizePath(packagePath)).at(-1)?.name ??
+          readPackageJsonCached(packagePath)?.name;
+        for (const candidate of candidates) {
+          const entries = index.paths.get(candidate) ?? [];
+          entries.push({ rule, scope: { path: candidate, name }, pruned: true });
           index.paths.set(candidate, entries);
         }
       }
@@ -227,12 +247,23 @@ export class AliasManager {
 
     const info = this.importerInfo(importer);
     const matches = new Map<AliasRule, RuleMatch>();
+    const prunedMatches = new Map<AliasRule, PrunedMatch>();
     // Walk ancestors instead of scanning every path in every rule.
     for (const candidate of info.paths) {
       let path = candidate;
       let distance = 0;
       while (true) {
-        for (const { rule, scope } of index.paths.get(path) ?? []) {
+        for (const { rule, scope, pruned } of index.paths.get(path) ?? []) {
+          if (pruned) {
+            let prunedMatch = prunedMatches.get(rule);
+            if (!prunedMatch) {
+              prunedMatch = { specificity: Number.NEGATIVE_INFINITY, scopes: [] };
+              prunedMatches.set(rule, prunedMatch);
+            }
+            prunedMatch.specificity = Math.max(prunedMatch.specificity, -distance);
+            prunedMatch.scopes.push(scope);
+            continue;
+          }
           let match = matches.get(rule);
           if (!match) {
             match = { rule, specificity: Number.NEGATIVE_INFINITY, scopes: [], excluded: false };
@@ -248,8 +279,22 @@ export class AliasManager {
       }
     }
 
+    // Negative boundaries mask only their own rule's ancestor scopes, so a
+    // pruned nested package never poisons another alias rule at the same depth.
+    for (const [rule, prunedMatch] of prunedMatches) {
+      const match = matches.get(rule);
+      if (match && prunedMatch.specificity >= match.specificity) {
+        matches.delete(rule);
+      }
+    }
+
     for (const rule of index.rules) {
-      const included = info.instances.filter((instance) => rule.dependents.has(instance.name));
+      const prunedMatch = prunedMatches.get(rule);
+      const included = info.instances.filter(
+        (instance) =>
+          rule.dependents.has(instance.name) &&
+          (!prunedMatch || prunedMatch.scopes.some((scope) => isWithin(instance.path, scope.path))),
+      );
       let match = matches.get(rule);
       if (!match && included.length > 0) {
         match = { rule, specificity: Number.NEGATIVE_INFINITY, scopes: [], excluded: false };

@@ -519,6 +519,7 @@ export class DepsConflictResolver {
         [...mapping.usedBy].sort(),
         [...mapping.allDependents].sort(),
         mapping.importerPaths ? [...mapping.importerPaths].sort() : null,
+        mapping.excludedImporterPaths ? [...mapping.excludedImporterPaths].sort() : null,
       ])
       .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
     const providers = (this.aliasManager?.getAliasPathMappings() ?? [])
