@@ -137,6 +137,24 @@ The plugin supports automatic detection of the package manager and registry:
 
 An explicit `registry` option overrides this detection. The resolver uses it for remote version queries, and the package manager uses the same registry when installing aliases.
 
+## Strict and Offline Resolution
+
+`offline: true` reuses verified installed aliases without registry queries or installation. Setting `autoInstall: false` alone does not prevent version queries. `strict: true` reports unresolved required dependencies, installation failures, and ambiguous runtime resolutions. Both options default to `false`.
+
+```typescript
+const resolver = await createResolver({
+  dependencies: ['legacy-lib'],
+  offline: true,
+  strict: true,
+});
+
+console.log(resolver.getDiagnostics());
+console.log(resolver.getInstallResult());
+console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/index.js'));
+```
+
+Diagnostics expose stable codes. A failed strict initialization throws the exported `ResolutionError`, which includes `diagnostics`.
+
 ## How It Works
 
 ### 1. Dependency Analysis

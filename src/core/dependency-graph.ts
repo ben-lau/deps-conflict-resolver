@@ -68,7 +68,10 @@ export function buildInstalledDependencyGraph(
     const packageJson = readPackageJsonCached(normalizedPath);
     if (!packageJson) continue;
 
-    const dependencyNames = Object.keys(packageJson.dependencies ?? {});
+    const dependencyNames = Object.keys({
+      ...packageJson.dependencies,
+      ...packageJson.optionalDependencies,
+    });
     const peerDependencyNames = Object.keys(packageJson.peerDependencies ?? {});
     const node: InstalledPackageNode = {
       id: normalizedPath,

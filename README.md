@@ -137,6 +137,24 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 显式设置 `registry` 时会覆盖上述自动检测结果：解析器从该地址查询可用版本，包管理器安装别名时也使用同一地址。
 
+## 严格模式与离线解析
+
+`offline: true` 只复用经过验证的已安装别名，不查询 registry，也不执行安装；单独设置 `autoInstall: false` 不会禁止版本查询。`strict: true` 会在必要依赖未解决、安装失败或实际解析存在歧义时报告错误。两者默认均为 `false`。
+
+```typescript
+const resolver = await createResolver({
+  dependencies: ['legacy-lib'],
+  offline: true,
+  strict: true,
+});
+
+console.log(resolver.getDiagnostics());
+console.log(resolver.getInstallResult());
+console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/index.js'));
+```
+
+诊断包含稳定的错误代码；严格模式初始化失败时可捕获导出的 `ResolutionError` 并读取其 `diagnostics`。
+
 ## 工作原理
 
 ### 1. 依赖分析

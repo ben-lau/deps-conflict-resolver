@@ -1387,6 +1387,13 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
         .mockImplementation((packageName: string) =>
           Promise.resolve(packageName === 'vue' ? ['2.7.16'] : ['3.6.0']),
         ),
+      fetchPackageManifest: vi.fn(
+        async (packageName: string, version: string): Promise<PackageJson> => ({
+          name: packageName,
+          version,
+          peerDependencies: packageName === 'vue' ? { 'vue-router': '^3.0.0' } : { vue: '^2.0.0' },
+        }),
+      ),
     };
 
     try {
