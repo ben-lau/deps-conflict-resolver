@@ -61,6 +61,42 @@ describe('createPackageManagerAdapter', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32').each([
+    ['pnpm', '10.7.1', ['--save-exact', '-w']],
+    ['yarn', '1.22.22', ['--exact', '-W']],
+    ['yarn', '4.6.0', ['--exact']],
+  ] as const)('targets the workspace root with %s %s', async (packageManager, version, flags) => {
+    const root = await mkdtemp(join(tmpdir(), 'deps-package-manager-workspace-'));
+    try {
+      await writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({
+          private: true,
+          packageManager: packageManager + '@' + version,
+          workspaces: ['packages/*', 'apps/*'],
+        }),
+      );
+      if (packageManager === 'pnpm')
+        await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages: [packages/*, apps/*]\n');
+      vi.mocked(spawn).mockReturnValue(createChildProcess(0) as never);
+      const spec = 'vue2@npm:vue@2.7.16';
+      const adapter = createPackageManagerAdapter({
+        ...options,
+        projectRoot: root,
+        packageManager,
+      });
+      await expect(adapter.install([spec])).resolves.toMatchObject({ success: true });
+      const [command, args, childOptions] = vi.mocked(spawn).mock.calls[0]!;
+      expect([command, args, childOptions?.cwd]).toEqual([
+        packageManager,
+        ['add', ...flags, spec],
+        root,
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ['npm', 'C:\\node\\node_modules\\npm\\bin\\npm-cli.js'],
     ['pnpm', 'C:\\node\\pnpm.cjs'],

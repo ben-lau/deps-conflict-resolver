@@ -92,6 +92,8 @@ export interface ResolvedOptions extends Required<
   offline?: boolean;
   strict?: boolean;
   peerOverrides?: Record<string, Record<string, string>>;
+  /** Explicit registry to pass to installation. Auto-detection is for metadata lookup. */
+  registryOverride?: string;
   /**
    * 解析后的包管理器类型（已自动检测或用户指定）
    */

@@ -1,8 +1,10 @@
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { posix, win32 } from 'path';
 import type { PackageManagerType, ResolvedOptions } from '../types';
 import { createLogger } from '../utils/logger';
+import { readPackageJsonCached } from '../utils/fs';
+import { createWorkspaceDetector } from './workspace-detector';
 
 const logger = createLogger('package-manager-adapter');
 
@@ -54,7 +56,7 @@ const DEFAULT_TIMING: PackageManagerTiming = {
 };
 
 export function createPackageManagerAdapter(
-  options: Pick<ResolvedOptions, 'packageManager' | 'projectRoot' | 'registry'>,
+  options: Pick<ResolvedOptions, 'packageManager' | 'projectRoot'> & { registry?: string },
   timing: PackageManagerTiming = DEFAULT_TIMING,
 ): PackageManagerAdapter {
   return {
@@ -71,7 +73,30 @@ export function createPackageManagerAdapter(
         };
       }
 
-      const { command, args } = buildCommand(options.packageManager, specs, env);
+      const invocation = resolvePackageManagerInvocation(
+        options.packageManager,
+        process.platform,
+        env,
+      );
+      let rootFlag: '-w' | '-W' | undefined;
+      if (options.packageManager !== 'npm') {
+        const workspace = createWorkspaceDetector(options.projectRoot).detect();
+        if (workspace.workspaceRoot === options.projectRoot) {
+          if (options.packageManager === 'pnpm' && workspace.workspaceType === 'pnpm') {
+            rootFlag = '-w';
+          } else if (options.packageManager === 'yarn') {
+            const manifest = readPackageJsonCached(options.projectRoot);
+            if (manifest?.workspaces) {
+              const pinnedMajor = manifest.packageManager?.match(/^yarn@(\d+)(?:\.|$)/)?.[1];
+              const classic = pinnedMajor
+                ? pinnedMajor === '1'
+                : await isYarnClassic(invocation, options.projectRoot, env);
+              if (classic) rootFlag = '-W';
+            }
+          }
+        }
+      }
+      const { command, args } = buildCommand(options.packageManager, specs, invocation, rootFlag);
 
       logger.info(`Running: ${command} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`);
 
@@ -157,29 +182,38 @@ export function createPackageManagerAdapter(
 function buildCommand(
   packageManager: PackageManagerType,
   specs: string[],
-  environment: NodeJS.ProcessEnv,
+  invocation: PackageManagerInvocation,
+  rootFlag?: '-w' | '-W',
 ): { command: string; args: string[] } {
-  const invocation = resolvePackageManagerInvocation(packageManager, process.platform, environment);
-
+  const { command, argsPrefix } = invocation;
+  const rootArgs = rootFlag ? [rootFlag] : [];
   switch (packageManager) {
     case 'pnpm':
-      return {
-        command: invocation.command,
-        args: [...invocation.argsPrefix, 'add', '--save-exact', ...specs],
-      };
+      return { command, args: [...argsPrefix, 'add', '--save-exact', ...rootArgs, ...specs] };
     case 'yarn':
-      return {
-        command: invocation.command,
-        args: [...invocation.argsPrefix, 'add', '--exact', ...specs],
-      };
+      return { command, args: [...argsPrefix, 'add', '--exact', ...rootArgs, ...specs] };
     case 'npm':
       return {
-        command: invocation.command,
-        args: [...invocation.argsPrefix, 'install', '--legacy-peer-deps', '--save-exact', ...specs],
+        command,
+        args: [...argsPrefix, 'install', '--legacy-peer-deps', '--save-exact', ...specs],
       };
   }
-
   throw new Error(`Unsupported package manager: ${String(packageManager)}`);
+}
+
+function isYarnClassic(
+  invocation: PackageManagerInvocation,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(
+      invocation.command,
+      [...invocation.argsPrefix, '--version'],
+      { cwd, env: environment, timeout: 5_000, windowsHide: true },
+      (error, stdout) => resolve(!error && stdout.trim().startsWith('1.')),
+    );
+  });
 }
 
 export function resolvePackageManagerCommand(
@@ -458,8 +492,9 @@ function getEnvironmentValue(environment: NodeJS.ProcessEnv, name: string): stri
 
 function registryEnvironment(
   packageManager: PackageManagerType,
-  registry: string,
+  registry?: string,
 ): NodeJS.ProcessEnv {
+  if (!registry) return { ...process.env };
   return {
     ...process.env,
     npm_config_registry: registry,

@@ -44,7 +44,10 @@ export class PackageInstaller {
 
   constructor(
     options: ResolvedOptions,
-    packageManager: PackageManagerAdapter = createPackageManagerAdapter(options),
+    packageManager: PackageManagerAdapter = createPackageManagerAdapter({
+      ...options,
+      registry: options.registryOverride,
+    }),
   ) {
     this.options = options;
     this.packageManager = packageManager;
@@ -321,7 +324,8 @@ export class PackageInstaller {
 
     const errorMessage = runResult.timedOut
       ? `Install timeout after ${INSTALL_TIMEOUT / 1000}s`
-      : runResult.stderr || `Process exited with code ${runResult.exitCode}`;
+      : [runResult.stderr, runResult.stdout].filter(Boolean).join('\n') ||
+        `Process exited with code ${runResult.exitCode}`;
     logger.error(`Install failed: ${errorMessage}`);
     return { success: false, errors: [errorMessage] };
   }

@@ -170,6 +170,9 @@ describe('EnvironmentDetector', () => {
 
     beforeEach(() => {
       process.env = { ...originalEnv };
+      delete process.env.npm_config_registry;
+      delete process.env.NPM_CONFIG_REGISTRY;
+      delete process.env.YARN_NPM_REGISTRY_SERVER;
     });
 
     afterEach(() => {
@@ -186,6 +189,30 @@ describe('EnvironmentDetector', () => {
       const result = await new EnvironmentDetector('/project').getRegistryForPackageManager('npm');
 
       expect(result).toBe('https://custom.registry.com');
+    });
+
+    it('preferentially uses the registry inherited by the package manager', async () => {
+      process.env.npm_config_registry = 'https://internal.registry.test';
+      vi.mocked(existsSync).mockReturnValue(false);
+      await expect(
+        new EnvironmentDetector('/project').getRegistryForPackageManager('npm'),
+      ).resolves.toBe('https://internal.registry.test');
+    });
+
+    it('uses project Yarn settings ahead of the user npmrc', async () => {
+      vi.mocked(existsSync).mockImplementation(
+        (path) =>
+          path.toString().endsWith('.yarnrc.yml') ||
+          path.toString().replace(/\\/g, '/').endsWith('/.npmrc'),
+      );
+      vi.mocked(fs.readFile).mockImplementation(async (path) =>
+        typeof path === 'string' && path.endsWith('.yarnrc.yml')
+          ? 'npmRegistryServer: https://project-yarn.registry.test'
+          : 'registry=https://user.registry.test',
+      );
+      await expect(
+        new EnvironmentDetector('/project').getRegistryForPackageManager('yarn'),
+      ).resolves.toBe('https://project-yarn.registry.test');
     });
 
     it('should handle registry with spaces and quotes', async () => {

@@ -99,29 +99,35 @@ export class DepsConflictResolver {
     userOptions: DepsConflictResolverOptions,
     projectRoot: string,
   ): Promise<ResolvedOptions> {
+    const {
+      packageManager: configuredManager,
+      registry: configuredRegistry,
+      peerOverrides,
+    } = userOptions;
+    const offline = userOptions.offline ?? false;
     // 创建环境检测器
     this.environmentDetector = createEnvironmentDetector(projectRoot);
 
     let packageManager: 'npm' | 'yarn' | 'pnpm';
-    if (!userOptions.packageManager || userOptions.packageManager === 'auto') {
+    if (!configuredManager || configuredManager === 'auto') {
       const detected = this.environmentDetector.getDetectionResult();
       packageManager = detected.packageManager;
       logger.info(
         `Auto-detected package manager: ${packageManager} (from ${detected.detectedFrom})`,
       );
     } else {
-      packageManager = userOptions.packageManager;
+      packageManager = configuredManager;
     }
 
     // 检测 registry
     let registry: string;
-    if (!userOptions.registry) {
+    if (!configuredRegistry) {
       registry = await this.environmentDetector.getRegistryForPackageManager(packageManager);
       if (registry !== DEFAULT_NPM_REGISTRY) {
         logger.info(`Auto-detected registry: ${registry}`);
       }
     } else {
-      registry = userOptions.registry;
+      registry = configuredRegistry;
     }
 
     return {
@@ -130,16 +136,15 @@ export class DepsConflictResolver {
       projectRoot,
       packageManager,
       registry,
-      autoInstall: userOptions.offline
-        ? false
-        : (userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall),
-      offline: userOptions.offline ?? false,
+      ...(configuredRegistry && { registryOverride: configuredRegistry }),
+      autoInstall: offline ? false : (userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall),
+      offline,
       strict: userOptions.strict ?? false,
       debug: userOptions.debug ?? DEFAULT_OPTIONS.debug,
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
       excludeRedirects: userOptions.excludeRedirects ?? {},
       includeRedirects: userOptions.includeRedirects ?? {},
-      peerOverrides: userOptions.peerOverrides ? { ...userOptions.peerOverrides } : {},
+      peerOverrides: peerOverrides ? { ...peerOverrides } : {},
     };
   }
 

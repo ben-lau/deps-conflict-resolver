@@ -4,6 +4,7 @@ import { createLogger } from '../utils/logger';
 import { fileExists, iterateParentDirs, readPackageJsonCached } from '../utils/fs';
 import { DEFAULT_NPM_REGISTRY, LOCK_FILE_MAP } from '../constants';
 import type { PackageManagerType, PackageManagerDetectionResult } from '../types/index';
+import { parse as parseYaml } from 'yaml';
 
 const logger = createLogger('environment-detector');
 
@@ -143,13 +144,30 @@ export class EnvironmentDetector {
    * 检测项目使用的 registry
    *
    * 检测优先级：
-   * 1. 项目级 .npmrc（向上遍历，覆盖 monorepo 子包场景）
-   * 2. 用户级 .npmrc
-   * 3. 包管理器特定配置
-   * 4. 默认 registry
+   * 包管理器环境变量、项目配置、用户配置、默认 registry
    */
   private async detectRegistry(packageManager: PackageManagerType): Promise<string> {
     const defaultRegistry = DEFAULT_NPM_REGISTRY;
+    const fromEnvironment = [
+      packageManager === 'yarn' ? process.env.YARN_NPM_REGISTRY_SERVER : undefined,
+      process.env.npm_config_registry,
+      process.env.NPM_CONFIG_REGISTRY,
+    ]
+      .find((value) => value?.trim())
+      ?.trim();
+    if (fromEnvironment) return fromEnvironment;
+
+    if (packageManager === 'yarn') {
+      for (const dir of iterateParentDirs(this.projectRoot)) {
+        const yarnrc = join(dir, '.yarnrc.yml');
+        if (!fileExists(yarnrc)) continue;
+        const registry = await this.parseRegistryFromYarnrc(yarnrc);
+        if (registry) {
+          logger.debug(`Detected registry from .yarnrc.yml: ${registry} (at ${dir})`);
+          return registry;
+        }
+      }
+    }
 
     // 1. 从 projectRoot 向上遍历查找 .npmrc（覆盖 monorepo 子包场景）
     for (const dir of iterateParentDirs(this.projectRoot)) {
@@ -184,20 +202,6 @@ export class EnvironmentDetector {
           if (registry) {
             logger.debug(`Detected registry from .pnpmrc: ${registry}`);
             return registry;
-          }
-        }
-      }
-
-      // 检查 yarn 配置（如果是 yarn）—— 向上遍历查找 .yarnrc.yml（覆盖 monorepo 子包场景）
-      if (packageManager === 'yarn') {
-        for (const dir of iterateParentDirs(this.projectRoot)) {
-          const yarnrc = join(dir, '.yarnrc.yml');
-          if (fileExists(yarnrc)) {
-            const registry = await this.parseRegistryFromYarnrc(yarnrc);
-            if (registry) {
-              logger.debug(`Detected registry from .yarnrc.yml: ${registry} (at ${dir})`);
-              return registry;
-            }
           }
         }
       }
@@ -241,16 +245,9 @@ export class EnvironmentDetector {
   private async parseRegistryFromYarnrc(filePath: string): Promise<string | null> {
     try {
       const content = await fs.readFile(filePath, 'utf-8');
-      const lines = content.split('\n');
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        // 匹配 npmRegistryServer: xxx
-        const match = trimmed.match(/^npmRegistryServer:\s*["']?(.+?)["']?\s*$/);
-        if (match?.[1]) {
-          return match[1];
-        }
-      }
+      const config = parseYaml(content) as { npmRegistryServer?: unknown } | null;
+      const registry = config?.npmRegistryServer;
+      if (typeof registry === 'string') return registry.trim() || null;
     } catch {
       // 忽略读取错误
     }

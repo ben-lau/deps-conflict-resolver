@@ -704,7 +704,7 @@ describe('PackageInstaller', () => {
         installed: [],
         reused: [],
         failed: ['aliased-vue'],
-        errors: ['Install failed'],
+        errors: ['Install failed\npartial output'],
       });
     });
 
