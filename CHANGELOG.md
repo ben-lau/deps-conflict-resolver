@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.2.0...v1.3.0) (2026-12-16)
+
+
+### Features
+
+* **core:** add doctor and prepare CLI commands ([153a78f](https://github.com/ben-lau/deps-conflict-resolver/commit/153a78ffc9f8d5d48565f4f25a65672807ff3b0c))
+
 ## [1.2.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.2...v1.2.0) (2026-12-14)
 
 
