@@ -827,7 +827,12 @@ export class DepsConflictResolver {
       const errors = this.generationDiagnostics().filter(
         (diagnostic) => diagnostic.severity === 'error',
       );
-      if (errors.length > 0) throw new ResolutionError(errors);
+      if (errors.length > 0)
+        throw new ResolutionError(errors, {
+          aliases: this.analysisResult?.aliasMappings ?? [],
+          diagnostics: this.getDiagnostics(),
+          installation: this.getInstallResult(),
+        });
     }
   }
 

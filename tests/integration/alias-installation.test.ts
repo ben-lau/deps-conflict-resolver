@@ -7,11 +7,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { createResolver } from '../../src/core/resolver';
+import { runCli } from '../../src/core/cli-runner';
 import { resolvePackageManagerInvocation } from '../../src/core/package-manager-adapter';
 
 const run = promisify(execFile);
 
-it('installs a real npm alias, verifies it, and reuses the result offline without changes', async () => {
+it('prepares a real npm alias from imported options and reuses it offline after a frozen install', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deps-real-install-'));
   const server = createServer();
   try {
@@ -96,7 +97,7 @@ it('installs a real npm alias, verifies it, and reuses the result offline withou
 
     for (const [name, version, peers] of [
       ['vue', '3.5.0', {}],
-      ['legacy', '1.0.0', { vue: '^2.0.0' }],
+      ['legacy', '1.0.0', { vue: '>=2' }],
     ] as const) {
       for (const directory of [join(root, 'fixtures', name), join(root, 'node_modules', name)]) {
         await mkdir(directory, { recursive: true });
@@ -129,34 +130,51 @@ it('installs a real npm alias, verifies it, and reuses the result offline withou
     );
 
     const options = {
-      projectRoot: root,
       dependencies: ['legacy'],
+      peerOverrides: { legacy: { vue: '^2' } },
+      aliasPrefix: 'compat-',
       packageManager: 'npm' as const,
       registry,
       strict: true,
     };
-    const resolver = await createResolver(options);
-    expect(resolver.getInstallResult()).toMatchObject({
+    const configFile = join(root, 'resolver-options.mjs');
+    await writeFile(configFile, 'export default ' + JSON.stringify(options));
+    let report = '';
+    let error = '';
+    const exit = await runCli(['prepare', '--root', root, '--config', configFile, '--json'], {
+      stdout: (text) => {
+        report += text;
+      },
+      stderr: (text) => {
+        error += text;
+      },
+    });
+    expect(exit, report + error).toBe(0);
+    expect(JSON.parse(report).installation).toMatchObject({
       success: true,
-      installed: ['aliased-vue2'],
+      installed: ['compat-vue2'],
       failed: [],
     });
     const installed = JSON.parse(
-      await readFile(join(root, 'node_modules/aliased-vue2/package.json'), 'utf8'),
+      await readFile(join(root, 'node_modules/compat-vue2/package.json'), 'utf8'),
     );
     expect(installed).toMatchObject({ name: 'vue', version: '2.7.16' });
     expect(
-      JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['aliased-vue2'],
+      JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['compat-vue2'],
     ).toBe('npm:vue@2.7.16');
     const importer = await realpath(join(root, 'node_modules/legacy/index.js'));
-    expect(resolver.resolveModule('vue', importer)).toBe('aliased-vue2');
 
     const before = await Promise.all(
       ['package.json', 'package-lock.json'].map((file) => readFile(join(root, file), 'utf8')),
     );
+    await run(
+      invocation.command,
+      [...invocation.argsPrefix, 'ci', '--legacy-peer-deps', '--ignore-scripts'],
+      { cwd: root, env: { ...process.env, npm_config_registry: registry }, timeout: 10_000 },
+    );
     const requestCount = requests;
-    const offline = await createResolver({ ...options, offline: true });
-    expect(offline.resolveModule('vue', importer)).toBe('aliased-vue2');
+    const offline = await createResolver({ ...options, projectRoot: root, offline: true });
+    expect(offline.resolveModule('vue', importer)).toBe('compat-vue2');
     expect(offline.getInstallResult()).toBeNull();
     expect(requests).toBe(requestCount);
     expect(

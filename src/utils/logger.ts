@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 /**
  * 日志级别
  */
@@ -29,6 +31,11 @@ interface LoggerConfig {
  */
 const DEFAULT_GLOBAL_LEVEL: LogLevel = LogLevel.INFO | LogLevel.WARN | LogLevel.ERROR;
 let __GLOBAL_LEVEL__: LogLevel = DEFAULT_GLOBAL_LEVEL;
+const scopedLevel = new AsyncLocalStorage<LogLevel>();
+
+export function withLogLevel<T>(level: LogLevel, callback: () => T): T {
+  return scopedLevel.run(level, callback);
+}
 
 /**
  * 重置全局日志级别（主要用于测试隔离）
@@ -61,7 +68,7 @@ export class Logger {
   }
 
   private getEffectiveLevel(): LogLevel {
-    return this.levelOverride ?? __GLOBAL_LEVEL__;
+    return this.levelOverride ?? scopedLevel.getStore() ?? __GLOBAL_LEVEL__;
   }
 
   /**

@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { runCli } from '../../src/core/cli-runner';
+import { createResolver } from '../../src/index';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
 import { clearPackageJsonCache } from '../../src/utils/fs';
+import { npmRegistryClient } from '../../src/core/registry-client';
+import * as packageManager from '../../src/core/package-manager-adapter';
 
 describe('doctor and prepare commands', () => {
   let root: string;
@@ -59,6 +62,7 @@ describe('doctor and prepare commands', () => {
   it('emits clean JSON, discovers runtime dependencies, and leaves files unchanged', async () => {
     writeAlias();
     const fetch = vi.spyOn(globalThis, 'fetch');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     const before = readFileSync(join(root, 'package.json'), 'utf8');
     const code = await runCli(
       ['doctor', '--root', root, '--offline', '--strict', '--json'],
@@ -72,6 +76,9 @@ describe('doctor and prepare commands', () => {
     expect(report.diagnostics).toEqual([]);
     expect(fetch).not.toHaveBeenCalled();
     expect(readFileSync(join(root, 'package.json'), 'utf8')).toBe(before);
+    expect(info).not.toHaveBeenCalled();
+    await createResolver({ projectRoot: root, dependencies: ['legacy'], offline: true });
+    expect(info).toHaveBeenCalled();
   });
 
   it('returns a failing strict status with machine-readable unresolved diagnostics', async () => {
@@ -83,6 +90,123 @@ describe('doctor and prepare commands', () => {
     expect(JSON.parse(stdout).diagnostics).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING' })]),
     );
+  });
+
+  it.each([
+    ['cjs', 'module.exports = '],
+    ['mjs', 'export default '],
+    ['json', ''],
+  ])(
+    'loads entry points and peer overrides from an explicit %s file',
+    async (extension, prefix) => {
+      writeAlias();
+      const file = join(root, `my resolver options.${extension}`);
+      writeFileSync(
+        file,
+        prefix +
+          JSON.stringify({
+            dependencies: ['legacy'],
+            offline: true,
+            strict: true,
+            peerOverrides: { legacy: { vue: '^2' } },
+          }),
+      );
+      writeFileSync(
+        join(root, 'node_modules/legacy/package.json'),
+        JSON.stringify({ name: 'legacy', version: '1.0.0', peerDependencies: { vue: '>=2' } }),
+      );
+      expect(
+        await runCli(
+          ['prepare', '--root', root, '--config', relative(process.cwd(), file), '--json'],
+          output,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout)).toMatchObject({
+        dependencies: ['legacy'],
+        activeAliases: [expect.objectContaining({ aliasName: 'vue2' })],
+        diagnostics: [],
+        installation: null,
+      });
+    },
+  );
+
+  it('gives CLI flags and positional package names priority over the imported options', async () => {
+    const file = join(root, 'options.cjs');
+    writeFileSync(
+      file,
+      'module.exports = ' +
+        JSON.stringify({
+          projectRoot: join(root, 'other'),
+          packageManager: 'pnpm',
+          dependencies: ['missing'],
+          offline: false,
+          strict: true,
+        }),
+    );
+    const code = await runCli(
+      [
+        'doctor',
+        'vue',
+        '--config',
+        file,
+        '--root',
+        root,
+        '--package-manager',
+        'npm',
+        '--offline',
+        '--json',
+      ],
+      output,
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      projectRoot: root,
+      packageManager: 'npm',
+      dependencies: ['vue'],
+    });
+  });
+
+  it('only loads an options file explicitly requested by the CLI', async () => {
+    writeAlias();
+    writeFileSync(join(root, 'deps-conflict-resolver.config.json'), '{broken JSON');
+    expect(
+      await runCli(['doctor', '--root', root, '--offline', '--strict', '--json'], output),
+    ).toBe(0);
+    expect(JSON.parse(stdout).dependencies).toEqual(['legacy', 'vue']);
+    const importer = join(root, 'node_modules/legacy/index.js');
+    writeFileSync(importer, 'import "vue";');
+    const resolver = await createResolver({
+      projectRoot: root,
+      dependencies: ['legacy'],
+      offline: true,
+      strict: true,
+    });
+    expect(resolver.resolveModule('vue', importer)).toBe('vue2');
+  });
+
+  it('identifies invalid imported options before preparing the project', async () => {
+    const manifest = join(root, 'package.json');
+    const before = readFileSync(manifest, 'utf8');
+    const file = join(root, 'options.cjs');
+    writeFileSync(file, 'module.exports = { dependencies: ["legacy"], offline: "true" };');
+    expect(await runCli(['prepare', '--root', root, '--config', file, '--json'], output)).toBe(1);
+    expect(JSON.parse(stdout).error).toMatch(/options\.cjs.*offline/);
+    expect(readFileSync(manifest, 'utf8')).toBe(before);
+  });
+
+  it('treats undefined settings in a frozen config as omitted', async () => {
+    writeAlias();
+    const file = join(root, 'options.cjs');
+    writeFileSync(
+      file,
+      'module.exports = Object.freeze({ dependencies: undefined, registry: undefined, packageManager: undefined, strict: true, offline: true });',
+    );
+    expect(await runCli(['doctor', '--root', root, '--config', file, '--json'], output)).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      dependencies: ['legacy', 'vue'],
+      activeAliases: [expect.objectContaining({ aliasName: 'vue2' })],
+      diagnostics: [],
+    });
   });
 
   it.each([false, true])(
@@ -169,6 +293,63 @@ describe('doctor and prepare commands', () => {
     const code = await runCli(['prepare', 'legacy', '--root', root, '--offline', '--json'], output);
     expect(code).toBe(0);
     expect(JSON.parse(stdout).installation).toBeNull();
+  });
+
+  it('reports a strict preparation error before installing any planned aliases', async () => {
+    writeFileSync(
+      join(root, 'node_modules/legacy/package.json'),
+      JSON.stringify({
+        name: 'legacy',
+        version: '1.0.0',
+        peerDependencies: { vue: '^2', missing: '^1' },
+      }),
+    );
+    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.7.16']);
+    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
+      name: 'vue',
+      version: '2.7.16',
+    });
+    const install = vi.fn().mockResolvedValue({ success: false, errors: ['unexpected install'] });
+    vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({ install });
+
+    const code = await runCli(['prepare', 'legacy', '--root', root, '--strict', '--json'], output);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      schemaVersion: 1,
+      command: 'prepare',
+      aliases: [expect.objectContaining({ aliasName: 'aliased-vue2' })],
+      diagnostics: [expect.objectContaining({ code: 'PEER_NOT_DECLARED', packageName: 'missing' })],
+      installation: null,
+      activeAliases: [],
+    });
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it('inherits package-manager registry settings and keeps install errors printed to stdout', async () => {
+    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.7.16']);
+    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
+      name: 'vue',
+      version: '2.7.16',
+    });
+    const adapter = vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({
+      install: vi.fn().mockResolvedValue({
+        success: false,
+        exitCode: 1,
+        stdout: 'ERR_PNPM_ADDING_TO_ROOT',
+        stderr: 'warning from package manager',
+        timedOut: false,
+      }),
+    });
+
+    expect(
+      await runCli(
+        ['prepare', 'legacy', '--root', root, '--package-manager', 'pnpm', '--json'],
+        output,
+      ),
+    ).toBe(1);
+    const report = JSON.parse(stdout);
+    expect(report.installation.errors[0]).toContain('ERR_PNPM_ADDING_TO_ROOT');
+    expect(adapter.mock.calls[0]?.[0].registry).toBeUndefined();
   });
 
   it.each([['--unknown'], ['--root'], ['--package-manager', 'unknown']])(

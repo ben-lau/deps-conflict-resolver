@@ -1,8 +1,10 @@
 import { resolve } from 'node:path';
 import { DepsConflictResolver } from './resolver';
 import { findPackagePath, findProjectRoot, readPackageJsonCached } from '../utils/fs';
-import { createLogger, LogLevel } from '../utils/logger';
+import { LogLevel, withLogLevel } from '../utils/logger';
 import { ResolutionError } from './resolution-error';
+import { loadCliConfig } from './cli-config';
+import type { DepsConflictResolverOptions } from '../types';
 
 interface CliOutput {
   stdout(text: string): void;
@@ -12,10 +14,11 @@ interface CliOutput {
 const HELP = [
   'Usage: deps-conflict-resolver <doctor|prepare> [packages...] [options]',
   '',
-  'doctor   Analyze without installing; scans runtime dependencies when none are listed.',
+  'doctor   Analyze without installing; scans runtime dependencies when none are selected.',
   'prepare  Analyze and install verified aliases for the listed packages.',
   '',
   'Options:',
+  '  --config <file>                Import resolver options from JSON or a Node module',
   '  --root <directory>             Project directory (defaults to cwd)',
   '  --package-manager <manager>    auto, npm, pnpm, or yarn',
   '  --registry <url>               Registry used for metadata and installation',
@@ -47,85 +50,96 @@ export async function runCli(
     if (command !== 'doctor' && command !== 'prepare') {
       throw new Error('Unknown command: ' + command + '\n' + HELP);
     }
-    let root = process.cwd();
-    let registry: string | undefined;
-    let packageManager: 'auto' | 'npm' | 'pnpm' | 'yarn' = 'auto';
-    let offline = false;
-    let strict = false;
+    const overrides: Partial<DepsConflictResolverOptions> = {};
+    let configFile: string | undefined;
     const packages: string[] = [];
     for (let index = 0; index < args.length; index++) {
       const arg = args[index]!;
       if (arg === '--json') continue;
       if (arg === '--offline') {
-        offline = true;
+        overrides.offline = true;
         continue;
       }
       if (arg === '--strict') {
-        strict = true;
+        overrides.strict = true;
         continue;
       }
-      if (arg === '--root' || arg === '--registry' || arg === '--package-manager') {
+      if (
+        arg === '--config' ||
+        arg === '--root' ||
+        arg === '--registry' ||
+        arg === '--package-manager'
+      ) {
         const value = args[++index];
         if (!value || value.startsWith('--')) throw new Error('Missing value for ' + arg);
-        if (arg === '--root') root = value;
-        else if (arg === '--registry') registry = value;
+        if (arg === '--config') configFile = value;
+        else if (arg === '--root') overrides.projectRoot = value;
+        else if (arg === '--registry') overrides.registry = value;
         else {
           if (!['auto', 'npm', 'pnpm', 'yarn'].includes(value))
             throw new Error('Unsupported package manager: ' + value);
-          packageManager = value as typeof packageManager;
+          overrides.packageManager = value as DepsConflictResolverOptions['packageManager'];
         }
         continue;
       }
       if (arg.startsWith('-')) throw new Error('Unknown option: ' + arg);
       packages.push(arg);
     }
-    if (command === 'prepare' && packages.length === 0) {
-      throw new Error('prepare requires at least one dependency name');
-    }
-
+    const options = { ...(configFile ? await loadCliConfig(configFile) : {}), ...overrides };
+    const root = options.projectRoot ?? process.cwd();
     const projectRoot = findProjectRoot(resolve(root));
     if (!projectRoot) throw new Error('Could not find package.json from ' + root);
     const manifest = readPackageJsonCached(projectRoot);
     if (!manifest) throw new Error('Could not read package.json at ' + projectRoot);
+    const selectedPackages = packages.length > 0 ? packages : options.dependencies;
+    if (command === 'prepare' && !selectedPackages?.length) {
+      throw new Error(
+        'prepare requires at least one dependency name or a dependencies list from --config',
+      );
+    }
+    const strictMode = options.strict ?? false;
     const runtimeDependencies = { ...manifest.dependencies, ...manifest.optionalDependencies };
     const dependencies = [
       ...new Set(
-        packages.length > 0
-          ? packages
-          : Object.keys(runtimeDependencies)
-              .filter((name) => !runtimeDependencies[name]?.startsWith('npm:'))
-              .filter(
-                (name) =>
-                  !Object.hasOwn(manifest.optionalDependencies ?? {}, name) ||
-                  findPackagePath(name, projectRoot) !== null,
-              )
-              .sort(),
+        selectedPackages ??
+          Object.keys(runtimeDependencies)
+            .filter((name) => !runtimeDependencies[name]?.startsWith('npm:'))
+            .filter(
+              (name) =>
+                !Object.hasOwn(manifest.optionalDependencies ?? {}, name) ||
+                findPackagePath(name, projectRoot) !== null,
+            )
+            .sort(),
       ),
     ];
 
-    // CLI reports own their output; library logs must not corrupt JSON.
-    createLogger('cli').setLevel(LogLevel.SILENT);
     const resolver = new DepsConflictResolver({
+      ...options,
       projectRoot,
       dependencies,
-      packageManager,
-      registry,
-      offline,
+      debug: false,
+      strict: command === 'prepare' && strictMode,
       autoInstall: command === 'prepare',
     });
-    await resolver.initialize();
-    const analysis = resolver.getAnalysisResult()!;
-    const diagnostics = resolver.getDiagnostics();
+    let failure: ResolutionError['preparation'];
+    try {
+      // Keep CLI output machine-readable without silencing other resolvers.
+      await withLogLevel(LogLevel.SILENT, () => resolver.initialize());
+    } catch (error) {
+      if (!(error instanceof ResolutionError) || !error.preparation) throw error;
+      failure = error.preparation;
+    }
+    const diagnostics = failure?.diagnostics ?? resolver.getDiagnostics();
     const report = {
       schemaVersion: 1,
       command,
       projectRoot,
       packageManager: resolver.getOptions().packageManager,
       dependencies,
-      aliases: analysis.aliasMappings,
-      activeAliases: resolver.getAliasPathMappings(),
+      aliases: failure?.aliases ?? resolver.getAnalysisResult()!.aliasMappings,
+      activeAliases: failure ? [] : resolver.getAliasPathMappings(),
       diagnostics,
-      installation: resolver.getInstallResult(),
+      installation: failure ? failure.installation : resolver.getInstallResult(),
     };
     if (json) {
       output.stdout(JSON.stringify(report, null, 2) + '\n');
@@ -139,7 +153,7 @@ export async function runCli(
           diagnostics.length +
           ' diagnostics.\n',
       );
-      for (const mapping of analysis.aliasMappings) {
+      for (const mapping of report.aliases) {
         const active = report.activeAliases.some((entry) => entry.aliasName === mapping.aliasName);
         output.stdout(
           '  ' +
@@ -157,7 +171,7 @@ export async function runCli(
       }
     }
     return diagnostics.some((diagnostic) => diagnostic.severity === 'error') &&
-      (strict || command === 'prepare')
+      (strictMode || command === 'prepare')
       ? 1
       : 0;
   } catch (error) {
