@@ -9,16 +9,13 @@ import type {
   ResolutionExplanation,
   InstallReport,
 } from '../types/index';
-import { DEFAULT_NPM_REGISTRY, LOCK_FILE_MAP } from '../constants';
+import { DEFAULT_NPM_REGISTRY } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
 import {
-  canonicalPath,
   clearPackageJsonCache,
   createFileSystemCache,
-  fileExists,
   findProjectRoot,
   getCachedRealPath,
-  iterateParentDirs,
   readPackageJsonCached,
   withFileSystemCache,
 } from '../utils/fs';
@@ -26,13 +23,12 @@ import {
   currentDependencyInputs,
   DependencyInputs,
   observedRealpath,
-  observeLockfile,
   withoutDependencyInputs,
 } from '../utils/dependency-inputs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import { createEnvironmentDetector, EnvironmentDetector } from './environment-detector';
-import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
+import { createEnvironmentDetector } from './environment-detector';
+import { createDependencyAnalyzer } from './dependency-analyzer';
 import { createAliasManager, AliasManager } from './alias-manager';
 import { createPackageInstaller, PackageInstaller } from './package-installer';
 import { NpmRegistryClient, type RegistryClient } from './registry-client';
@@ -44,9 +40,15 @@ import {
   type ProjectPreparation,
   type PreparationObserver,
 } from './project-preparation';
-import { isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { resolve as resolvePath } from 'node:path';
 import { PreparationMetrics, type PreparationTimings } from '../utils/preparation-metrics';
 import { preparedPlanLocation, readPreparedPlan, writePreparedPlan } from './prepared-plan';
+import {
+  DependencyWatch,
+  type AnalysisSnapshot,
+  type WatchChanges,
+  type WatchedFiles,
+} from './dependency-watch';
 
 const logger = createLogger('resolver');
 
@@ -59,29 +61,12 @@ const DEFAULT_OPTIONS = {
   aliasPrefix: 'aliased-',
 } as const;
 
-interface WatchChanges {
-  modifiedFiles?: ReadonlySet<string>;
-  removedFiles?: ReadonlySet<string>;
-}
-
-interface WatchedFiles {
-  existing: Set<string>;
-  missing: Set<string>;
-}
-
 interface WatchCapture {
   key?: string;
   inputs?: DependencyInputs;
   recoveryFiles?: readonly string[];
   savePlan?: boolean;
   planFile?: string;
-}
-
-interface AnalysisSnapshot {
-  result: AnalysisResult;
-  revision: number;
-  key: string;
-  inputs: DependencyInputs;
 }
 
 export interface ModuleRedirect {
@@ -103,11 +88,11 @@ interface ResolverBuild {
   };
 }
 
-const builds = new WeakMap<DepsConflictResolver, ResolverBuild>();
+const buildAccess = Symbol();
 
 /** Internal interface for bundler adapters. */
 export function getResolverBuild(resolver: DepsConflictResolver): ResolverBuild {
-  return builds.get(resolver)!;
+  return resolver[buildAccess];
 }
 
 function importerAmbiguityKey({ packageName, aliases, importerPaths }: ResolverDiagnostic): string {
@@ -154,13 +139,11 @@ export class DepsConflictResolver {
   private userOptions: DepsConflictResolverOptions;
   private hooks: PluginHooks;
 
-  private environmentDetector: EnvironmentDetector | null = null;
   private readonly metrics = new PreparationMetrics();
   private readonly fileSystemCache = createFileSystemCache(this.metrics);
   private readonly trackLockWait = (milliseconds: number) => {
     this.metrics.milliseconds.lockWait += milliseconds;
   };
-  private analyzer: DependencyAnalyzer | null = null;
   private aliasManager: AliasManager | null = null;
   private installer: PackageInstaller | null = null;
 
@@ -180,33 +163,30 @@ export class DepsConflictResolver {
   private snapshotInvalidated = false;
   private initialReplanNeeded = false;
   private providerVersions = new Map<string, string>();
-  private watchSnapshot?: AnalysisSnapshot;
-  private watchedFiles?: WatchedFiles;
+  private readonly watch = new DependencyWatch();
   private activeMappings: AliasMapping[] = [];
   private snapshotObserver: WeakRef<PreparationObserver> | null = null;
   private readonly observer: PreparationObserver = {
     refresh: () => this.withPreparationCache(() => this.refreshSnapshot()),
   };
 
+  readonly [buildAccess]: ResolverBuild = {
+    redirect: (request, importer) => this.redirect(request, importer),
+    guardGeneration: () => this.guardGeneration(),
+    savePreparedPlan: () => this.savePreparedPlan(),
+    assertWatchCanWait: () => this.assertWatchCanWait(),
+    refreshForWatch: (changes) => this.refreshForWatch(changes),
+    closeWatch: () => this.watch.close(),
+    snapshot: () => ({
+      analysis: this.analysisResult,
+      providers: this.providerVersions,
+      watchFiles: this.watch.files,
+    }),
+  };
+
   constructor(userOptions: DepsConflictResolverOptions, hooks: PluginHooks = {}) {
     this.userOptions = userOptions;
     this.hooks = hooks;
-    builds.set(this, {
-      redirect: (request, importer) => this.redirect(request, importer),
-      guardGeneration: () => this.guardGeneration(),
-      savePreparedPlan: () => this.savePreparedPlan(),
-      assertWatchCanWait: () => this.assertWatchCanWait(),
-      refreshForWatch: (changes) => this.refreshForWatch(changes),
-      closeWatch: () => {
-        this.watchSnapshot = undefined;
-        this.watchedFiles = undefined;
-      },
-      snapshot: () => ({
-        analysis: this.analysisResult,
-        providers: this.providerVersions,
-        watchFiles: this.watchedFiles,
-      }),
-    });
 
     // 设置日志级别（如果用户已指定）
     if (userOptions.debug) {
@@ -228,11 +208,11 @@ export class DepsConflictResolver {
     } = userOptions;
     const offline = userOptions.offline === true || userOptions.preparedPlan === true;
     // 创建环境检测器
-    this.environmentDetector = createEnvironmentDetector(projectRoot);
+    const environment = createEnvironmentDetector(projectRoot);
 
     let packageManager: 'npm' | 'yarn' | 'pnpm';
     if (!configuredManager || configuredManager === 'auto') {
-      const detected = this.environmentDetector.getDetectionResult();
+      const detected = environment.getDetectionResult();
       packageManager = detected.packageManager;
       logger.info(
         `Auto-detected package manager: ${packageManager} (from ${detected.detectedFrom})`,
@@ -244,7 +224,7 @@ export class DepsConflictResolver {
     // 检测 registry
     let registry: string;
     if (!configuredRegistry) {
-      registry = await this.environmentDetector.getRegistryForPackageManager(packageManager);
+      registry = await environment.getRegistryForPackageManager(packageManager);
       if (registry !== DEFAULT_NPM_REGISTRY) {
         logger.debug('Detected a custom registry for package metadata');
       }
@@ -317,15 +297,9 @@ export class DepsConflictResolver {
     }
   }
 
-  private async refreshForWatch({ modifiedFiles, removedFiles }: WatchChanges): Promise<boolean> {
-    const previous = this.watchSnapshot;
-    if (
-      previous?.inputs.reusable &&
-      previous.key === this.watchKey() &&
-      [...(modifiedFiles ?? []), ...(removedFiles ?? [])].every(
-        (file) => isAbsolute(file) && !previous.inputs.includes(file),
-      )
-    ) {
+  private async refreshForWatch(changes: WatchChanges): Promise<boolean> {
+    const previous = this.watch.candidate(this.watchKey(), changes);
+    if (previous) {
       try {
         if (await this.reuseWatchSnapshot(previous)) return true;
       } catch {
@@ -342,7 +316,7 @@ export class DepsConflictResolver {
       this.assertWatchCanWait();
       await pending.catch(() => undefined);
     }
-    const previousFiles = this.watchedFiles;
+    const previousFiles = this.watch.files;
     const key = this.watchKey();
     const capture: WatchCapture = {
       key,
@@ -352,7 +326,10 @@ export class DepsConflictResolver {
       if (this.initialized) this.invalidate();
       await this.initializePreparation(capture);
     } catch (error) {
-      this.withPreparationCache(() => this.recoverWatchFiles(previousFiles, capture.recoveryFiles));
+      const requestedRoot = resolvePath(this.userOptions.projectRoot ?? process.cwd());
+      this.withPreparationCache(() =>
+        this.watch.recover(requestedRoot, previousFiles, capture.recoveryFiles),
+      );
       throw error;
     }
     return false;
@@ -364,7 +341,7 @@ export class DepsConflictResolver {
     const isCurrent = () =>
       this.initialized &&
       !this.installationPromise &&
-      this.watchSnapshot === snapshot &&
+      this.watch.snapshot === snapshot &&
       this.analysisResult === snapshot.result &&
       snapshot.key === this.watchKey() &&
       preparation.revision === snapshot.revision &&
@@ -420,12 +397,11 @@ export class DepsConflictResolver {
     this.snapshotInvalidated = false;
     this.initialReplanNeeded = false;
     this.providerVersions = new Map();
-    this.watchSnapshot = undefined;
+    this.watch.snapshot = undefined;
     clearPackageJsonCache(this.fileSystemCache);
     this.snapshotGeneration++;
     this.activeMappings = [];
     this.analysisResult = null;
-    this.analyzer = null;
     this.aliasManager?.clear?.();
     this.aliasManager = null;
     this.installer = null;
@@ -516,9 +492,6 @@ export class DepsConflictResolver {
     }
     this.logPeerWarnings();
 
-    // 分析器在初始化完成后不再使用，释放以允许 GC 回收其内部状态
-    this.analyzer = null;
-
     this.initialized = true;
     logger.debug('Preparation timings:', this.getTimings());
     logger.info('Dependencies resolver initialized');
@@ -597,7 +570,7 @@ export class DepsConflictResolver {
           watch.planFile = file;
         }
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
-          this.watchSnapshot = {
+          this.watch.snapshot = {
             result: this.analysisResult,
             revision: this.snapshotRevision,
             key: watch.key,
@@ -648,64 +621,13 @@ export class DepsConflictResolver {
     }
   }
 
-  private collectLockfiles(projectRoot: string, owner: string): WatchedFiles {
-    const existing = new Set<string>();
-    const missing = new Set<string>();
-    let inPreparationOwner = true;
-    for (const directory of iterateParentDirs(projectRoot)) {
-      for (const name of Object.keys(LOCK_FILE_MAP)) {
-        const file = join(directory, name);
-        if (observeLockfile(file)) existing.add(file);
-        else if (inPreparationOwner) missing.add(file);
-      }
-      if (directory === owner) inPreparationOwner = false;
-    }
-    return { existing, missing };
-  }
-
   private recordWatchFiles(): void {
-    const watched = this.collectLockfiles(this.options.projectRoot, this.preparation!.owner);
-    const analyzed = this.analysisResult?.watchFiles ?? [];
-    if (this.snapshotError) {
-      this.addRecoveryWatchFiles(watched, this.watchedFiles, analyzed);
-    } else {
-      for (const file of analyzed) watched.existing.add(file);
-    }
-    this.watchedFiles = watched;
-  }
-
-  private recoverWatchFiles(
-    previous: WatchedFiles | undefined,
-    partial: readonly string[] = [],
-  ): void {
-    const requestedRoot = resolvePath(this.userOptions.projectRoot ?? process.cwd());
-    const root = canonicalPath(findProjectRoot(requestedRoot) ?? requestedRoot);
-    const owner = getProjectPreparation(root).owner;
-    const watched = this.collectLockfiles(root, owner);
-    // These paths only wake up a later compilation. The failed generation
-    // cannot supply a reusable analysis snapshot.
-    this.addRecoveryWatchFiles(watched, previous, [
-      join(requestedRoot, 'package.json'),
-      join(root, 'package.json'),
-      join(owner, 'package.json'),
-      ...partial,
-    ]);
-    this.watchedFiles = watched;
-  }
-
-  private addRecoveryWatchFiles(
-    watched: WatchedFiles,
-    previous: WatchedFiles | undefined,
-    files: readonly string[],
-  ): void {
-    for (const file of new Set([
-      ...(previous?.existing ?? []),
-      ...(previous?.missing ?? []),
-      ...files,
-    ])) {
-      if (watched.existing.has(file) || watched.missing.has(file)) continue;
-      (fileExists(file) ? watched.existing : watched.missing).add(file);
-    }
+    this.watch.recordFiles(
+      this.options.projectRoot,
+      this.preparation!.owner,
+      this.analysisResult?.watchFiles ?? [],
+      this.snapshotError !== null,
+    );
   }
 
   /**
@@ -757,14 +679,14 @@ export class DepsConflictResolver {
         async (markChanged) => {
           try {
             const registryClient = new NpmRegistryClient(this.metrics, this.options);
-            this.watchSnapshot = undefined;
+            this.watch.snapshot = undefined;
             this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
             this.installDiagnostics = [];
             this.assertResolved();
             if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
             this.observeSnapshot();
-            if (this.watchedFiles) this.recordWatchFiles();
+            if (this.watch.files) this.recordWatchFiles();
           } finally {
             clearPackageJsonCache();
           }
@@ -795,19 +717,14 @@ export class DepsConflictResolver {
   } = {}): Promise<AnalysisResult> {
     this.metrics.counts.analysisPasses++;
     clearPackageJsonCache();
-    this.analyzer = createDependencyAnalyzer(
+    const analyzer = createDependencyAnalyzer(
       { ...this.options, offline },
       preparedAliases,
       registryClient ?? new NpmRegistryClient(this.metrics, this.options),
     );
-    try {
-      const analyzer = this.analyzer;
-      return await this.metrics.measureAsync('analysis', () =>
-        analyzer.analyze({ clearCache, metrics: this.metrics }),
-      );
-    } finally {
-      this.analyzer = null;
-    }
+    return this.metrics.measureAsync('analysis', () =>
+      analyzer.analyze({ clearCache, metrics: this.metrics }),
+    );
   }
 
   private publishWithoutInstallation(): void {
@@ -934,7 +851,7 @@ export class DepsConflictResolver {
 
   private async refreshSnapshot(): Promise<void> {
     if (!this.analysisResult || !this.aliasManager) return;
-    this.watchSnapshot = undefined;
+    this.watch.snapshot = undefined;
     if (this.snapshotInvalidated) {
       this.snapshotRevision = this.preparation!.revision;
       return;
@@ -990,7 +907,7 @@ export class DepsConflictResolver {
         });
       }
       this.captureSnapshot();
-      if (this.watchedFiles) this.recordWatchFiles();
+      if (this.watch.files) this.recordWatchFiles();
     } finally {
       clearPackageJsonCache();
     }

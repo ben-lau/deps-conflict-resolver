@@ -111,7 +111,7 @@ export async function findSourceHints(
   entries: string[],
 ): Promise<SourceHint[]> {
   const vuePath = findPackagePath('vue', projectRoot);
-  const vue = vuePath && readPackageJsonCached(vuePath);
+  const vue = vuePath ? readPackageJsonCached(vuePath) : null;
   if (vue?.name !== 'vue' || !vue.version || !satisfies(vue.version, '^3')) return [];
   const hints: SourceHint[] = [];
   for (const packageName of entries) {
