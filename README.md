@@ -99,24 +99,27 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 ## 配置选项
 
-| 选项               | 类型                                  | 默认值          | 说明                                                                                                                                                                                  |
-| ------------------ | ------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dependencies`     | `string[]`                            | -               | **必填**，需要分析的依赖包名列表                                                                                                                                                      |
-| `projectRoot`      | `string`                              | `process.cwd()` | 项目根目录路径                                                                                                                                                                        |
-| `autoInstall`      | `boolean`                             | `true`          | 是否自动安装缺失的别名依赖                                                                                                                                                            |
-| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | 包管理器类型，`'auto'` 自动检测                                                                                                                                                       |
-| `registry`         | `string`                              | 自动检测        | NPM 注册表地址；显式指定时同时用于版本查询和别名安装                                                                                                                                  |
-| `debug`            | `boolean`                             | `false`         | 是否启用调试日志                                                                                                                                                                      |
-| `aliasPrefix`      | `string`                              | `'aliased-'`    | 别名前缀                                                                                                                                                                              |
-| `excludeRedirects` | `Record<string, string[]>`            | `{}`            | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                        |
-| `includeRedirects` | `Record<string, string[]>`            | `{}`            | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。适用于 semver 范围写得过宽（如 `>=2.5.0`）但运行时仍依赖旧版本的包。示例：`{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
+| 选项               | 类型                                  | 默认值                            | 说明                                                                                                                                                                                  |
+| ------------------ | ------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dependencies`     | `string[]`                            | -                                 | **必填**，需要分析的依赖包名列表                                                                                                                                                      |
+| `projectRoot`      | `string`                              | Vite root / Webpack context / cwd | 项目根目录路径                                                                                                                                                                        |
+| `autoInstall`      | `boolean`                             | `true`                            | 是否自动安装缺失的别名依赖                                                                                                                                                            |
+| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`                          | 包管理器类型，`'auto'` 自动检测                                                                                                                                                       |
+| `registry`         | `string`                              | 自动检测                          | NPM 注册表地址；显式指定时同时用于版本查询和别名安装                                                                                                                                  |
+| `debug`            | `boolean`                             | `false`                           | 是否启用调试日志                                                                                                                                                                      |
+| `offline`          | `boolean`                             | `false`                           | 仅复用已验证的本地 alias；禁止网络查询及安装                                                                                                                                          |
+| `strict`           | `boolean`                             | `false`                           | 未解决的必要依赖、安装失败或实际解析歧义会报错                                                                                                                                        |
+| `aliasPrefix`      | `string`                              | `'aliased-'`                      | 别名前缀                                                                                                                                                                              |
+| `excludeRedirects` | `Record<string, string[]>`            | `{}`                              | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                        |
+| `includeRedirects` | `Record<string, string[]>`            | `{}`                              | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。适用于 semver 范围写得过宽（如 `>=2.5.0`）但运行时仍依赖旧版本的包。示例：`{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
 
 ### Vite 插件专属选项
 
-| 选项            | 类型      | 默认值 | 说明                          |
-| --------------- | --------- | ------ | ----------------------------- |
-| `enableInDev`   | `boolean` | `true` | 是否在开发模式（dev）下启用   |
-| `enableInBuild` | `boolean` | `true` | 是否在构建模式（build）下启用 |
+| 选项            | 类型                 | 默认值     | 说明                           |
+| --------------- | -------------------- | ---------- | ------------------------------ |
+| `enableInDev`   | `boolean`            | `true`     | 是否在开发模式（dev）下启用    |
+| `enableInBuild` | `boolean`            | `true`     | 是否在构建模式（build）下启用  |
+| `ssr`           | `'manual' \| 'auto'` | `'manual'` | auto 将受影响依赖纳入 SSR 构建 |
 
 ### 自动检测
 
@@ -137,11 +140,62 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 显式设置 `registry` 时会覆盖上述自动检测结果：解析器从该地址查询可用版本，包管理器安装别名时也使用同一地址。
 
+## 诊断、准备与离线构建
+
+可以先查看问题，再显式准备 alias，最后让 CI 使用已安装的版本：
+
+```bash
+pnpm exec deps-conflict-resolver doctor legacy-lib --json
+pnpm exec deps-conflict-resolver prepare legacy-lib
+pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
+```
+
+doctor 不执行安装；没有提供包名时检查当前工程的 dependencies / optionalDependencies，跳过 npm alias 声明。prepare 必须显式提供包名，会通过工程的包管理器更新依赖清单和锁文件。--json 输出版本为 1 的报告，包含候选 alias、有效 alias、诊断和安装结果。
+
+建议把 prepare 产生的清单及锁文件提交到版本控制，CI 先执行包管理器的冻结安装，再使用以下配置：
+
+```typescript
+depsConflictResolverVitePlugin({
+  dependencies: ['legacy-lib'],
+  offline: true,
+  strict: true,
+  ssr: 'auto',
+});
+```
+
+offline=true 禁止 registry 查询及包管理器安装，即使同时设置 autoInstall=true 也不会安装。缺少已验证 alias 时会产生 OFFLINE_ALIAS_MISSING；strict=true 会使未解决的必要依赖、安装失败或实际请求中的上下文歧义报错。默认仍保留自动安装和宽松处理方式。autoInstall=false 只关闭安装，本身不会禁止版本查询。
+
+Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal，使包内部的请求进入解析流程；默认 ssr='manual'，由使用者配置。已有 noExternal=true 会保留。显式 ssr.external 仍遵循 Vite 自身的优先级，应避免将需要重定向的依赖同时外置。
+
+### 查看某次解析的原因
+
+```typescript
+const resolver = await createResolver({
+  dependencies: ['legacy-lib'],
+  offline: true,
+});
+
+console.log(resolver.getDiagnostics());
+console.log(resolver.getInstallResult());
+console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/index.js'));
+```
+
+explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason 可以表示已重定向、被排除、没有匹配、未初始化或多版本歧义；它也会说明 beforeResolve 钩子是否接管请求。诊断使用稳定的 code，无需解析日志。严格初始化失败时可以捕获导出的 ResolutionError 并读取 diagnostics。
+
+### 兼容性与验证
+
+- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本分别验证真实 Vue 2 / Vue 3 在冷启动预构建和 SSR 中的版本身份，CI 覆盖 Vite 4.0.0、5、6、7、8。
+- Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
+- 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
+- workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。
+- 当前未提供 Yarn PnP 的完整适配，也未实现私有 registry 的 scope 路由与认证配置继承。
+- 多版本运行时共存仍需要合适的挂载/更新/卸载桥接；本插件不承担 SFC 编译器转换、跨版本组件协议或 CSS 隔离。
+
 ## 工作原理
 
 ### 1. 依赖分析
 
-插件会递归分析指定依赖的整个依赖树：
+插件会递归构建指定依赖的运行时关系图，用于确定重定向范围。新 alias 只由指定依赖自身的第一层 peer 冲突触发；如果 peer 仅声明在子依赖中，需要显式选择相应包作为分析入口，并确保该包可从 projectRoot 解析：
 
 ```
 package-a
@@ -227,7 +281,7 @@ depsConflictResolverVitePlugin({
 });
 ```
 
-`onInstallComplete` 在安装尝试结束后触发；其参数是本轮分析得到的 alias mappings，并不表示每个 mapping 都已成功安装（已复用、已安装和失败项需结合日志或安装结果判断）。
+`onInstallComplete` 在安装尝试结束后触发，参数只包含确认成功安装或复用的映射；完整安装结果通过 `getInstallResult()` 获取，未解决条件通过 `getDiagnostics()` 获取。
 
 ### 精细控制重定向范围（includeRedirects + excludeRedirects）
 
@@ -271,6 +325,9 @@ new DepsConflictResolverWebpackPlugin({
 - `initialize(): Promise<void>` - 初始化解析器
 - `resolveModule(request, importer): string | null` - 解析模块
 - `getAnalysisResult(): AnalysisResult` - 获取分析结果
+- `getDiagnostics(): ResolverDiagnostic[]` - 获取结构化诊断
+- `getInstallResult(): InstallReport | null` - 获取已验证的安装/复用/失败结果
+- `explainResolution(request, importer): ResolutionExplanation` - 解释某次解析选择
 - `getAliasPathMappings(): AliasPathMapping[]` - 获取通用的别名路径映射
 
 > 核心模块返回通用的 `AliasPathMapping[]` 格式，由各构建工具插件（Webpack/Vite）自行转换为各自需要的别名配置格式。
@@ -312,7 +369,7 @@ pnpm fmt
 2. release-please 自动创建/更新 Release PR，包含版本号和 CHANGELOG
 3. 审核并合并 Release PR
 4. 自动创建 GitHub Release + tag
-5. 手动执行 `npm publish` 发布到 npm
+5. 自动通过 OIDC 发布到 npm
 
 详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 

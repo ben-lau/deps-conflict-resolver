@@ -99,24 +99,27 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 ## Configuration
 
-| Option             | Type                                  | Default         | Description                                                                                                                                                                                                                                                     |
-| ------------------ | ------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dependencies`     | `string[]`                            | -               | **Required.** List of package names to analyze                                                                                                                                                                                                                  |
-| `projectRoot`      | `string`                              | `process.cwd()` | Project root directory path                                                                                                                                                                                                                                     |
-| `autoInstall`      | `boolean`                             | `true`          | Whether to auto-install missing aliased dependencies                                                                                                                                                                                                            |
-| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | Package manager type. `'auto'` detects automatically                                                                                                                                                                                                            |
-| `registry`         | `string`                              | Auto-detected   | npm registry URL; an explicit value is used for both version queries and alias installation                                                                                                                                                                     |
-| `debug`            | `boolean`                             | `false`         | Whether to enable debug logging                                                                                                                                                                                                                                 |
-| `aliasPrefix`      | `string`                              | `'aliased-'`    | Prefix for generated alias names                                                                                                                                                                                                                                |
-| `excludeRedirects` | `Record<string, string[]>`            | `{}`            | Exclude specific packages from the redirect list. Keys are original package names, values are importer package names to exclude. Example: `{ vue: ['vue-demi', 'pinia'] }`                                                                                      |
-| `includeRedirects` | `Record<string, string[]>`            | `{}`            | Force specific packages into the redirect list. Applied before `excludeRedirects`. Useful when semver ranges are too broad (e.g., `>=2.5.0`) but the package still needs the older version at runtime. Example: `{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
+| Option             | Type                                  | Default                           | Description                                                                                                                                                                                                                                                     |
+| ------------------ | ------------------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dependencies`     | `string[]`                            | -                                 | **Required.** List of package names to analyze                                                                                                                                                                                                                  |
+| `projectRoot`      | `string`                              | Vite root / Webpack context / cwd | Project root directory path                                                                                                                                                                                                                                     |
+| `autoInstall`      | `boolean`                             | `true`                            | Whether to auto-install missing aliased dependencies                                                                                                                                                                                                            |
+| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`                          | Package manager type. `'auto'` detects automatically                                                                                                                                                                                                            |
+| `registry`         | `string`                              | Auto-detected                     | npm registry URL; an explicit value is used for both version queries and alias installation                                                                                                                                                                     |
+| `debug`            | `boolean`                             | `false`                           | Whether to enable debug logging                                                                                                                                                                                                                                 |
+| `offline`          | `boolean`                             | `false`                           | Only reuse verified installed aliases; never query registries or install                                                                                                                                                                                        |
+| `strict`           | `boolean`                             | `false`                           | Reject unresolved required dependencies, failed installation, or ambiguous requests                                                                                                                                                                             |
+| `aliasPrefix`      | `string`                              | `'aliased-'`                      | Prefix for generated alias names                                                                                                                                                                                                                                |
+| `excludeRedirects` | `Record<string, string[]>`            | `{}`                              | Exclude specific packages from the redirect list. Keys are original package names, values are importer package names to exclude. Example: `{ vue: ['vue-demi', 'pinia'] }`                                                                                      |
+| `includeRedirects` | `Record<string, string[]>`            | `{}`                              | Force specific packages into the redirect list. Applied before `excludeRedirects`. Useful when semver ranges are too broad (e.g., `>=2.5.0`) but the package still needs the older version at runtime. Example: `{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
 
 ### Vite Plugin Exclusive Options
 
-| Option          | Type      | Default | Description                                |
-| --------------- | --------- | ------- | ------------------------------------------ |
-| `enableInDev`   | `boolean` | `true`  | Whether to enable in development mode      |
-| `enableInBuild` | `boolean` | `true`  | Whether to enable in production build mode |
+| Option          | Type                 | Default    | Description                                |
+| --------------- | -------------------- | ---------- | ------------------------------------------ |
+| `enableInDev`   | `boolean`            | `true`     | Whether to enable in development mode      |
+| `enableInBuild` | `boolean`            | `true`     | Whether to enable in production build mode |
+| `ssr`           | `'manual' \| 'auto'` | `'manual'` | auto bundles affected SSR dependencies     |
 
 ### Auto-Detection
 
@@ -137,11 +140,62 @@ The plugin supports automatic detection of the package manager and registry:
 
 An explicit `registry` option overrides this detection. The resolver uses it for remote version queries, and the package manager uses the same registry when installing aliases.
 
+## Diagnose, Prepare, and Build Offline
+
+Inspect conflicts, explicitly prepare aliases, then validate the installed environment in CI:
+
+```bash
+pnpm exec deps-conflict-resolver doctor legacy-lib --json
+pnpm exec deps-conflict-resolver prepare legacy-lib
+pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
+```
+
+doctor never installs packages. Without package names it scans dependencies / optionalDependencies and skips npm alias declarations. prepare requires explicit package names and updates the manifest and lockfile through the project's package manager. --json emits a schemaVersion=1 report containing planned aliases, active aliases, diagnostics, and installation outcomes.
+
+Commit the manifest and lockfile produced by prepare. In CI, run your package manager's frozen installation first, then use:
+
+```typescript
+depsConflictResolverVitePlugin({
+  dependencies: ['legacy-lib'],
+  offline: true,
+  strict: true,
+  ssr: 'auto',
+});
+```
+
+offline=true prohibits registry queries and package-manager installation, including when autoInstall=true is also supplied. Missing verified aliases produce OFFLINE_ALIAS_MISSING. strict=true rejects unresolved required dependencies, installation failures, and ambiguous runtime requests. Automatic installation and permissive handling remain the defaults. autoInstall=false alone does not prohibit registry queries.
+
+Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal so internal requests pass through the resolver. The default is ssr='manual'. An existing noExternal=true is preserved. Explicit ssr.external entries retain Vite's own precedence; avoid externalizing packages that require redirection.
+
+### Explain a Resolution
+
+```typescript
+const resolver = await createResolver({
+  dependencies: ['legacy-lib'],
+  offline: true,
+});
+
+console.log(resolver.getDiagnostics());
+console.log(resolver.getInstallResult());
+console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/index.js'));
+```
+
+explainResolution returns resolved, reason, aliases, and matchedPaths. Reasons distinguish redirection, exclusion, no match, inactive state, ambiguity, and beforeResolve hook handling. Diagnostics have stable codes and do not require parsing log messages. Strict initialization failures throw the exported ResolutionError, which exposes diagnostics.
+
+### Compatibility and Verification
+
+- Vite 4–7 use an esbuild optimizer adapter; Vite 8 uses native Rolldown hooks. The compatibility script checks actual Vue 2 / Vue 3 runtime identities during cold optimization and SSR. CI covers Vite 4.0.0, 5, 6, 7, and 8.
+- Webpack 5 uses beforeResolve. Initialization failures remain permissive by default; strict=true propagates failures to the compiler.
+- Installed optionalDependencies participate in the runtime graph. The existing optional-peer policy is unchanged.
+- Workspace real paths and node_modules links both match. Multiple aliases for the same physical importer produce AMBIGUOUS_IMPORTER rather than a name-based arbitrary choice; strict=true rejects the request.
+- Full Yarn PnP support and private-registry scope/authentication inheritance are not implemented.
+- Coexisting framework versions still require suitable mount/update/unmount bridges. SFC compiler conversion, cross-version component protocols, and CSS isolation are outside this plugin's scope.
+
 ## How It Works
 
 ### 1. Dependency Analysis
 
-The plugin recursively analyzes the entire dependency tree of the specified packages:
+The plugin recursively builds the runtime graph to determine redirect scope. New aliases are triggered only by first-level peers of the selected packages. For a peer declared only by a transitive dependency, select that package explicitly and ensure it is resolvable from projectRoot:
 
 ```
 package-a
@@ -227,7 +281,7 @@ depsConflictResolverVitePlugin({
 });
 ```
 
-`onInstallComplete` runs after the installation attempt; its argument is the alias mappings produced by that analysis and does not guarantee that every mapping was installed successfully (reused, installed, and failed outcomes must be checked in logs or installation results).
+`onInstallComplete` runs after an installation attempt and receives only confirmed installed or reused mappings. Use `getInstallResult()` for complete outcomes and `getDiagnostics()` for unresolved conditions.
 
 ### Fine-Grained Redirect Control (includeRedirects + excludeRedirects)
 
@@ -271,6 +325,9 @@ Main resolver class:
 - `initialize(): Promise<void>` — Initialize the resolver
 - `resolveModule(request, importer): string | null` — Resolve a module
 - `getAnalysisResult(): AnalysisResult` — Get the analysis result
+- `getDiagnostics(): ResolverDiagnostic[]` - Inspect structured diagnostics
+- `getInstallResult(): InstallReport | null` - Inspect verified installation/reuse/failure outcomes
+- `explainResolution(request, importer): ResolutionExplanation` - Explain a particular resolution
 - `getAliasPathMappings(): AliasPathMapping[]` — Get generic alias path mappings
 
 > The core module returns a generic `AliasPathMapping[]` format, which each build tool plugin (Webpack/Vite) converts to its own alias configuration format.
@@ -312,7 +369,7 @@ This project uses [release-please](https://github.com/googleapis/release-please)
 2. release-please automatically creates/updates a Release PR with changelog
 3. Review and merge the Release PR
 4. A GitHub Release + tag is automatically created
-5. Manually run `npm publish` to publish to npm
+5. Publish automatically to npm using OIDC
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 
