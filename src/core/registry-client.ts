@@ -3,6 +3,7 @@ import { createLogger } from '../utils/logger';
 import { DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../constants';
 import { currentDependencyInputs } from '../utils/dependency-inputs';
 import { LruCache } from '../utils/lru-cache';
+import type { PreparationMetrics } from '../utils/preparation-metrics';
 
 const logger = createLogger('npm-registry');
 
@@ -30,12 +31,14 @@ async function fetchWithTimeout<T>(
   url: string,
   options: RequestInit = {},
   consumeResponse: (response: Response) => Promise<T>,
-  timeout = DEFAULT_NPM_REGISTRY_TIMEOUT_MS,
+  metrics?: PreparationMetrics,
 ): Promise<T> {
   // Registry responses can change without a corresponding filesystem change.
   currentDependencyInputs()?.invalidate();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_NPM_REGISTRY_TIMEOUT_MS);
+  const start = performance.now();
+  if (metrics) metrics.counts.registryRequests++;
 
   try {
     const response = await fetch(url, {
@@ -45,13 +48,18 @@ async function fetchWithTimeout<T>(
     return await consumeResponse(response);
   } finally {
     clearTimeout(timeoutId);
+    if (metrics) metrics.milliseconds.registry += performance.now() - start;
   }
 }
 
 /**
  * 从 NPM 注册表获取包信息
  */
-async function fetchPackageInfo(packageName: string, registry: string): Promise<NpmPackageInfo> {
+async function fetchPackageInfo(
+  packageName: string,
+  registry: string,
+  metrics?: PreparationMetrics,
+): Promise<NpmPackageInfo> {
   try {
     // 处理作用域包的 URL 编码
     const encodedName = packageName.startsWith('@')
@@ -82,6 +90,7 @@ async function fetchPackageInfo(packageName: string, registry: string): Promise<
           },
         };
       },
+      metrics,
     );
 
     if (!response.ok) {
@@ -134,11 +143,13 @@ export class NpmRegistryClient implements RegistryClient {
   private readonly packageCache = new Map<string, NpmPackageInfo>();
   private readonly manifestCache = new LruCache<string, PackageJson>({ maxEntries: 200 });
 
+  constructor(private readonly metrics?: PreparationMetrics) {}
+
   async fetchAllVersions(packageName: string, registry: string): Promise<string[]> {
     const key = `${registry}\0${packageName}`;
     let info = this.packageCache.get(key);
     if (!info) {
-      info = await fetchPackageInfo(packageName, registry);
+      info = await fetchPackageInfo(packageName, registry, this.metrics);
       this.packageCache.set(key, info);
     }
     return info.versions;
@@ -176,6 +187,7 @@ export class NpmRegistryClient implements RegistryClient {
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         return (await response.json()) as PackageJson;
       },
+      this.metrics,
     );
     if (manifest.name !== packageName || manifest.version !== version) {
       throw new Error(`Invalid manifest for ${packageName}@${version}`);

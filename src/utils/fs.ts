@@ -4,6 +4,7 @@ import { pathToFileURL } from 'url';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PackageJson } from '../types/index';
 import { LruCache } from './lru-cache';
+import type { PreparationMetrics } from './preparation-metrics';
 import {
   currentDependencyInputs,
   observedExists,
@@ -35,8 +36,9 @@ export function* iterateParentDirs(startDir: string): Generator<string> {
 
 type RequireFn = ReturnType<typeof createRequire>;
 
-export function createFileSystemCache() {
+export function createFileSystemCache(metrics?: PreparationMetrics) {
   return {
+    metrics,
     packageJsonCache: new LruCache<string, PackageJson | null>({ maxEntries: 5000 }),
     requireCache: new LruCache<string, RequireFn>({ maxEntries: 200 }),
     packagePathCache: new LruCache<string, string | null>({ maxEntries: 20_000 }),
@@ -63,7 +65,11 @@ function getCaches(cache?: FileSystemCache): FileSystemCache {
   if (!inputs) return cache ?? cacheScope.getStore() ?? defaultCaches;
   // A concurrent resolver must never supply a cached answer with no recorded inputs.
   let caches = recordingCaches.get(inputs);
-  if (!caches) recordingCaches.set(inputs, (caches = createFileSystemCache()));
+  if (!caches)
+    recordingCaches.set(
+      inputs,
+      (caches = createFileSystemCache(cache?.metrics ?? cacheScope.getStore()?.metrics)),
+    );
   return caches;
 }
 
@@ -71,7 +77,8 @@ function getCaches(cache?: FileSystemCache): FileSystemCache {
  * 清理本库的 IO 缓存，不修改 Node 的内部模块缓存。
  */
 export function clearPackageJsonCache(cache = getCaches()): void {
-  for (const entries of Object.values(cache)) entries.clear();
+  const { metrics: _metrics, ...entries } = cache;
+  for (const entry of Object.values(entries)) entry.clear();
 }
 
 /**
@@ -86,7 +93,7 @@ export function getCachedRealPath(targetPath: string, cache?: FileSystemCache): 
  * 解析目标路径的规范化物理路径（带代际缓存，失败时回退到 resolve）
  */
 export function canonicalPath(targetPath: string, cache?: FileSystemCache): string {
-  const { canonicalPathCache } = getCaches(cache);
+  const { canonicalPathCache, metrics } = getCaches(cache);
   const cached = canonicalPathCache.get(targetPath);
   if (cached !== undefined) {
     return cached.path;
@@ -95,6 +102,7 @@ export function canonicalPath(targetPath: string, cache?: FileSystemCache): stri
   let resolved: string;
   let real = true;
   try {
+    if (metrics) metrics.counts.realpaths++;
     resolved = observedRealpath(targetPath);
   } catch {
     resolved = resolve(targetPath);
@@ -133,7 +141,7 @@ export function fileExists(filePath: string): boolean {
  * 使用同步读取以减少事件循环开销
  */
 export function readPackageJsonCached(dir: string, cache?: FileSystemCache): PackageJson | null {
-  const { packageJsonCache } = getCaches(cache);
+  const { packageJsonCache, metrics } = getCaches(cache);
   const pkgPath = join(dir, 'package.json');
 
   const cached = packageJsonCache.get(pkgPath);
@@ -142,6 +150,7 @@ export function readPackageJsonCached(dir: string, cache?: FileSystemCache): Pac
   }
 
   // 使用同步读取，性能更好
+  if (metrics) metrics.counts.manifestReads++;
   const result = readJsonFileSync<PackageJson>(pkgPath);
   // 缓存结果（包含 null，避免重复 IO 探测）
   packageJsonCache.set(pkgPath, result);
@@ -266,16 +275,19 @@ function findPackageInLookupDirectory(
   request: string,
   lookupDirectories?: LookupDirectoryCache,
 ): string | null {
+  const metrics = cacheScope.getStore()?.metrics;
   if (lookupDirectories) {
     let exists = lookupDirectories.get(directory);
     if (exists === undefined) {
       // An absent lookup directory accounts for every missing manifest below it.
       // If the directory appears, the recorded input forces a fresh analysis.
+      if (metrics) metrics.counts.lookupProbes++;
       exists = observedLookupDirectory(directory);
       lookupDirectories.set(directory, exists);
     }
     if (!exists) return null;
   }
   const manifest = join(directory, request);
+  if (metrics) metrics.counts.lookupProbes++;
   return observedLookupManifest(manifest) ? dirname(manifest) : null;
 }

@@ -364,7 +364,10 @@ export class DependencyAnalyzer {
   /**
    * 分析依赖并找出冲突
    */
-  async analyze(options?: { clearCache?: boolean }): Promise<AnalysisResult> {
+  async analyze(options?: {
+    clearCache?: boolean;
+    metrics?: PreparationMetrics;
+  }): Promise<AnalysisResult> {
     logger.info('Starting dependency analysis...');
     this.watchFiles.clear();
     this.watchFiles.add(join(this.options.projectRoot, 'package.json'));
@@ -390,13 +393,17 @@ export class DependencyAnalyzer {
 
       // 先建立按真实安装路径标识的完整图。后续所有关系判断都从该图
       // 读取；analyzedDependencies 仅保留按名称兼容的首个可见实例。
-      this.dependencyGraph = buildInstalledDependencyGraph(
-        this.options.dependencies,
-        this.options.projectRoot,
-        workspaceRoot,
-        this.watchFiles,
-        this.options.peerOverrides,
-      );
+      const buildGraph = () =>
+        buildInstalledDependencyGraph(
+          this.options.dependencies,
+          this.options.projectRoot,
+          workspaceRoot,
+          this.watchFiles,
+          this.options.peerOverrides,
+        );
+      this.dependencyGraph = options?.metrics
+        ? options.metrics.measure('graph', buildGraph)
+        : buildGraph();
       for (const node of this.dependencyGraph.nodes.values()) {
         this.watchFiles.add(join(node.packagePath, 'package.json'));
       }
@@ -2476,3 +2483,4 @@ export function createDependencyAnalyzer(
     registryClient,
   );
 }
+import type { PreparationMetrics } from '../utils/preparation-metrics';

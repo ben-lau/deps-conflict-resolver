@@ -20,6 +20,7 @@ export type {
 
 export { DepsConflictResolver, createResolver } from './core/resolver';
 export { ResolutionError } from './core/resolution-error';
+export type { PreparationTimings } from './utils/preparation-metrics';
 
 // 导出 WorkspaceDetector 供高级用法
 export { WorkspaceDetector, createWorkspaceDetector } from './core/workspace-detector';

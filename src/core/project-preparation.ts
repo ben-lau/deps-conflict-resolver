@@ -208,7 +208,9 @@ export async function withProjectPreparation<T>(
   task: (markChanged: () => void) => Promise<T>,
   current?: PreparationObserver,
   mode: 'read' | 'write' = 'write',
+  onAcquired?: (milliseconds: number) => void,
 ): Promise<T> {
+  const start = onAcquired ? performance.now() : 0;
   const previous = state.tail;
   let finish!: () => void;
   state.tail = new Promise<void>((done) => {
@@ -219,6 +221,7 @@ export async function withProjectPreparation<T>(
   let changed = false;
   try {
     unlock = await acquireLock(state.owner, mode);
+    onAcquired?.(performance.now() - start);
     return await task(() => {
       if (mode === 'read') throw new Error('Cannot change dependencies while holding a read lock');
       if (!changed) {

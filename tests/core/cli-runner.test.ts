@@ -92,6 +92,34 @@ describe('doctor and prepare commands', () => {
     );
   });
 
+  it('reports measured analysis and filesystem work without probing a registry offline', async () => {
+    writeAlias();
+    expect(
+      await runCli(
+        ['doctor', 'legacy', '--root', root, '--offline', '--json', '--timings'],
+        output,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout).timings).toMatchObject({
+      counts: {
+        analysisPasses: 1,
+        registryRequests: 0,
+        lookupProbes: expect.any(Number),
+        realpaths: expect.any(Number),
+        manifestReads: expect.any(Number),
+      },
+      milliseconds: {
+        analysis: expect.any(Number),
+        graph: expect.any(Number),
+        lockWait: expect.any(Number),
+        install: 0,
+        registry: 0,
+      },
+    });
+    expect(JSON.parse(stdout).timings.counts.lookupProbes).toBeGreaterThan(0);
+    expect(JSON.parse(stdout).timings.counts.manifestReads).toBeGreaterThan(0);
+  });
+
   it.each([
     ['cjs', 'module.exports = '],
     ['mjs', 'export default '],

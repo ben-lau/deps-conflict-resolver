@@ -25,6 +25,7 @@ const HELP = [
   '  --offline                     Never query a registry or run installation',
   '  --strict                      Return exit code 1 for unresolved conditions',
   '  --json                        Emit a machine-readable report',
+  '  --timings                     Include preparation durations and filesystem counts',
   '  --help                        Show this help',
   '',
 ].join('\n');
@@ -41,6 +42,7 @@ export async function runCli(
   },
 ): Promise<number> {
   const json = argv.includes('--json');
+  const timings = argv.includes('--timings');
   try {
     if (argv.length === 0 || argv.includes('--help')) {
       output.stdout(HELP);
@@ -55,7 +57,7 @@ export async function runCli(
     const packages: string[] = [];
     for (let index = 0; index < args.length; index++) {
       const arg = args[index]!;
-      if (arg === '--json') continue;
+      if (arg === '--json' || arg === '--timings') continue;
       if (arg === '--offline') {
         overrides.offline = true;
         continue;
@@ -140,6 +142,7 @@ export async function runCli(
       activeAliases: failure ? [] : resolver.getAliasPathMappings(),
       diagnostics,
       installation: failure ? failure.installation : resolver.getInstallResult(),
+      ...(timings && { timings: resolver.getTimings() }),
     };
     if (json) {
       output.stdout(JSON.stringify(report, null, 2) + '\n');
@@ -169,6 +172,7 @@ export async function runCli(
       for (const diagnostic of diagnostics) {
         output.stdout('  [' + diagnostic.code + '] ' + diagnostic.message + '\n');
       }
+      if (report.timings) output.stdout(JSON.stringify(report.timings, null, 2) + '\n');
     }
     return diagnostics.some((diagnostic) => diagnostic.severity === 'error') &&
       (strictMode || command === 'prepare')

@@ -45,6 +45,7 @@ import {
   type PreparationObserver,
 } from './project-preparation';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { PreparationMetrics, type PreparationTimings } from '../utils/preparation-metrics';
 
 const logger = createLogger('resolver');
 
@@ -149,7 +150,11 @@ export class DepsConflictResolver {
   private hooks: PluginHooks;
 
   private environmentDetector: EnvironmentDetector | null = null;
-  private readonly fileSystemCache = createFileSystemCache();
+  private readonly metrics = new PreparationMetrics();
+  private readonly fileSystemCache = createFileSystemCache(this.metrics);
+  private readonly trackLockWait = (milliseconds: number) => {
+    this.metrics.milliseconds.lockWait += milliseconds;
+  };
   private analyzer: DependencyAnalyzer | null = null;
   private aliasManager: AliasManager | null = null;
   private installer: PackageInstaller | null = null;
@@ -369,6 +374,7 @@ export class DepsConflictResolver {
       },
       undefined,
       'read',
+      this.trackLockWait,
     );
     if (!reused) return false;
     await waitForProjectPreparation(preparation);
@@ -447,7 +453,9 @@ export class DepsConflictResolver {
     } catch {
       /* Retain the validated root. */
     }
-    this.options = await this.resolveOptions(this.userOptions, physicalRoot);
+    this.options = await this.metrics.measureAsync('environment', () =>
+      this.resolveOptions(this.userOptions, physicalRoot),
+    );
 
     // 设置日志级别
     if (this.options.debug) {
@@ -473,6 +481,7 @@ export class DepsConflictResolver {
         (markChanged) => this.prepareInitialSnapshot(markChanged, watch, analysis),
         this.observer,
         this.options.autoInstall ? 'write' : 'read',
+        this.trackLockWait,
       );
       await waitForProjectPreparation(preparation);
     };
@@ -503,6 +512,7 @@ export class DepsConflictResolver {
     this.analyzer = null;
 
     this.initialized = true;
+    logger.debug('Preparation timings:', this.getTimings());
     logger.info('Dependencies resolver initialized');
   }
 
@@ -528,6 +538,7 @@ export class DepsConflictResolver {
       },
       undefined,
       'read',
+      this.trackLockWait,
     );
     // Keep the reusable candidate separate from user code. Hooks can also
     // prepare the same workspace, so the notification runs outside the lock.
@@ -543,7 +554,7 @@ export class DepsConflictResolver {
     candidate?: AnalysisSnapshot,
   ): Promise<void> {
     try {
-      const registryClient = new NpmRegistryClient();
+      const registryClient = new NpmRegistryClient(this.metrics);
       this.analysisResult =
         candidate &&
         candidate.revision === this.preparation?.revision &&
@@ -689,7 +700,7 @@ export class DepsConflictResolver {
         this.preparation,
         async (markChanged) => {
           try {
-            const registryClient = new NpmRegistryClient();
+            const registryClient = new NpmRegistryClient(this.metrics);
             this.watchSnapshot = undefined;
             this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
             this.installDiagnostics = [];
@@ -704,6 +715,7 @@ export class DepsConflictResolver {
         },
         this.observer,
         this.options.offline ? 'read' : 'write',
+        this.trackLockWait,
       );
     } finally {
       this.preparing = false;
@@ -725,14 +737,18 @@ export class DepsConflictResolver {
     clearCache?: boolean;
     registryClient?: RegistryClient;
   } = {}): Promise<AnalysisResult> {
+    this.metrics.counts.analysisPasses++;
     clearPackageJsonCache();
     this.analyzer = createDependencyAnalyzer(
       { ...this.options, offline },
       preparedAliases,
-      registryClient,
+      registryClient ?? new NpmRegistryClient(this.metrics),
     );
     try {
-      return await this.analyzer.analyze({ clearCache });
+      const analyzer = this.analyzer;
+      return await this.metrics.measureAsync('analysis', () =>
+        analyzer.analyze({ clearCache, metrics: this.metrics }),
+      );
     } finally {
       this.analyzer = null;
     }
@@ -775,7 +791,9 @@ export class DepsConflictResolver {
       }
       let result: InstallReport;
       try {
-        result = await this.installer!.installAliases(planned);
+        result = await this.metrics.measureAsync('install', () =>
+          this.installer!.installAliases(planned),
+        );
       } catch (error) {
         this.setActiveAliasMappings([]);
         throw error;
@@ -961,7 +979,7 @@ export class DepsConflictResolver {
 
   private captureSnapshot(): void {
     this.snapshotRevision = this.preparation!.revision;
-    const providers = this.describeProviders();
+    const providers = this.metrics.measure('verify', () => this.describeProviders());
     this.snapshotSignature = this.describeSnapshot(providers);
     this.providerVersions = new Map(
       providers.map(([name, path, manifest]) => [
@@ -1304,6 +1322,11 @@ export class DepsConflictResolver {
    */
   getOptions(): ResolvedOptions {
     return { ...this.options };
+  }
+
+  /** Cumulative preparation statistics, including repeated analysis during watch. */
+  getTimings(): PreparationTimings {
+    return this.metrics.snapshot();
   }
 }
 
