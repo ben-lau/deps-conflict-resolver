@@ -235,20 +235,17 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     };
   }
 
-  return {
+  const plugin: Plugin = {
     name: PLUGIN_NAME,
     // Module resolution still runs before Vite's resolver. Preparation waits
     // for all config hooks, including framework plugins that choose the root.
     enforce: 'pre',
     config(config, { command }) {
-      isEnabled = (command === 'serve' && enableInDev) || (command === 'build' && enableInBuild);
-      resolver = null;
-      ssrExternalEnabled = false;
-      resolveSsrExternal = undefined;
-      isSsrExternal = undefined;
+      const enabled =
+        (command === 'serve' && enableInDev) || (command === 'build' && enableInBuild);
       const [major, minor] = viteVersion.split('.').map(Number);
       if (
-        isEnabled &&
+        enabled &&
         ssr === 'auto' &&
         command === 'serve' &&
         (major! < 5 || (major === 5 && minor === 0)) &&
@@ -262,8 +259,18 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     },
     async configResolved(config) {
       // Vite 4 invokes the same plugin concurrently for its worker config.
-      // Workers resolve against the main host; they must not replace its state.
-      if (!isEnabled || config.isWorker) return;
+      // Membership, rather than initialization timing, identifies the main
+      // instance. Worker-only instances must prepare their own resolver.
+      const mainConfig = (config as ResolvedConfig & { mainConfig?: ResolvedConfig }).mainConfig;
+      if (config.isWorker && mainConfig?.plugins.includes(plugin)) return;
+      isEnabled =
+        (config.command === 'serve' && enableInDev) ||
+        (config.command === 'build' && enableInBuild);
+      resolver = null;
+      ssrExternalEnabled = false;
+      resolveSsrExternal = undefined;
+      isSsrExternal = undefined;
+      if (!isEnabled) return;
       resolver = new DepsConflictResolver(
         {
           ...resolverOptions,
@@ -272,6 +279,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         hooks,
       );
       await resolver.initialize();
+      // Worker builds inherit optimizer/SSR objects from the main config.
+      // Only their module resolver is ours; keep those shared objects intact.
+      if (config.isWorker) return;
       const addition = runtimeConfig(config, resolver);
       if (!addition) return;
       // Do not reassign resolve.alias here: Vite already created its alias
@@ -348,6 +358,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       return null;
     },
   };
+  return plugin;
 }
 
 // 默认导出

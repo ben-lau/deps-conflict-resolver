@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { runInNewContext } from 'node:vm';
 import { build, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
@@ -51,6 +52,83 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it.each([false, true])(
+    'initializes a Worker-only instance when a main instance is also present: %s',
+    async (withMain) => {
+      const root = fixture('2.7.16');
+      writeFileSync(
+        join(root, 'entry.js'),
+        'new Worker(new URL("./worker.js", import.meta.url), {type:"module"});',
+      );
+      writeFileSync(
+        join(root, 'worker.js'),
+        'import {version} from "legacy";self.postMessage(version);',
+      );
+      const analyzed = vi.fn();
+      const result = await build({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: withMain
+          ? [plugin({ dependencies: ['legacy'], offline: true, strict: true })]
+          : [],
+        worker: {
+          plugins: () => [
+            plugin({
+              dependencies: ['legacy'],
+              offline: true,
+              strict: true,
+              hooks: { onAnalysisComplete: analyzed },
+            }),
+          ],
+        },
+        build: {
+          write: false,
+          minify: false,
+          rollupOptions: { input: join(root, 'entry.js') },
+        },
+      });
+      const outputs = (Array.isArray(result) ? result : [result]).flatMap((output) =>
+        'output' in output ? output.output : [],
+      );
+      const worker = outputs.find(
+        (output) => output.type === 'asset' && output.fileName.endsWith('.js'),
+      );
+      expect(worker?.type).toBe('asset');
+      if (worker?.type !== 'asset') throw new Error('Worker asset is missing');
+      const messages: unknown[] = [];
+      runInNewContext(String(worker.source), {
+        self: { postMessage: (value: unknown) => messages.push(value) },
+      });
+      expect(messages).toEqual(['2.7.16']);
+      expect(analyzed).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('rejects a strict Worker build when its required alias is missing', async () => {
+    const root = fixture('2.7.16');
+    rmSync(join(root, 'node_modules/vue2'), { recursive: true });
+    writeFileSync(
+      join(root, 'entry.js'),
+      'new Worker(new URL("./worker.js", import.meta.url), {type:"module"});',
+    );
+    writeFileSync(
+      join(root, 'worker.js'),
+      'import {version} from "legacy";self.postMessage(version);',
+    );
+    await expect(
+      build({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        worker: {
+          plugins: () => [plugin({ dependencies: ['legacy'], offline: true, strict: true })],
+        },
+        build: { write: false, rollupOptions: { input: join(root, 'entry.js') } },
+      }),
+    ).rejects.toThrow('[OFFLINE_ALIAS_MISSING]');
+  });
+
   it.each(['normal', 'post'] as const)(
     'uses the root selected by a later %s config hook',
     async (order) => {

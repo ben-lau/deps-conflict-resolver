@@ -128,6 +128,66 @@ describe('Vite Plugin', () => {
       expect(final.optimizeDeps.include).toContain('aliased-vue');
     });
 
+    it.each(['before', 'during', 'after'] as const)(
+      'preserves a main instance when its Worker callback runs %s initialization',
+      async (timing) => {
+        const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+        const main = {
+          root: '/test',
+          command: 'build',
+          plugins: [plugin],
+          optimizeDeps: {},
+          ssr: {},
+        } as unknown as ResolvedConfig;
+        const worker = { ...main, isWorker: true, mainConfig: main };
+        const configureHook = plugin.config as (config: UserConfig, env: ConfigEnv) => void;
+        const ready = plugin.configResolved as (config: ResolvedConfig) => Promise<void>;
+        configureHook({}, { command: 'build', mode: 'test' });
+        let release!: () => void;
+        mockResolverInstance.initialize.mockImplementationOnce(
+          () =>
+            new Promise<void>((done) => {
+              release = done;
+            }),
+        );
+        if (timing === 'before') await ready(worker);
+        const preparing = ready(main);
+        if (timing === 'during') await ready(worker);
+        release();
+        await preparing;
+        if (timing === 'after') {
+          // Later Vite versions can also call config again for a reused
+          // instance. That call must not erase the initialized main resolver.
+          configureHook({}, { command: 'build', mode: 'test' });
+          await ready(worker);
+        }
+        expect(mockResolverInstance.initialize).toHaveBeenCalledTimes(1);
+        const resolve = plugin.resolveId as (source: string, importer?: string) => null;
+        expect(resolve('vue', '/test/legacy/index.js')).toBeNull();
+        expect(mockResolverInstance.resolveModule).toHaveBeenCalledWith(
+          'vue',
+          '/test/legacy/index.js',
+        );
+      },
+    );
+
+    it('initializes a dedicated Worker without changing inherited optimizer or SSR settings', async () => {
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'], ssr: 'auto' });
+      const main = { plugins: [] };
+      const worker = {
+        root: '/test',
+        command: 'build',
+        isWorker: true,
+        mainConfig: main,
+        optimizeDeps: { include: ['host'] },
+        ssr: { noExternal: ['host'] },
+      } as unknown as ResolvedConfig;
+      await (plugin.configResolved as (config: ResolvedConfig) => Promise<void>)(worker);
+      expect(mockResolverInstance.initialize).toHaveBeenCalledTimes(1);
+      expect(worker.optimizeDeps).toEqual({ include: ['host'] });
+      expect(worker.ssr).toEqual({ noExternal: ['host'] });
+    });
+
     it.each(['serve', 'build'] as const)('honors enable flags in %s', async (command) => {
       const plugin = depsConflictResolverVitePlugin({
         dependencies: ['legacy'],
