@@ -219,6 +219,8 @@ pnpm exec deps-conflict-resolver doctor --config ./legacy-deps.json --offline --
 
 在 Vite、Webpack 或核心选项中设置 `preparedPlan: true, strict: true`。此模式始终离线。构建会校验包清单、锁文件、真实安装路径和此前未命中的查找输入。计划命中会跳过全图分析，计划缺失或失效会触发离线分析。计划记录当前安装的绝对路径，保存在 `node_modules/.cache/deps-conflict-resolver/` 中。依赖变更后可以重新运行 `prepare --write-plan`。已有有效安装时，可用 `prepare --offline --write-plan` 生成计划。
 
+配置 `onAnalysisComplete` 时，每次准备都会重新分析，以便回调观察当次结果。
+
 `doctor --timings` 和核心 `getTimings()` 报告各阶段耗时，包括读写锁等待、依赖图、Registry、安装和计划校验。阶段可以重叠。文件探针计数来自分析过程，计划校验时间另列。Vite 的 `debug: true` 也会输出实际执行的预构建耗时与缓存键。
 
 `doctor` 会给出诊断对应的下一步，已安装且版本不兼容的可选 peer 以告警显示。使用 `doctor --source-hints` 可以查看 Vue 2 编译特征提示和待确认的 `peerOverrides` 配置。`init` 也会输出这些提示。在线元数据查询使用 `.npmrc` 中的 `@scope:registry` 及对应主机和路径下的 `_authToken`，支持环境变量插值。

@@ -219,6 +219,8 @@ pnpm exec deps-conflict-resolver doctor --config ./legacy-deps.json --offline --
 
 Set `preparedPlan: true, strict: true` in the Vite, Webpack, or core options. This mode always runs offline. The resolver validates manifests, lockfiles, physical installation paths, and previously missing lookups. A valid plan skips full analysis. A missing or stale plan falls back to offline analysis. Plans contain absolute installation paths and live in `node_modules/.cache/deps-conflict-resolver/`. Regenerate the plan after dependency changes with `prepare --write-plan`. An existing valid installation can generate one with `prepare --offline --write-plan`.
 
+With an `onAnalysisComplete` hook, each preparation runs a fresh analysis so the hook can inspect the current result.
+
 `doctor --timings` and the core `getTimings()` report phase durations, including lock waiting, graph analysis, registry access, installation, and plan validation. Durations can overlap. Filesystem counts cover analysis probes, and plan validation time is measured separately. Vite's `debug: true` also logs the duration and cache key of optimizer runs.
 
 `doctor` suggests next steps for diagnostics and warns about visible optional peers with incompatible versions. Use `doctor --source-hints` for Vue 2 source patterns and suggested `peerOverrides` to review. `init` includes these hints. Online metadata queries honor `@scope:registry` and `_authToken` settings scoped to the registry host and path in `.npmrc`, including environment variable substitution.
