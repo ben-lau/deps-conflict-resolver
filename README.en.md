@@ -150,7 +150,7 @@ pnpm exec deps-conflict-resolver prepare legacy-lib
 pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
 ```
 
-doctor never installs packages. Without package names it scans dependencies / optionalDependencies and skips npm alias declarations. prepare requires explicit package names and updates the manifest and lockfile through the project's package manager. --json emits a schemaVersion=1 report containing planned aliases, active aliases, diagnostics, and installation outcomes.
+doctor never installs packages. Without package names it scans dependencies and installed optionalDependencies, skipping npm alias declarations. Optional packages omitted for the current platform are not reported as missing; explicitly selected packages are still checked for existence. prepare requires explicit package names and updates the manifest and lockfile through the project's package manager. --json emits a schemaVersion=1 report containing planned aliases, active aliases, diagnostics, and installation outcomes.
 
 Commit the manifest and lockfile produced by prepare. In CI, run your package manager's frozen installation first, then use:
 
@@ -165,7 +165,7 @@ depsConflictResolverVitePlugin({
 
 offline=true prohibits registry queries and package-manager installation, including when autoInstall=true is also supplied. Missing verified aliases produce OFFLINE_ALIAS_MISSING. strict=true rejects unresolved required dependencies, installation failures, and ambiguous runtime requests. Automatic installation and permissive handling remain the defaults. autoInstall=false alone does not prohibit registry queries.
 
-Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal so internal requests pass through the resolver. The default is ssr='manual'. An existing noExternal=true is preserved. Explicit ssr.external entries retain Vite's own precedence; avoid externalizing packages that require redirection.
+Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal. During development it also includes them in SSR pre-bundling with the same alias resolution rules, redirecting both CommonJS require and ESM import requests. The default is ssr='manual'. Existing noExternal=true and SSR optimizer settings are preserved and merged. Explicit ssr.external entries retain Vite's own precedence; avoid externalizing affected packages or disabling SSR pre-bundling when automatic redirection is needed.
 
 ### Explain a Resolution
 
@@ -184,7 +184,8 @@ explainResolution returns resolved, reason, aliases, and matchedPaths. Reasons d
 
 ### Compatibility and Verification
 
-- Vite 4–7 use an esbuild optimizer adapter; Vite 8 uses native Rolldown hooks. The compatibility script checks actual Vue 2 / Vue 3 runtime identities during cold optimization and SSR. CI covers Vite 4.0.0, 5, 6, 7, and 8.
+- Vite 4–7 use an esbuild optimizer adapter; Vite 8 uses native Rolldown hooks. The compatibility script checks actual Vue 2 / Vue 3 versions and instance identities during client cold optimization, SSR build, and SSR development with both ESM and CommonJS. CI covers Vite 4.0.0, 5, 6, 7, and 8.
+- Native Vite 4.0 SSR pre-bundling creates separate Vue 2 instances when ESM and CommonJS entries are mixed; the plugin shares this limitation. Use Vite 5 or newer for that scenario. Vite resolves conditional exports; the plugin does not force distinct export entry points into one implementation.
 - Webpack 5 uses beforeResolve. Initialization failures remain permissive by default; strict=true propagates failures to the compiler.
 - Installed optionalDependencies participate in the runtime graph. The existing optional-peer policy is unchanged.
 - Workspace real paths and node_modules links both match. Multiple aliases for the same physical importer produce AMBIGUOUS_IMPORTER rather than a name-based arbitrary choice; strict=true rejects the request.

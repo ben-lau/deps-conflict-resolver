@@ -150,7 +150,7 @@ pnpm exec deps-conflict-resolver prepare legacy-lib
 pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
 ```
 
-doctor 不执行安装；没有提供包名时检查当前工程的 dependencies / optionalDependencies，跳过 npm alias 声明。prepare 必须显式提供包名，会通过工程的包管理器更新依赖清单和锁文件。--json 输出版本为 1 的报告，包含候选 alias、有效 alias、诊断和安装结果。
+doctor 不执行安装；没有提供包名时检查当前工程的 dependencies 和已安装的 optionalDependencies，跳过 npm alias 声明。因平台差异未安装的可选包不会报缺失；显式指定的包仍会检查是否存在。prepare 必须显式提供包名，会通过工程的包管理器更新依赖清单和锁文件。--json 输出版本为 1 的报告，包含候选 alias、有效 alias、诊断和安装结果。
 
 建议把 prepare 产生的清单及锁文件提交到版本控制，CI 先执行包管理器的冻结安装，再使用以下配置：
 
@@ -165,7 +165,7 @@ depsConflictResolverVitePlugin({
 
 offline=true 禁止 registry 查询及包管理器安装，即使同时设置 autoInstall=true 也不会安装。缺少已验证 alias 时会产生 OFFLINE_ALIAS_MISSING；strict=true 会使未解决的必要依赖、安装失败或实际请求中的上下文歧义报错。默认仍保留自动安装和宽松处理方式。autoInstall=false 只关闭安装，本身不会禁止版本查询。
 
-Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal，使包内部的请求进入解析流程；默认 ssr='manual'，由使用者配置。已有 noExternal=true 会保留。显式 ssr.external 仍遵循 Vite 自身的优先级，应避免将需要重定向的依赖同时外置。
+Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal，开发时也将它们加入 SSR 预构建并使用相同的 alias 解析规则，使 CommonJS 的 require 和 ESM 的 import 都能重定向。默认 ssr='manual'，由使用者配置。已有 noExternal=true 和 SSR 预构建配置会合并保留。显式 ssr.external 仍遵循 Vite 自身的优先级；需要自动重定向时，应避免同时外置这些包或禁用 SSR 预构建。
 
 ### 查看某次解析的原因
 
@@ -184,7 +184,8 @@ explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason �
 
 ### 兼容性与验证
 
-- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本分别验证真实 Vue 2 / Vue 3 在冷启动预构建和 SSR 中的版本身份，CI 覆盖 Vite 4.0.0、5、6、7、8。
+- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 在客户端冷启动预构建、SSR 构建和 SSR 开发模式（ESM / CommonJS）中的版本及实例身份，CI 覆盖 Vite 4.0.0、5、6、7、8。
+- Vite 4.0 的原生 SSR 预构建在混用 Vue 2 的 ESM / CommonJS 入口时会产生独立实例，插件也受此限制；此场景建议使用 Vite 5 或更新版本。包的条件导出由 Vite 解析，插件不强制合并本来就不同的导出入口。
 - Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
 - 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
 - workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。

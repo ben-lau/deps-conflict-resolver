@@ -1,4 +1,4 @@
-import type { Plugin, UserConfig } from 'vite';
+import type { Alias, Plugin, UserConfig } from 'vite';
 import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
@@ -6,7 +6,7 @@ import { version as viteVersion } from 'vite';
 import { createOptimizerOptions } from './optimizer';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
-import { resolve as resolvePath } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 
 const logger = createLogger('vite-plugin');
 
@@ -21,21 +21,35 @@ const PLUGIN_NAME = 'deps-conflict-resolver';
 interface ViteAliasEntry {
   find: string | RegExp;
   replacement: string;
+  customResolver?: Alias['customResolver'];
 }
 
 /**
  * 基于 AliasPathMapping 生成 Vite 的 resolve.alias 配置
  */
-export function createViteAliases(mappings: AliasPathMapping[]): ViteAliasEntry[] {
+export function createViteAliases(
+  mappings: AliasPathMapping[],
+  projectRoot?: string,
+): ViteAliasEntry[] {
   const aliases: ViteAliasEntry[] = [];
 
   for (const mapping of mappings) {
-    // Resolve the package root to the installed alias path. Subpaths are
-    // intentionally left to Vite's package resolver so package `exports` and
-    // conditional entry points remain effective.
+    // Keep the installed path for callers of the standalone helper. The plugin
+    // resolves bare alias names from the host so root conditional exports are
+    // honored, including packages whose ESM entry wraps the CommonJS runtime.
     aliases.push({
       find: new RegExp(`^${escapeRegex(mapping.aliasName)}$`),
       replacement: mapping.path,
+      ...(projectRoot
+        ? {
+            customResolver: function (_source, _importer, options) {
+              return this.resolve(mapping.aliasName, join(projectRoot, 'package.json'), {
+                ...options,
+                skipSelf: true,
+              });
+            } satisfies Alias['customResolver'],
+          }
+        : {}),
     });
   }
 
@@ -58,7 +72,7 @@ export interface VitePluginOptions extends PluginConfig {
    */
   enableInBuild?: boolean;
 
-  /** Bundle affected packages during SSR so their internal requests can be redirected. */
+  /** Bundle affected packages for SSR builds and pre-bundle them for SSR development. */
   ssr?: 'manual' | 'auto';
 }
 
@@ -131,7 +145,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         logger.info('No active aliases available');
         return;
       }
-      const aliases = createViteAliases(aliasPathMappings);
+      const projectRoot = resolver.getOptions().projectRoot;
+      const aliases = createViteAliases(aliasPathMappings, projectRoot);
 
       logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
 
@@ -154,14 +169,28 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 
       // 创建 esbuild 插件用于预构建阶段的别名解析
-      const projectRoot = resolver.getOptions().projectRoot;
       const optimizeDeps = createOptimizerOptions(resolver, projectRoot, viteVersion);
+      const [viteMajor, viteMinor] = viteVersion.split('.').map(Number);
+      const legacySsrOptimizer = viteMajor! < 5 || (viteMajor === 5 && viteMinor === 0);
 
       // 返回要合并的配置
       return {
         ...(ssr === 'auto'
           ? {
-              ssr: { noExternal: config.ssr?.noExternal === true ? true : [...ssrPackages] },
+              ssr: {
+                noExternal: config.ssr?.noExternal === true ? true : [...ssrPackages],
+                ...(command === 'serve'
+                  ? {
+                      optimizeDeps: {
+                        ...(legacySsrOptimizer && config.ssr?.optimizeDeps?.disabled === undefined
+                          ? { disabled: false as const }
+                          : {}),
+                        ...optimizeDeps,
+                        include: [...ssrPackages],
+                      },
+                    }
+                  : {}),
+              },
             }
           : {}),
         resolve: {
