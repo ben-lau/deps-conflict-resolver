@@ -116,6 +116,17 @@ try {
   assert.equal(ssr.shared, true);
 
   const ssrDev = {};
+  const nativeDirectory = join(app, 'node_modules/native-addon');
+  json(join(nativeDirectory, 'package.json'), {
+    name: 'native-addon',
+    version: '1.0.0',
+    main: './index.js',
+  });
+  writeFileSync(
+    join(nativeDirectory, 'index.js'),
+    'exports.ready = true; exports.load = () => require("./binding.node");',
+  );
+  writeFileSync(join(nativeDirectory, 'binding.node'), '');
   for (const commonjs of [false, true]) {
     // Exercise Node-style packages as well as ESM; noExternal alone does not
     // transform CommonJS in the SSR development module runner.
@@ -125,12 +136,17 @@ try {
       type: commonjs ? 'commonjs' : 'module',
       exports: './index.js',
       peerDependencies: { vue: '^2.0.0' },
+      dependencies: { 'native-addon': '1.0.0' },
     });
     writeFileSync(
       join(legacyDirectory, 'index.js'),
       commonjs
-        ? 'const Vue = require("vue"); exports.runtime = Vue; exports.runtimeVersion = Vue.version;'
-        : 'import Vue from "vue"; export const runtime = Vue; export const runtimeVersion = Vue.version;',
+        ? 'const Vue = require("vue"); const native = require("native-addon"); exports.nativeReady = native.ready; exports.runtime = Vue; exports.runtimeVersion = Vue.version;'
+        : 'import Vue from "vue"; export const nativeReady = true; export const runtime = Vue; export const runtimeVersion = Vue.version;',
+    );
+    writeFileSync(
+      entry,
+      'import { runtime } from "legacy"; import Vue from "vue2"; export { runtimeVersion, nativeReady } from "legacy"; export { version as hostVersion } from "vue"; export const shared = runtime === Vue;',
     );
     const server = await vite.createServer({
       root: app,
@@ -139,13 +155,14 @@ try {
       server: { middlewareMode: true, hmr: false },
       plugins: [plugin()],
       optimizeDeps: { force: true },
-      ssr: { optimizeDeps: { force: true } },
+      ssr: { external: ['native-addon'], optimizeDeps: { force: true } },
     });
     try {
       const result = await server.ssrLoadModule('/entry.js');
       const context = `Vite ${vite.version}, CommonJS=${commonjs}`;
       assert.equal(result.runtimeVersion, legacyVersion, context + ': alias version');
       assert.equal(result.hostVersion, hostVersion, context + ': host version');
+      assert.equal(result.nativeReady, true, context + ': external native dependency');
       if (Number.parseInt(vite.version, 10) >= 5 || !commonjs) {
         assert.equal(result.shared, true, context + ': shared alias instance');
       } else {
@@ -154,7 +171,7 @@ try {
         // rather than asserting a stronger guarantee than that engine offers.
         writeFileSync(
           join(legacyDirectory, 'index.js'),
-          'const Vue = require("vue2"); exports.runtime = Vue; exports.runtimeVersion = Vue.version;',
+          'const Vue = require("vue2"); exports.nativeReady = true; exports.runtime = Vue; exports.runtimeVersion = Vue.version;',
         );
         const native = await vite.createServer({
           root: app,
@@ -181,6 +198,7 @@ try {
         host: result.hostVersion,
         legacy: result.runtimeVersion,
         shared: result.shared,
+        nativeReady: result.nativeReady,
       };
     } finally {
       await server.close();

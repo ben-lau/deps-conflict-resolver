@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -62,7 +62,116 @@ afterEach(() => {
   roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }));
 });
 
+function nativeDependency(root: string, imported = false, subpath = false): void {
+  const legacy = join(root, 'node_modules/legacy');
+  const manifest = JSON.parse(readFileSync(join(legacy, 'package.json'), 'utf8'));
+  manifest.dependencies = { 'native-addon': '1.0.0' };
+  writeFileSync(join(legacy, 'package.json'), JSON.stringify(manifest));
+  const native = join(root, 'node_modules/native-addon');
+  mkdirSync(native, { recursive: true });
+  writeFileSync(
+    join(native, 'package.json'),
+    JSON.stringify({ name: 'native-addon', version: '1.0.0', main: './index.js' }),
+  );
+  const code = 'exports.ready = true; exports.load = () => require("./binding.node");';
+  writeFileSync(join(native, 'index.js'), code);
+  writeFileSync(join(native, 'feature.js'), code);
+  writeFileSync(join(native, 'binding.node'), '');
+  if (imported) {
+    const entry = join(legacy, 'index.js');
+    writeFileSync(
+      entry,
+      readFileSync(entry, 'utf8') +
+        `\nimport native from "native-addon${subpath ? '/feature.js' : ''}"; export const nativeReady = native.ready;`,
+    );
+    const host = join(root, 'entry.js');
+    writeFileSync(host, readFileSync(host, 'utf8') + '\nexport { nativeReady } from "legacy";');
+  }
+}
+
 describe('SSR alias resolution', () => {
+  it.each(['unused', 'external', 'exclude'])(
+    'avoids forcing an unused native dependency into SSR pre-bundling: %s',
+    async (mode) => {
+      const { root } = fixture();
+      nativeDependency(root);
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        server: { middlewareMode: true, hmr: false },
+        ssr:
+          mode === 'external'
+            ? { external: ['native-addon'] }
+            : mode === 'exclude'
+              ? { optimizeDeps: { exclude: ['native-addon'] } }
+              : {},
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            offline: true,
+            strict: true,
+            ssr: 'auto',
+          }),
+        ],
+      });
+      try {
+        expect(server.config.ssr.optimizeDeps.include).not.toContain('native-addon');
+        const result = await server.ssrLoadModule('/entry.js');
+        expect(result.runtimeVersion).toBe('2.7.16');
+        expect(result.shared).toBe(true);
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  it.each([
+    'external',
+    'exclude',
+    'environment-external',
+    'environment-exclude',
+    'external-subpath',
+  ])('keeps imported native packages outside SSR optimization: %s', async (mode) => {
+    const { root } = fixture();
+    nativeDependency(root, true, mode === 'external-subpath');
+    const external = ['native-addon'];
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      server: { middlewareMode: true, hmr: false },
+      ssr:
+        mode === 'exclude'
+          ? { optimizeDeps: { exclude: external } }
+          : mode.startsWith('environment')
+            ? {}
+            : { external },
+      environments:
+        mode === 'environment-external'
+          ? { ssr: { resolve: { external } } }
+          : mode === 'environment-exclude'
+            ? { ssr: { optimizeDeps: { exclude: external } } }
+            : {},
+      plugins: [
+        depsConflictResolverVitePlugin({
+          dependencies: ['legacy'],
+          offline: true,
+          strict: true,
+          ssr: 'auto',
+        }),
+      ],
+    });
+    try {
+      const result = await server.ssrLoadModule('/entry.js');
+      expect(result.nativeReady).toBe(true);
+      expect(result.runtimeVersion).toBe('2.7.16');
+      expect(result.shared).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
   it.each([false, true])(
     'loads the correct runtime in SSR dev with CommonJS=%s',
     async (commonjs) => {
@@ -173,4 +282,35 @@ describe('SSR alias resolution', () => {
       'deps-conflict-resolver-esbuild',
     ]);
   });
+
+  it.each(['none', 'array', 'pattern'])(
+    'respects external=true and explicit noExternal overrides: %s',
+    async (mode) => {
+      const { root } = fixture();
+      const config = await resolveConfig(
+        {
+          root,
+          configFile: false,
+          logLevel: 'silent',
+          ssr: {
+            external: true,
+            noExternal:
+              mode === 'array' ? ['legacy', 'vue2'] : mode === 'pattern' ? /^(legacy|vue2)$/ : [],
+          },
+          plugins: [
+            depsConflictResolverVitePlugin({
+              dependencies: ['legacy'],
+              offline: true,
+              strict: true,
+              ssr: 'auto',
+            }),
+          ],
+        },
+        'serve',
+      );
+      expect(config.ssr.optimizeDeps.include).toEqual(
+        mode === 'none' ? [] : expect.arrayContaining(['legacy', 'vue2']),
+      );
+    },
+  );
 });
