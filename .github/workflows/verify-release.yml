@@ -58,6 +58,32 @@ jobs:
       - run: pnpm build
       - run: pnpm test:run
 
+  webpack-consumer:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 22]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-package
+      - name: Install the packed package and Webpack
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/release-webpack"
+          --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact
+          "$RUNNER_TEMP"/release-package/*.tgz webpack@5
+      - name: Verify Webpack watch with the packaged plugin
+        run: node tests/compat/webpack-release.mjs "$RUNNER_TEMP/release-webpack"
+
   consumer:
     needs: package
     runs-on: ubuntu-latest
