@@ -10,7 +10,7 @@ import type {
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
-import { resolveDependencyRequirement } from '../utils/version-spec';
+import { matchesProvider, resolveDependencyRequirement } from '../utils/version-spec';
 import { createWorkspaceDetector } from './workspace-detector';
 import type { RegistryClient } from './registry-client';
 import { AliasManager } from './alias-manager';
@@ -123,12 +123,11 @@ export async function planAliasPeerLinks(
     const installedPath = findPackagePath(mapping.aliasName, options.projectRoot);
     const installed = installedPath ? readManifest(installedPath) : null;
     if (
-      installed?.name === mapping.originalName &&
-      installed.version &&
-      satisfies(installed.version, mapping.resolvedVersion)
+      installedPath &&
+      matchesProvider(installed, mapping.originalName, mapping.resolvedVersion)
     ) {
       manifests.set(mapping, installed);
-      installedPaths.set(mapping, installedPath!);
+      installedPaths.set(mapping, installedPath);
       continue;
     }
     if (mapping.installSpec && !options.offline && registry.fetchPackageManifest) {
@@ -207,7 +206,7 @@ export async function planAliasPeerLinks(
           } else {
             const path = findPackagePath(peerName, directory);
             const provider = path ? readManifest(path) : null;
-            if (path && provider?.version && satisfies(provider.version, range)) {
+            if (path && matchesProvider(provider, name, range)) {
               const identity = canonicalPath(path);
               providers.set(identity, [
                 ...(providers.get(identity) ?? []),
@@ -264,7 +263,7 @@ export async function planAliasPeerLinks(
         // provider visible from this package instead of crossing peer contexts.
         const naturalPath = findPackagePath(peerName, installedPath ?? options.projectRoot);
         const natural = naturalPath ? readManifest(naturalPath) : null;
-        if (natural?.version && satisfies(natural.version, range)) continue;
+        if (matchesProvider(natural, name, range)) continue;
       }
 
       if (candidates.length === 1) {

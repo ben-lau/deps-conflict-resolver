@@ -1,4 +1,5 @@
 import type { PackageJson } from '../types';
+import { satisfies } from './semver';
 
 /**
  * 版本规格/协议相关的小工具
@@ -34,6 +35,14 @@ export interface DependencyRequirement {
 
 export interface VersionSpecResolver {
   resolveVersionSpec(name: string, spec: string): string | null;
+}
+
+export function matchesProvider(
+  manifest: Pick<PackageJson, 'name' | 'version'> | null | undefined,
+  name: string,
+  range: string,
+): manifest is { name: string; version: string } {
+  return manifest?.name === name && Boolean(manifest.version && satisfies(manifest.version, range));
 }
 
 export function resolveDependencyRequirement(

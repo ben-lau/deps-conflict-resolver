@@ -465,6 +465,40 @@ describe('diagnostics and deterministic offline operation', () => {
     });
   });
 
+  it.each([
+    ['^1', false],
+    ['npm:renderer-shim@^1', true],
+  ])(
+    'checks the actual name of an alias peer with requirement %s',
+    async (requirement, compatible) => {
+      const root = project({
+        dependencies: {
+          legacy: '1.0.0',
+          adapter: '2.0.0',
+          adapter1: 'npm:adapter@1.0.0',
+          renderer: 'npm:renderer-shim@1.0.0',
+        },
+      });
+      const legacy = pkg(root, 'legacy', { peerDependencies: { adapter: '^1' } });
+      pkg(root, 'adapter', { version: '2.0.0' });
+      pkg(root, 'adapter1', { name: 'adapter', peerDependencies: { renderer: requirement } });
+      pkg(root, 'renderer', { name: 'renderer-shim' });
+
+      const preparing = createResolver({ ...baseOptions(root), offline: true, strict: true });
+      if (compatible) {
+        const resolver = await preparing;
+        expect(resolver.resolveModule('adapter', join(legacy, 'index.js'))).toBe('adapter1');
+        expect(resolver.getDiagnostics()).toEqual([]);
+      } else {
+        await expect(preparing).rejects.toMatchObject({
+          diagnostics: [
+            expect.objectContaining({ code: 'ALIAS_PEER_UNSATISFIED', packageName: 'renderer' }),
+          ],
+        });
+      }
+    },
+  );
+
   it('assigns distinct aliases to scoped and unscoped packages with the same normalized name', async () => {
     const root = project({
       dependencies: { consumer: '1.0.0', '@scope/foo': '2.0.0', 'scope-foo': '2.0.0' },

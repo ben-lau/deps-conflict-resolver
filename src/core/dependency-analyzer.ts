@@ -33,6 +33,7 @@ import {
 import {
   getDependencyRequirement,
   getRuntimeDependencySpec,
+  matchesProvider,
   parseNpmAlias,
   resolveDependencyRequirement,
   type DependencyRequirement,
@@ -2002,8 +2003,7 @@ export class DependencyAnalyzer {
           : [];
       if (shared.length === 0) {
         const { pkgJson } = this.resolvePackageJson(peerName, baseDir);
-        if (pkgJson?.name === name && pkgJson.version && satisfies(pkgJson.version, range))
-          continue;
+        if (matchesProvider(pkgJson, name, range)) continue;
       } else if (
         name !== peerName ||
         shared.some(({ requiredRange }) => !rangesIntersect(requiredRange, range))
