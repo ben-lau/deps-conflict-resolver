@@ -39,6 +39,7 @@ async function configure(
     root: '/test',
     resolve: {},
     optimizeDeps: {},
+    configFileDependencies: [],
     ssr: {},
     logger: createLogger('silent'),
     ...input,
@@ -322,12 +323,16 @@ describe('Vite Plugin', () => {
       expect(replacement.filter.test('vue')).toBe(false);
     });
 
-    it.each([{ hooks: { beforeResolve: () => undefined } }, { strict: true }])(
-      'continues forwarding unrelated requests with no active aliases and %j',
-      async (options) => {
+    it.each(['build', 'serve'] as const)(
+      'continues forwarding unrelated strict requests during %s when there is no build boundary',
+      async (command) => {
         mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
-        const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'], ...options });
-        const config = await configure(plugin);
+        const plugin = depsConflictResolverVitePlugin({
+          dependencies: ['legacy'],
+          strict: true,
+          ...(command === 'build' && { hooks: { beforeResolve: () => undefined } }),
+        });
+        const config = await configure(plugin, command);
         expect(await applyToEnvironment(plugin, config)).toBe(true);
         const resolveId = resolveHook(plugin) as (source: string, importer: string) => unknown;
         expect(resolveId('unrelated', '/test/index.js')).toBeNull();

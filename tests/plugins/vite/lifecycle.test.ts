@@ -16,6 +16,10 @@ import { runInNewContext } from 'node:vm';
 import { build, createLogger, optimizeDeps, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
+import {
+  getProjectPreparation,
+  withProjectPreparation,
+} from '../../../src/core/project-preparation';
 import type { PackageJson, PluginHooks } from '../../../src/types';
 import { mockRegistry } from '../../support/registry';
 
@@ -72,6 +76,32 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it('rejects publication if preparation completed during a filtered strict build', async () => {
+    const root = fixture('2.7.16');
+    writeFileSync(join(root, 'entry.js'), 'export {version} from "./plain.js";');
+    writeFileSync(join(root, 'plain.js'), 'export const version = "unrelated";');
+    await expect(
+      build({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [
+          plugin({ dependencies: ['legacy'], offline: true, strict: true }),
+          {
+            name: 'change-preparation-revision',
+            async transform(_code, id) {
+              if (id !== join(root, 'entry.js')) return;
+              await withProjectPreparation(getProjectPreparation(root), async (changed) =>
+                changed(),
+              );
+            },
+          },
+        ],
+        build: { write: false, lib: { entry: 'entry.js', formats: ['es'] } },
+      }),
+    ).rejects.toThrow('Dependencies changed during compilation');
+  });
+
   it.each([false, true])(
     'refreshes production watch rules and cached imports (strict=%s)',
     async (strict) => {

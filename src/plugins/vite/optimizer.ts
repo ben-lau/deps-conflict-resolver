@@ -13,7 +13,7 @@ import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-re
 import { escapeRegex } from '../../utils/regex';
 
 // Bump when the optimizer's redirect policy changes.
-const OPTIMIZER_CACHE_VERSION = 2;
+const OPTIMIZER_CACHE_VERSION = 3;
 const bareRequestFilter = /^[^./]/;
 
 export interface OptimizerOptions {
@@ -31,6 +31,8 @@ interface OptimizerResolveOptions {
   filterRequests: boolean;
   hookKey?: string;
   ssrExternal?: SsrExternalPolicy;
+  guardChanges?: boolean;
+  reportRun?: (engine: 'esbuild' | 'rolldown', key: string, milliseconds: number) => void;
 }
 
 export function aliasRequestFilter(mappings: readonly AliasPathMapping[]): RegExp | undefined {
@@ -95,11 +97,24 @@ function esbuildPlugin(
   projectRoot: string,
   fingerprint: string,
   filter: RegExp,
+  { guardChanges, reportRun }: OptimizerResolveOptions,
 ): EsbuildPlugin {
   const resolvingRedirect = {};
   return {
     name: 'deps-conflict-resolver-esbuild-' + fingerprint,
     setup(build) {
+      if (guardChanges || reportRun) {
+        let verify: (() => void) | undefined;
+        let start = 0;
+        build.onStart(() => {
+          start = performance.now();
+          verify = guardChanges ? getResolverBuild(resolver).guardGeneration() : undefined;
+        });
+        build.onEnd(() => {
+          reportRun?.('esbuild', fingerprint, performance.now() - start);
+          verify?.();
+        });
+      }
       build.onResolve({ filter }, (args) => {
         if (args.pluginData === resolvingRedirect) return null;
         const redirected = resolveOptimizerRequest(resolver, args.path, args.importer);
@@ -137,9 +152,26 @@ function rolldownPlugin(
   projectRoot: string,
   fingerprint: string,
   filter: RegExp,
+  { guardChanges, reportRun }: OptimizerResolveOptions,
 ): Plugin {
+  let verify: (() => void) | undefined;
+  let start = 0;
   return {
     name: 'deps-conflict-resolver-rolldown-' + fingerprint,
+    ...((guardChanges === true || reportRun !== undefined) &&
+      ({
+        buildStart() {
+          start = performance.now();
+          verify = guardChanges ? getResolverBuild(resolver).guardGeneration() : undefined;
+        },
+        buildEnd(error) {
+          reportRun?.('rolldown', fingerprint, performance.now() - start);
+          if (!error) verify?.();
+        },
+        generateBundle() {
+          verify?.();
+        },
+      } satisfies Partial<Plugin>)),
     resolveId: {
       filter: { id: filter },
       handler(source, importer, resolveOptions) {
@@ -172,21 +204,24 @@ export function createOptimizerOptions(
   resolver: DepsConflictResolver,
   projectRoot: string,
   viteVersion: string,
-  { filterRequests, hookKey, ssrExternal }: OptimizerResolveOptions = { filterRequests: true },
+  options: OptimizerResolveOptions = { filterRequests: true },
 ): OptimizerOptions {
+  const { filterRequests, hookKey, ssrExternal, guardChanges, reportRun } = options;
   const mappings = resolver.getAliasPathMappings();
   const include = [...new Set(mappings.map((mapping) => mapping.aliasName))];
   // Vite hashes optimizer plugin names across esbuild and Rolldown releases.
   const fingerprint = createHash('sha256')
     .update(JSON.stringify([OPTIMIZER_CACHE_VERSION, resolver.getResolutionFingerprint(), hookKey]))
     .digest('hex');
-  const filter = filterRequests ? aliasRequestFilter(mappings) : bareRequestFilter;
+  const filter = filterRequests
+    ? (aliasRequestFilter(mappings) ?? (guardChanges || reportRun ? /^$/ : undefined))
+    : bareRequestFilter;
   if (Number.parseInt(viteVersion, 10) >= 8) {
     return {
       include,
       rolldownOptions: {
         plugins: [
-          ...(filter ? [rolldownPlugin(resolver, projectRoot, fingerprint, filter)] : []),
+          ...(filter ? [rolldownPlugin(resolver, projectRoot, fingerprint, filter, options)] : []),
           ...(ssrExternal ? [rolldownExternalPlugin(ssrExternal)] : []),
         ],
       },
@@ -196,7 +231,7 @@ export function createOptimizerOptions(
     include,
     esbuildOptions: {
       plugins: [
-        ...(filter ? [esbuildPlugin(resolver, projectRoot, fingerprint, filter)] : []),
+        ...(filter ? [esbuildPlugin(resolver, projectRoot, fingerprint, filter, options)] : []),
         ...(ssrExternal ? [esbuildExternalPlugin(ssrExternal)] : []),
       ],
     },

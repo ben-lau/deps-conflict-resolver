@@ -88,6 +88,7 @@ export interface ModuleRedirect {
 
 interface ResolverBuild {
   redirect(request: string, importer?: string): ModuleRedirect | null;
+  guardGeneration(): () => void;
   assertWatchCanWait(): void;
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
@@ -188,6 +189,7 @@ export class DepsConflictResolver {
     this.hooks = hooks;
     builds.set(this, {
       redirect: (request, importer) => this.redirect(request, importer),
+      guardGeneration: () => this.guardGeneration(),
       assertWatchCanWait: () => this.assertWatchCanWait(),
       refreshForWatch: (changes) => this.refreshForWatch(changes),
       closeWatch: () => {
@@ -1025,18 +1027,38 @@ export class DepsConflictResolver {
       this.preparing ||
       this.snapshotRevision !== this.preparation.revision
     ) {
-      const diagnostic: ResolverDiagnostic = {
-        code: 'PROJECT_STATE_CHANGED',
-        severity: 'error',
-        packageName: this.options.dependencies.join(', '),
-        message:
+      if (this.options.strict) {
+        throw this.projectChanged(
           'Dependency preparation is changing this project; wait for preparation to finish before resolving modules',
-      };
-      if (this.options.strict) throw new ResolutionError([diagnostic]);
+        );
+      }
       return false;
     }
     if (this.options.strict && this.snapshotError) throw this.snapshotError;
     return true;
+  }
+
+  private guardGeneration(): () => void {
+    this.snapshotCurrent();
+    const revision = this.preparation?.revision;
+    const generation = this.snapshotGeneration;
+    return () => {
+      if (revision !== this.preparation?.revision || generation !== this.snapshotGeneration) {
+        throw this.projectChanged('Dependencies changed during compilation. Run the build again.');
+      }
+      this.snapshotCurrent();
+    };
+  }
+
+  private projectChanged(message: string): ResolutionError {
+    return new ResolutionError([
+      {
+        code: 'PROJECT_STATE_CHANGED',
+        severity: 'error',
+        packageName: this.options.dependencies.join(', '),
+        message,
+      },
+    ]);
   }
 
   private logPeerWarnings(): void {

@@ -143,7 +143,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   let configured: ResolvedConfig | undefined;
   let filterRequests = true;
   let optimizerHookKey: string | undefined;
+  let hasResolveHook = false;
   let watch: BuildWatch | undefined;
+  const verifyBuild = new WeakMap<object, () => void>();
 
   const {
     enableInDev = true,
@@ -182,7 +184,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       } else {
         logger.info('No aliases needed');
       }
-      if (optimizerHookKey === undefined) return undefined;
+      if (optimizerHookKey === undefined && !resolverOptions.strict && !options.debug)
+        return undefined;
     } else {
       logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
     }
@@ -250,7 +253,18 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 
     // 创建 esbuild 插件用于预构建阶段的别名解析
-    const optimizerOptions = { filterRequests, hookKey: optimizerHookKey };
+    const optimizerOptions = {
+      filterRequests: !hasResolveHook,
+      hookKey: optimizerHookKey,
+      guardChanges: Boolean(resolverOptions.strict),
+      reportRun: options.debug
+        ? (engine: string, key: string, milliseconds: number) => {
+            config.logger.info(
+              `[${PLUGIN_NAME}] [DEBUG] Pre-bundle ${engine} ran in ${milliseconds.toFixed(1)}ms (key ${key})`,
+            );
+          }
+        : undefined,
+    };
     const optimizeDeps = createOptimizerOptions(
       activeResolver,
       projectRoot,
@@ -385,8 +399,10 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       } else {
         optimizerHookKey = undefined;
       }
-      // Strict snapshots can report a change on any eligible request.
-      filterRequests = !beforeResolve && !resolverOptions.strict;
+      hasResolveHook = Boolean(beforeResolve);
+      // Development serving has no artifact boundary. Strict requests there
+      // continue to verify the snapshot even for unrelated imports.
+      filterRequests = !hasResolveHook && (!resolverOptions.strict || config.command === 'build');
       const aliasPathMappings = active.getAliasPathMappings();
       if (filterRequests) requestFilter = aliasRequestFilter(aliasPathMappings);
       configured = config;
@@ -473,7 +489,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       // The target set can change between builds in the same environment.
       if (watch) return true;
       if (!filterRequests) return true;
-      if (!requestFilter) return false;
+      if (!requestFilter) return resolverOptions.strict ? true : false;
       // Vite caches compiled filters by plugin identity. Give each environment
       // a fresh hook so restarting a shared plugin can change the target set.
       const hook = plugin.resolveId;
@@ -481,6 +497,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       return {
         name: PLUGIN_NAME,
         enforce: 'pre',
+        buildStart: plugin.buildStart,
+        generateBundle: plugin.generateBundle,
         resolveId: { ...hook, filter: { id: requestFilter } },
       };
     },
@@ -489,9 +507,14 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       (event === 'delete' ? watch.removed : watch.modified).add(file);
     },
     async buildStart() {
-      if (!watch || !resolver || !configured || !this.meta.watchMode) return;
+      if (!resolver || configured?.command !== 'build') return;
       const active = resolver;
       const build = getResolverBuild(active);
+      const environment = this.environment ?? configured;
+      if (!watch || !this.meta.watchMode) {
+        if (resolverOptions.strict) verifyBuild.set(environment, build.guardGeneration());
+        return;
+      }
       const session = watch;
       const { first, modified, removed } = session;
       session.first = false;
@@ -516,12 +539,19 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         }
         session.fingerprint = fingerprint;
         if (filterRequests) requestFilter = aliasRequestFilter(active.getAliasPathMappings());
+        if (resolverOptions.strict) verifyBuild.set(environment, build.guardGeneration());
       } finally {
         const { analysis, watchFiles } = build.snapshot();
         session.files = new Set(watchFiles?.existing ?? analysis?.watchFiles ?? []);
         for (const file of session.files) this.addWatchFile(file);
         for (const file of watchFiles?.missing ?? []) this.addWatchFile(file);
       }
+    },
+    generateBundle: {
+      order: 'post',
+      handler() {
+        if (configured) verifyBuild.get(this.environment ?? configured)?.();
+      },
     },
     ...(viteMajor < 8
       ? ({
