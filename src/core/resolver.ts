@@ -11,7 +11,7 @@ import type {
 } from '../types/index';
 import { DEFAULT_NPM_REGISTRY } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
-import { findProjectRoot } from '../utils/fs';
+import { clearPackageJsonCache, findProjectRoot } from '../utils/fs';
 import { createEnvironmentDetector, EnvironmentDetector } from './environment-detector';
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
 import { createAliasManager, AliasManager } from './alias-manager';
@@ -171,6 +171,9 @@ export class DepsConflictResolver {
   }
 
   private async initializeGeneration(): Promise<void> {
+    // A previous generation may repopulate IO caches during peer linkage or
+    // adapter setup. Refresh before environment detection and the first read.
+    clearPackageJsonCache();
     logger.info('Initializing dependencies resolver...');
 
     // 验证项目根目录
