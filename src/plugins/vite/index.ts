@@ -1,4 +1,4 @@
-import type { Alias, Plugin, SSROptions, UserConfig } from 'vite';
+import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite';
 import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
@@ -7,7 +7,7 @@ import { createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
 import { createSsrExternalPolicy } from './ssr-external';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
-import { join, resolve as resolvePath } from 'node:path';
+import { join } from 'node:path';
 
 const logger = createLogger('vite-plugin');
 
@@ -77,6 +77,18 @@ export interface VitePluginOptions extends PluginConfig {
   ssr?: 'manual' | 'auto';
 }
 
+function mergeOptimizer(
+  target: NonNullable<UserConfig['optimizeDeps']>,
+  addition: NonNullable<UserConfig['optimizeDeps']>,
+): void {
+  const merged = mergeConfig(target, addition);
+  // Vite 8 exposes deprecated aliases as setters on this object. Reassign
+  // only our own additions so an old alias cannot overwrite the new value.
+  for (const key of Object.keys(addition)) Reflect.set(target, key, Reflect.get(merged, key));
+  if (target.include) target.include = [...new Set(target.include)];
+  if (target.exclude) target.exclude = [...new Set(target.exclude)];
+}
+
 /**
  * 创建 Vite 插件
  */
@@ -99,174 +111,203 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     logger.setLevel(LogLevel.ALL);
   }
 
+  function runtimeConfig(
+    config: ResolvedConfig,
+    activeResolver: DepsConflictResolver,
+  ): UserConfig | undefined {
+    const command = config.command;
+    // 获取分析结果
+    const analysisResult = activeResolver.getAnalysisResult();
+
+    if (!analysisResult || analysisResult.aliasMappings.length === 0) {
+      if (activeResolver.getDiagnostics().some((diagnostic) => diagnostic.severity === 'error')) {
+        logger.warn(
+          'No alias mappings available; inspect resolver diagnostics for unresolved conditions',
+        );
+      } else {
+        logger.info('No aliases needed');
+      }
+      return undefined;
+    }
+
+    // 获取别名路径映射并转换为 Vite 格式
+    const aliasPathMappings = activeResolver.getAliasPathMappings();
+    if (aliasPathMappings.length === 0) {
+      logger.info('No active aliases available');
+      return undefined;
+    }
+    const projectRoot = activeResolver.getOptions().projectRoot;
+
+    logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
+
+    // 收集需要包含在 optimizeDeps 中的别名包
+    const aliasPackages = Array.from(new Set(aliasPathMappings.map((m) => m.aliasName)));
+    const activeNames = new Set(aliasPackages);
+    const ssrPackages = new Set(aliasPackages);
+    // Pre-bundle roots, then let the optimizer follow actual imports. Eagerly
+    // including every declared transitive dependency can load unused native
+    // addons and optional platform packages before any SSR entry requests them.
+    const ssrOptimizerPackages = new Set(aliasPackages);
+    for (const mapping of analysisResult.aliasMappings) {
+      if (!activeNames.has(mapping.aliasName)) continue;
+      const excluded = new Set(resolverOptions.excludeRedirects?.[mapping.originalName] ?? []);
+      for (const name of [
+        ...mapping.allDependents,
+        ...mapping.usedBy.map((path) => path.split('>')[0]!),
+        ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
+      ]) {
+        if (!excluded.has(name)) ssrPackages.add(name);
+      }
+      for (const name of [
+        ...mapping.usedBy.map((path) => path.split('>')[0]!),
+        ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
+      ]) {
+        if (!excluded.has(name)) ssrOptimizerPackages.add(name);
+      }
+    }
+
+    const ssrEnvironment = config.environments?.ssr;
+    // Match Vite's legacy-SSR to environment merge, including array
+    // concatenation and true taking precedence over arrays for these keys.
+    const ssrResolve: Pick<SSROptions, 'external' | 'noExternal'> = mergeConfig(
+      { resolve: { external: config.ssr?.external, noExternal: config.ssr?.noExternal } },
+      { resolve: ssrEnvironment?.resolve ?? {} },
+    ).resolve;
+    const ssrOptimizer: NonNullable<SSROptions['optimizeDeps']> = mergeConfig(
+      config.ssr?.optimizeDeps ?? {},
+      ssrEnvironment?.optimizeDeps ?? {},
+    );
+    const external = ssrResolve.external;
+    const ssrExternal = Array.isArray(external) ? external : [];
+    const ssrExcluded = [...ssrExternal, ...(ssrOptimizer.exclude ?? [])];
+    const manualNoExternal = ssrResolve.noExternal;
+    const keepsInternal =
+      manualNoExternal === true
+        ? () => true
+        : manualNoExternal && (!Array.isArray(manualNoExternal) || manualNoExternal.length > 0)
+          ? createFilter(manualNoExternal, undefined, { resolve: false })
+          : () => false;
+    const allowsSsrOptimization = (name: string) =>
+      (external !== true || keepsInternal(name)) &&
+      !ssrExcluded.some((excluded) => name === excluded || name.startsWith(excluded + '/'));
+
+    logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
+
+    // 创建 esbuild 插件用于预构建阶段的别名解析
+    const optimizeDeps = createOptimizerOptions(activeResolver, projectRoot, viteVersion);
+    ssrExternalEnabled =
+      ssr === 'auto' && command === 'serve' && external === true && manualNoExternal !== true;
+    isSsrExternal = (packageName) => !keepsInternal(packageName);
+    const ssrOptimizeDeps = ssrExternalEnabled
+      ? createOptimizerOptions(activeResolver, projectRoot, viteVersion, {
+          isExternal: (packageName) => !keepsInternal(packageName),
+          resolve: (source, importer, isRequire) => {
+            if (!resolveSsrExternal) throw new Error('SSR external resolver is not initialized');
+            return resolveSsrExternal(source, importer, isRequire);
+          },
+        })
+      : optimizeDeps;
+
+    // 返回要合并的配置
+    return {
+      ...(ssr === 'auto'
+        ? {
+            ssr: {
+              noExternal:
+                ssrResolve.noExternal === true
+                  ? true
+                  : [...ssrPackages].filter(allowsSsrOptimization),
+              ...(command === 'serve'
+                ? {
+                    optimizeDeps: {
+                      ...ssrOptimizeDeps,
+                      include: [...ssrOptimizerPackages].filter(allowsSsrOptimization),
+                      // Vite's SSR optimizer is a separate bundler; forward
+                      // explicit externals so nested imports stay external too.
+                      exclude: ssrExternal,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      optimizeDeps,
+    };
+  }
+
   return {
     name: PLUGIN_NAME,
-
-    // 确保在 vite:resolve 之前运行
+    // Module resolution still runs before Vite's resolver. Preparation waits
+    // for all config hooks, including framework plugins that choose the root.
     enforce: 'pre',
-
-    /**
-     * 配置阶段 - 修改 Vite 配置
-     */
-    async config(config, { command }): Promise<UserConfig | null | void> {
-      // 根据模式决定是否启用
+    config(config, { command }) {
       isEnabled = (command === 'serve' && enableInDev) || (command === 'build' && enableInBuild);
+      resolver = null;
       ssrExternalEnabled = false;
       resolveSsrExternal = undefined;
       isSsrExternal = undefined;
-
-      if (!isEnabled) {
-        logger.info(`Plugin disabled for ${command} mode`);
-        return;
+      const [major, minor] = viteVersion.split('.').map(Number);
+      if (
+        isEnabled &&
+        ssr === 'auto' &&
+        command === 'serve' &&
+        (major! < 5 || (major === 5 && minor === 0)) &&
+        config.ssr?.optimizeDeps?.disabled === undefined
+      ) {
+        // Legacy Vite decides which optimizer plugins exist before configResolved.
+        // This default needs no project analysis and can be overridden by users.
+        return { ssr: { optimizeDeps: { disabled: false as const } } };
       }
-
-      logger.info('Initializing dependencies resolver...');
-
-      // 初始化解析器
+      return undefined;
+    },
+    async configResolved(config) {
+      // Vite 4 invokes the same plugin concurrently for its worker config.
+      // Workers resolve against the main host; they must not replace its state.
+      if (!isEnabled || config.isWorker) return;
       resolver = new DepsConflictResolver(
         {
           ...resolverOptions,
-          projectRoot: resolverOptions.projectRoot ?? resolvePath(config.root ?? process.cwd()),
+          projectRoot: resolverOptions.projectRoot ?? config.root,
         },
         hooks,
       );
       await resolver.initialize();
-
-      // 获取分析结果
-      const analysisResult = resolver.getAnalysisResult();
-
-      if (!analysisResult || analysisResult.aliasMappings.length === 0) {
-        if (resolver.getDiagnostics().some((diagnostic) => diagnostic.severity === 'error')) {
-          logger.warn(
-            'No alias mappings available; inspect resolver diagnostics for unresolved conditions',
-          );
-        } else {
-          logger.info('No aliases needed');
-        }
-        return;
+      const addition = runtimeConfig(config, resolver);
+      if (!addition) return;
+      // Do not reassign resolve.alias here: Vite already created its alias
+      // plugin. resolveId and the optimizer resolve through the final resolver.
+      const clientOptimizer = addition.optimizeDeps;
+      if (clientOptimizer) {
+        mergeOptimizer(config.optimizeDeps, clientOptimizer);
+        const environment = config.environments?.client;
+        if (environment && environment.optimizeDeps !== config.optimizeDeps)
+          mergeOptimizer((environment.optimizeDeps ??= {}), clientOptimizer);
       }
-
-      // 获取别名路径映射并转换为 Vite 格式
-      const aliasPathMappings = resolver.getAliasPathMappings();
-      if (aliasPathMappings.length === 0) {
-        logger.info('No active aliases available');
-        return;
-      }
-      const projectRoot = resolver.getOptions().projectRoot;
-      const aliases = createViteAliases(aliasPathMappings, projectRoot);
-
-      logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
-
-      // 收集需要包含在 optimizeDeps 中的别名包
-      const aliasPackages = Array.from(new Set(aliasPathMappings.map((m) => m.aliasName)));
-      const activeNames = new Set(aliasPackages);
-      const ssrPackages = new Set(aliasPackages);
-      // Pre-bundle roots, then let the optimizer follow actual imports. Eagerly
-      // including every declared transitive dependency can load unused native
-      // addons and optional platform packages before any SSR entry requests them.
-      const ssrOptimizerPackages = new Set(aliasPackages);
-      for (const mapping of analysisResult.aliasMappings) {
-        if (!activeNames.has(mapping.aliasName)) continue;
-        const excluded = new Set(resolverOptions.excludeRedirects?.[mapping.originalName] ?? []);
-        for (const name of [
-          ...mapping.allDependents,
-          ...mapping.usedBy.map((path) => path.split('>')[0]!),
-          ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
-        ]) {
-          if (!excluded.has(name)) ssrPackages.add(name);
-        }
-        for (const name of [
-          ...mapping.usedBy.map((path) => path.split('>')[0]!),
-          ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
-        ]) {
-          if (!excluded.has(name)) ssrOptimizerPackages.add(name);
+      if (addition.ssr) {
+        config.ssr.noExternal = mergeConfig(
+          { ssr: { noExternal: config.ssr.noExternal } },
+          { ssr: { noExternal: addition.ssr.noExternal } },
+        ).ssr.noExternal;
+        const environment = config.environments?.ssr;
+        if (environment)
+          (environment.resolve ??= {} as typeof environment.resolve).noExternal = mergeConfig(
+            { ssr: { noExternal: environment.resolve.noExternal } },
+            { ssr: { noExternal: addition.ssr.noExternal } },
+          ).ssr.noExternal;
+        const ssrOptimizer = addition.ssr.optimizeDeps;
+        if (ssrOptimizer) {
+          config.ssr.optimizeDeps ??= {};
+          mergeOptimizer(config.ssr.optimizeDeps, ssrOptimizer);
+          if (environment && environment.optimizeDeps !== config.ssr.optimizeDeps)
+            mergeOptimizer((environment.optimizeDeps ??= {}), ssrOptimizer);
         }
       }
-
-      const ssrEnvironment = config.environments?.ssr;
-      // Match Vite's legacy-SSR to environment merge, including array
-      // concatenation and true taking precedence over arrays for these keys.
-      const ssrResolve: Pick<SSROptions, 'external' | 'noExternal'> = mergeConfig(
-        { resolve: { external: config.ssr?.external, noExternal: config.ssr?.noExternal } },
-        { resolve: ssrEnvironment?.resolve ?? {} },
-      ).resolve;
-      const ssrOptimizer: NonNullable<SSROptions['optimizeDeps']> = mergeConfig(
-        config.ssr?.optimizeDeps ?? {},
-        ssrEnvironment?.optimizeDeps ?? {},
-      );
-      const external = ssrResolve.external;
-      const ssrExternal = Array.isArray(external) ? external : [];
-      const ssrExcluded = [...ssrExternal, ...(ssrOptimizer.exclude ?? [])];
-      const manualNoExternal = ssrResolve.noExternal;
-      const keepsInternal =
-        manualNoExternal === true
-          ? () => true
-          : manualNoExternal && (!Array.isArray(manualNoExternal) || manualNoExternal.length > 0)
-            ? createFilter(manualNoExternal, undefined, { resolve: false })
-            : () => false;
-      const allowsSsrOptimization = (name: string) =>
-        (external !== true || keepsInternal(name)) &&
-        !ssrExcluded.some((excluded) => name === excluded || name.startsWith(excluded + '/'));
-
-      logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
-
-      // 创建 esbuild 插件用于预构建阶段的别名解析
-      const optimizeDeps = createOptimizerOptions(resolver, projectRoot, viteVersion);
-      ssrExternalEnabled =
-        ssr === 'auto' && command === 'serve' && external === true && manualNoExternal !== true;
-      isSsrExternal = (packageName) => !keepsInternal(packageName);
-      const ssrOptimizeDeps = ssrExternalEnabled
-        ? createOptimizerOptions(resolver, projectRoot, viteVersion, {
-            isExternal: (packageName) => !keepsInternal(packageName),
-            resolve: (source, importer, isRequire) => {
-              if (!resolveSsrExternal) throw new Error('SSR external resolver is not initialized');
-              return resolveSsrExternal(source, importer, isRequire);
-            },
-          })
-        : optimizeDeps;
-      const [viteMajor, viteMinor] = viteVersion.split('.').map(Number);
-      const legacySsrOptimizer = viteMajor! < 5 || (viteMajor === 5 && viteMinor === 0);
-
-      // 返回要合并的配置
-      return {
-        ...(ssr === 'auto'
-          ? {
-              ssr: {
-                noExternal:
-                  ssrResolve.noExternal === true
-                    ? true
-                    : [...ssrPackages].filter(allowsSsrOptimization),
-                ...(command === 'serve'
-                  ? {
-                      optimizeDeps: {
-                        ...(legacySsrOptimizer && ssrOptimizer.disabled === undefined
-                          ? { disabled: false as const }
-                          : {}),
-                        ...ssrOptimizeDeps,
-                        include: [...ssrOptimizerPackages].filter(allowsSsrOptimization),
-                        // Vite's SSR optimizer is a separate bundler; forward
-                        // explicit externals so nested imports stay external too.
-                        exclude: ssrExternal,
-                      },
-                    }
-                  : {}),
-              },
-            }
-          : {}),
-        resolve: {
-          alias: aliases,
-        },
-        optimizeDeps,
-      };
-    },
-
-    configResolved(config) {
-      if (!ssrExternalEnabled) return;
-      resolveSsrExternal = createSsrExternalPolicy(
-        config,
-        resolver!.getOptions().projectRoot,
-        isSsrExternal!,
-      ).resolve;
+      if (ssrExternalEnabled)
+        resolveSsrExternal = createSsrExternalPolicy(
+          config,
+          resolver.getOptions().projectRoot,
+          isSsrExternal!,
+        ).resolve;
     },
 
     /**

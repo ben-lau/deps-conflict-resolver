@@ -1,3 +1,4 @@
+import type { Plugin, ResolvedConfig, UserConfig, ConfigEnv } from 'vite';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { depsConflictResolverVitePlugin, createViteAliases } from '../../../src/plugins/vite';
 import type { AliasPathMapping, AnalysisResult } from '../../../src/types';
@@ -19,6 +20,24 @@ vi.mock('../../../src/core/resolver', () => ({
     }
   },
 }));
+
+async function configure(
+  plugin: Plugin,
+  command: 'serve' | 'build' = 'build',
+  input: UserConfig = {},
+) {
+  const config = {
+    root: '/test',
+    resolve: {},
+    optimizeDeps: {},
+    ssr: {},
+    ...input,
+    command,
+  } as unknown as ResolvedConfig;
+  (plugin.config as (c: UserConfig, env: ConfigEnv) => void)(input, { command, mode: 'test' });
+  await (plugin.configResolved as (c: ResolvedConfig) => Promise<void>)(config);
+  return config;
+}
 
 describe('Vite Plugin', () => {
   beforeEach(() => {
@@ -70,330 +89,123 @@ describe('Vite Plugin', () => {
   });
 
   describe('depsConflictResolverVitePlugin', () => {
-    const mockAnalysisResult: AnalysisResult = {
+    const analysis: AnalysisResult = {
       aliasMappings: [
         {
           originalName: 'vue',
           aliasName: 'aliased-vue',
-          resolvedVersion: '2.7.0',
-          usedBy: ['some-package'],
-          allDependents: ['some-package'],
-          installSpec: 'aliased-vue@npm:vue@2.7.0',
+          resolvedVersion: '2.7.16',
+          usedBy: ['legacy'],
+          allDependents: ['legacy'],
+          installSpec: '',
         },
       ],
       missingFirstLevelPeers: [],
       peerConflicts: [],
       analyzedDependencies: new Map(),
     };
+    beforeEach(() => {
+      mockResolverInstance.initialize.mockResolvedValue(undefined);
+      mockResolverInstance.getAnalysisResult.mockReturnValue(analysis);
+      mockResolverInstance.getAliasPathMappings.mockReturnValue([
+        { originalName: 'vue', aliasName: 'aliased-vue', path: '/test/node_modules/aliased-vue' },
+      ]);
+      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
+      mockResolverInstance.resolveModule.mockReturnValue(null);
+    });
 
-    const mockAliasPathMappings: AliasPathMapping[] = [
-      {
-        aliasName: 'aliased-vue',
-        originalName: 'vue',
-        path: '/test/node_modules/aliased-vue',
-      },
-    ];
-
-    it('should create plugin with correct name', () => {
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
-      });
-
+    it('keeps pre resolution and waits for final configuration before initializing', async () => {
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
       expect(plugin.name).toBe('deps-conflict-resolver');
-    });
-
-    it('should enforce pre', () => {
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
-      });
-
       expect(plugin.enforce).toBe('pre');
+      (plugin.config as (c: UserConfig, env: ConfigEnv) => void)(
+        {},
+        { command: 'build', mode: 'test' },
+      );
+      expect(mockResolverInstance.initialize).not.toHaveBeenCalled();
+      const final = await configure(plugin);
+      expect(mockResolverInstance.initialize).toHaveBeenCalledTimes(1);
+      expect(final.optimizeDeps.include).toContain('aliased-vue');
     });
 
-    it('should disable plugin when enableInDev is false in dev mode', async () => {
-      mockResolverInstance.initialize.mockResolvedValue(undefined);
-      mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-      mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
-
+    it.each(['serve', 'build'] as const)('honors enable flags in %s', async (command) => {
       const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
+        dependencies: ['legacy'],
         enableInDev: false,
-      });
-
-      const config = plugin.config as (
-        config: unknown,
-        env: { command: string },
-      ) => Promise<unknown>;
-      const result = await config({}, { command: 'serve' });
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should disable plugin when enableInBuild is false in build mode', async () => {
-      mockResolverInstance.initialize.mockResolvedValue(undefined);
-      mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-      mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
-
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
         enableInBuild: false,
       });
-
-      const config = plugin.config as (
-        config: unknown,
-        env: { command: string },
-      ) => Promise<unknown>;
-      const result = await config({}, { command: 'build' });
-
-      expect(result).toBeUndefined();
+      const config = await configure(plugin, command);
+      expect(mockResolverInstance.initialize).not.toHaveBeenCalled();
+      expect(config.optimizeDeps.include).toBeUndefined();
+      const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
+      expect(resolveId('vue', '/test/index.js')).toBeNull();
     });
 
-    it('should return null when no aliases needed', async () => {
-      mockResolverInstance.initialize.mockResolvedValue(undefined);
+    it('preserves user configuration and includes only active aliases', async () => {
       mockResolverInstance.getAnalysisResult.mockReturnValue({
-        aliasMappings: [],
-        missingFirstLevelPeers: [],
-        peerConflicts: [],
-        packages: {},
-      });
-      mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
-      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
-
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
-      });
-
-      const config = plugin.config as (
-        config: unknown,
-        env: { command: string },
-      ) => Promise<unknown>;
-      const result = await config({}, { command: 'build' });
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should configure aliases and optimizeDeps when aliases exist', async () => {
-      mockResolverInstance.initialize.mockResolvedValue(undefined);
-      mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-      mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
-
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
-      });
-
-      const config = plugin.config as (
-        config: unknown,
-        env: { command: string },
-      ) => Promise<unknown>;
-      const result = (await config({}, { command: 'build' })) as {
-        resolve?: { alias?: unknown[] };
-        optimizeDeps?: { include?: string[] };
-      };
-
-      expect(result).toBeDefined();
-      expect(result?.resolve?.alias).toBeDefined();
-      expect(result?.optimizeDeps?.include).toContain('aliased-vue');
-    });
-
-    it('should include only active aliases in optimizeDeps after an install failure', async () => {
-      mockResolverInstance.initialize.mockResolvedValue(undefined);
-      mockResolverInstance.getAnalysisResult.mockReturnValue({
-        ...mockAnalysisResult,
+        ...analysis,
         aliasMappings: [
-          ...mockAnalysisResult.aliasMappings,
+          ...analysis.aliasMappings,
           {
-            originalName: 'vue',
-            aliasName: 'aliased-vue1',
-            resolvedVersion: '1.7.0',
-            usedBy: ['very-legacy-package'],
-            allDependents: ['very-legacy-package'],
-            installSpec: 'aliased-vue1@npm:vue@1.7.0',
+            ...analysis.aliasMappings[0],
+            aliasName: 'failed-vue',
+            installSpec: 'failed-vue@npm:vue@1.0.0',
           },
         ],
       });
-      mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
-
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+      const config = await configure(plugin, 'serve', {
+        optimizeDeps: { include: ['manual'] },
+        resolve: { alias: { custom: '/custom' } },
       });
-
-      const config = plugin.config as (
-        config: unknown,
-        env: { command: string },
-      ) => Promise<unknown>;
-      const result = (await config({}, { command: 'build' })) as {
-        optimizeDeps?: { include?: string[] };
-      };
-
-      expect(result.optimizeDeps?.include).toEqual(['aliased-vue']);
+      expect(config.optimizeDeps.include).toEqual(['manual', 'aliased-vue']);
+      expect(config.resolve.alias).toEqual({ custom: '/custom' });
     });
 
-    describe('resolveId', () => {
-      it.each([
-        { desc: 'relative paths', source: './relative/path' },
-        { desc: 'absolute paths', source: '/absolute/path' },
-        { desc: 'virtual modules', source: '\0virtual:module' },
-      ])('should skip $desc', async ({ source }) => {
-        mockResolverInstance.initialize.mockResolvedValue(undefined);
-        mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-        mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-        mockResolverInstance.getOptions.mockReturnValue({
-          projectRoot: '/test',
-        });
-        mockResolverInstance.resolveModule.mockReturnValue(null);
-
-        const plugin = depsConflictResolverVitePlugin({
-          dependencies: ['vue'],
-        });
-        const config = plugin.config as (
-          config: unknown,
-          env: { command: string },
-        ) => Promise<unknown>;
-        await config({}, { command: 'build' });
-
-        const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
-        expect(resolveId(source, '/some/file.js')).toBeNull();
-      });
-
-      it('should return null when resolver returns null', async () => {
-        mockResolverInstance.initialize.mockResolvedValue(undefined);
-        mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-        mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-        mockResolverInstance.getOptions.mockReturnValue({
-          projectRoot: '/test',
-        });
-        mockResolverInstance.resolveModule.mockReturnValue(null);
-
-        const plugin = depsConflictResolverVitePlugin({
-          dependencies: ['vue'],
-        });
-        const config = plugin.config as (
-          config: unknown,
-          env: { command: string },
-        ) => Promise<unknown>;
-        await config({}, { command: 'build' });
-
-        const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
-        expect(resolveId('lodash', '/some/file.js')).toBeNull();
-      });
-
-      it('should resolve module when resolver returns result', async () => {
-        mockResolverInstance.initialize.mockResolvedValue(undefined);
-        mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-        mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-        mockResolverInstance.getOptions.mockReturnValue({
-          projectRoot: '/test',
-        });
-        mockResolverInstance.resolveModule.mockReturnValue('aliased-vue');
-
-        const plugin = depsConflictResolverVitePlugin({
-          dependencies: ['vue'],
-        });
-
-        const config = plugin.config as (
-          config: unknown,
-          env: { command: string },
-        ) => Promise<unknown>;
-        await config({}, { command: 'build' });
-
-        // Mock this.resolve
-        const mockThis = {
-          resolve: vi.fn().mockResolvedValue({ id: '/resolved/aliased-vue' }),
-        };
-
-        const resolveId = (
-          plugin.resolveId as unknown as (
-            this: typeof mockThis,
-            source: string,
-            importer?: string,
-          ) => unknown
-        ).bind(mockThis);
-        await resolveId('vue', '/test/node_modules/some-lib/index.js');
-
-        expect(mockResolverInstance.resolveModule).toHaveBeenCalledWith(
-          'vue',
-          '/test/node_modules/some-lib/index.js',
-        );
-        expect(mockThis.resolve).toHaveBeenCalled();
-      });
-
-      it('should return null when plugin is not enabled', async () => {
-        mockResolverInstance.initialize.mockResolvedValue(undefined);
-        mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-        mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-        mockResolverInstance.getOptions.mockReturnValue({
-          projectRoot: '/test',
-        });
-
-        const plugin = depsConflictResolverVitePlugin({
-          dependencies: ['vue'],
-          enableInDev: false,
-        });
-
-        // Initialize in dev mode where plugin is disabled
-        const config = plugin.config as (
-          config: unknown,
-          env: { command: string },
-        ) => Promise<unknown>;
-        await config({}, { command: 'serve' });
-
-        const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
-        const result = resolveId('vue', '/some/file.js');
-
-        expect(result).toBeNull();
-      });
-
-      it('should return null when no importer is provided', async () => {
-        mockResolverInstance.initialize.mockResolvedValue(undefined);
-        mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
-        mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
-        mockResolverInstance.getOptions.mockReturnValue({
-          projectRoot: '/test',
-        });
-        mockResolverInstance.resolveModule.mockReturnValue(null);
-
-        const plugin = depsConflictResolverVitePlugin({
-          dependencies: ['vue'],
-        });
-
-        const config = plugin.config as (
-          config: unknown,
-          env: { command: string },
-        ) => Promise<unknown>;
-        await config({}, { command: 'build' });
-
-        const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
-        const result = resolveId('vue');
-
-        expect(result).toBeNull();
-      });
-    });
-
-    it('should enable debug logging when debug option is true', async () => {
-      mockResolverInstance.initialize.mockResolvedValue(undefined);
-      mockResolverInstance.getAnalysisResult.mockReturnValue({
-        aliasMappings: [],
-      });
+    it('leaves optimization configuration alone when no mappings are needed', async () => {
+      mockResolverInstance.getAnalysisResult.mockReturnValue({ ...analysis, aliasMappings: [] });
       mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
-      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
+      const config = await configure(depsConflictResolverVitePlugin({ dependencies: ['legacy'] }));
+      expect(config.optimizeDeps.include).toBeUndefined();
+    });
 
-      const plugin = depsConflictResolverVitePlugin({
-        dependencies: ['vue'],
-        debug: true,
-      });
+    it.each(['./relative', '/absolute', '\0virtual'])(
+      'leaves %s to the native resolver',
+      async (source) => {
+        const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+        await configure(plugin);
+        const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
+        expect(resolveId(source, '/test/index.js')).toBeNull();
+        expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
+      },
+    );
 
-      const config = plugin.config as (
-        config: unknown,
-        env: { command: string },
+    it('leaves unmatched requests to the native resolver', async () => {
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+      await configure(plugin);
+      const resolveId = plugin.resolveId as (source: string, importer?: string) => unknown;
+      expect(resolveId('unrelated', '/test/index.js')).toBeNull();
+    });
+
+    it('delegates redirected requests from the final host context and preserves native results', async () => {
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+      await configure(plugin);
+      mockResolverInstance.resolveModule.mockReturnValue('aliased-vue/feature');
+      const result = { id: '/resolved/feature.js', moduleSideEffects: false };
+      const context = { resolve: vi.fn().mockResolvedValue(result) };
+      const resolveId = plugin.resolveId as unknown as (
+        this: typeof context,
+        source: string,
+        importer: string,
+        options: object,
       ) => Promise<unknown>;
-      await config({}, { command: 'build' });
-
-      // Should still work with debug enabled
-      expect(plugin.name).toBe('deps-conflict-resolver');
+      expect(await resolveId.call(context, 'vue/feature', '/linked/index.js', { ssr: true })).toBe(
+        result,
+      );
+      expect(context.resolve).toHaveBeenCalledWith('aliased-vue/feature', '/test/package.json', {
+        ssr: true,
+        skipSelf: true,
+      });
     });
   });
 });
