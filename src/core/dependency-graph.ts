@@ -1,5 +1,6 @@
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 
 export interface InstalledPackageNode {
   id: string;
@@ -90,6 +91,7 @@ export function buildInstalledDependencyGraph(
   projectRoot: string,
   workspaceRoot: string | null = null,
   watchFiles?: Set<string>,
+  peerOverrides?: Record<string, Record<string, string>>,
 ): InstalledDependencyGraph {
   const nodes = new Map<string, InstalledPackageNode>();
   const roots = new Set<string>();
@@ -129,7 +131,9 @@ export function buildInstalledDependencyGraph(
       ...packageJson.dependencies,
       ...packageJson.optionalDependencies,
     });
-    const peerDependencyNames = Object.keys(packageJson.peerDependencies ?? {});
+    const peerDependencyNames = [
+      ...getEffectivePeerDependencies(packageJson, item.name, peerOverrides).keys(),
+    ];
     const node: InstalledPackageNode = {
       id: normalizedPath,
       name: item.name,

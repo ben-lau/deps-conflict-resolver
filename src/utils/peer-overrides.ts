@@ -1,10 +1,17 @@
 import semver from 'semver';
+import type { PackageJson } from '../types/index';
 import { isValidVersion } from './semver';
 
 export interface ParsedPeerOverrideKey {
   packageName: string;
   versionRange: string | null;
   exactVersion: boolean;
+}
+
+export interface EffectivePeerEntry {
+  range: string;
+  optional: boolean;
+  overridden: boolean;
 }
 
 /**
@@ -148,4 +155,46 @@ export function resolvePeerOverridesForPackage(
     };
   }
   return resolvePeerOverrides(peerOverrides, packageName ?? manifestName, version);
+}
+
+/**
+ * Compute the effective peerDependencies map for a package manifest after
+ * applying matching `peerOverrides` (supporting `<name>` and `<name>@<range>`).
+ * Explicit overrides replace declared ranges, promote optional peers to
+ * required, and supply omitted peers.
+ */
+export function getEffectivePeerDependencies(
+  manifest:
+    | Pick<PackageJson, 'name' | 'version' | 'peerDependencies' | 'peerDependenciesMeta'>
+    | null
+    | undefined,
+  lookupName?: string,
+  peerOverrides?: Record<string, Record<string, string>>,
+  versionOverride?: string,
+): Map<string, EffectivePeerEntry> {
+  const result = new Map<string, EffectivePeerEntry>();
+  for (const [peerName, range] of Object.entries(manifest?.peerDependencies ?? {})) {
+    if (!range) continue;
+    result.set(peerName, {
+      range,
+      optional: Boolean(manifest?.peerDependenciesMeta?.[peerName]?.optional),
+      overridden: false,
+    });
+  }
+
+  const overrides = resolvePeerOverridesForPackage(
+    peerOverrides,
+    { packageName: lookupName, manifestName: manifest?.name },
+    versionOverride ?? manifest?.version,
+  );
+  for (const [peerName, range] of Object.entries(overrides ?? {})) {
+    if (!range) continue;
+    result.set(peerName, {
+      range,
+      optional: false,
+      overridden: true,
+    });
+  }
+
+  return result;
 }

@@ -31,6 +31,7 @@ import {
 import { parseNpmAlias } from '../utils/version-spec';
 import {
   findInvalidPeerOverrideKeys,
+  getEffectivePeerDependencies,
   resolvePeerOverridesForPackage,
 } from '../utils/peer-overrides';
 import { clearNpmRegistryCache } from './npm-registry';
@@ -334,6 +335,7 @@ export class DependencyAnalyzer {
         this.options.projectRoot,
         workspaceRoot,
         this.watchFiles,
+        this.options.peerOverrides,
       );
       for (const node of this.dependencyGraph.nodes.values()) {
         this.watchFiles.add(join(node.packagePath, 'package.json'));
@@ -479,7 +481,7 @@ export class DependencyAnalyzer {
       const currentPath = [...path, name];
       const depsToCheck = [
         ...Object.keys({ ...pkgJson.dependencies, ...pkgJson.optionalDependencies }),
-        ...Object.keys(pkgJson.peerDependencies ?? {}),
+        ...getEffectivePeerDependencies(pkgJson, name, this.options.peerOverrides).keys(),
       ];
 
       for (const depName of depsToCheck) {
@@ -630,19 +632,14 @@ export class DependencyAnalyzer {
       packagePath?: string,
     ) => {
       const packageName = path.at(-1);
-      const overrides = resolvePeerOverridesForPackage(
+      const effectivePeers = getEffectivePeerDependencies(
+        manifest,
+        packageName,
         this.options.peerOverrides,
-        { packageName, manifestName: manifest.name },
-        manifest.version,
       );
-      const mergedPeers: Record<string, string> = {
-        ...manifest.peerDependencies,
-        ...overrides,
-      };
 
-      for (const [peerName, peerRange] of Object.entries(mergedPeers)) {
-        const isOverridden = overrides !== undefined && Object.hasOwn(overrides, peerName);
-        if (!isOverridden && manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
+      for (const [peerName, { range: peerRange, optional }] of effectivePeers) {
+        if (optional) continue;
 
         const existing = peerDepsMap.get(peerName) ?? [];
         existing.push({
@@ -1730,7 +1727,11 @@ export class DependencyAnalyzer {
         for (const depName of Object.keys(analyzed.dependencies)) {
           stack.push({ name: depName, baseDir: currentBaseDir });
         }
-        for (const peerName of Object.keys(analyzed.peerDependencies)) {
+        for (const peerName of getEffectivePeerDependencies(
+          analyzed,
+          name,
+          this.options.peerOverrides,
+        ).keys()) {
           stack.push({ name: peerName, baseDir: currentBaseDir });
         }
         continue;
@@ -1766,12 +1767,15 @@ export class DependencyAnalyzer {
       collected.add(name);
 
       const deps = { ...pkgJson.dependencies, ...pkgJson.optionalDependencies };
-      const peerDeps = pkgJson.peerDependencies ?? {};
 
       for (const depName of Object.keys(deps)) {
         stack.push({ name: depName, baseDir: packagePath });
       }
-      for (const peerName of Object.keys(peerDeps)) {
+      for (const peerName of getEffectivePeerDependencies(
+        pkgJson,
+        name,
+        this.options.peerOverrides,
+      ).keys()) {
         stack.push({ name: peerName, baseDir: packagePath });
       }
     }

@@ -928,6 +928,57 @@ describe('resolution correctness with installed packages', () => {
     expect(externalLeafConfig.ssr.optimizeDeps?.include).not.toContain('ws-b > legacy');
   });
 
+  it('traverses omitted non-conflicting peers supplied by peerOverrides and skips dependencies-pruned nodes in shared peer checks', async () => {
+    const root = project({
+      dependencies: {
+        'legacy-entry': '1.0.0',
+        'modern-entry': '1.0.0',
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.6.14',
+      },
+    });
+    const legacyEntry = pkg(root, 'legacy-entry', {
+      dependencies: { 'vue3-wrapper': '1.0.0' },
+      // Deliberately omits both vue and peer-ui from declared peerDependencies
+      peerDependencies: {},
+    });
+    const peerUi = pkg(root, 'peer-ui', {
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    const modernEntry = pkg(root, 'modern-entry', {
+      dependencies: { 'vue3-wrapper': '1.0.0' },
+      peerDependencies: { vue: '^3.0.0' },
+    });
+    // Pruned from vue2 via dependencies.vue: ^3.0.0, so inner-shared must not
+    // receive a false SHARED_PEER_CONTEXT warning across legacy-entry and modern-entry.
+    const vue3Wrapper = pkg(root, 'vue3-wrapper', {
+      dependencies: { vue: '^3.0.0', 'inner-shared': '1.0.0' },
+    });
+    const innerShared = pkg(root, 'inner-shared', {
+      peerDependencies: { vue: '>=2.5.0' },
+    });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.6.14' });
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['legacy-entry', 'modern-entry']),
+      peerOverrides: {
+        'legacy-entry@1.x': { vue: '^2.6.0', 'peer-ui': '^1.0.0' },
+      },
+      offline: true,
+      strict: false,
+    });
+
+    expect(resolver.resolveModule('vue', join(legacyEntry, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(modernEntry, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(peerUi, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue', join(vue3Wrapper, 'index.js'))).toBeNull();
+    expect(resolver.resolveModule('vue', join(innerShared, 'index.js'))).toBeNull();
+    expect(
+      resolver.getDiagnostics().filter((diagnostic) => diagnostic.code === 'SHARED_PEER_CONTEXT'),
+    ).toEqual([]);
+  });
+
   it('preserves descendants with private nested incompatible versions or aliased dependencies', async () => {
     const root = project({
       dependencies: {

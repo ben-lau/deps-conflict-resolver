@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   findInvalidPeerOverrideKeys,
+  getEffectivePeerDependencies,
   parsePeerOverrideKey,
   resolvePeerOverrides,
   resolvePeerOverridesForPackage,
@@ -137,6 +138,39 @@ describe('peer-overrides utils', () => {
       ).toEqual({
         vue: '^2.7.0',
         'vue-router': '^3.0.0',
+      });
+    });
+  });
+
+  describe('getEffectivePeerDependencies', () => {
+    it('merges declared peers, optional meta, and versioned peerOverrides into a single map', () => {
+      const manifest = {
+        name: '@rili/ui',
+        version: '1.16.220-feat-kso.417',
+        peerDependencies: {
+          vue: '>=2.5.17',
+          'vue-router': '>=3.0.0',
+          vuex: '^3.0.0',
+        },
+        peerDependenciesMeta: {
+          'vue-router': { optional: true },
+          vuex: { optional: true },
+        },
+      };
+
+      const peers = getEffectivePeerDependencies(manifest, '@rili/ui', {
+        '@rili/ui@1.x': {
+          vue: '>=2.5.17 <3',
+          'vue-router': '^3.6.0',
+          'omitted-peer': '^1.0.0',
+        },
+      });
+
+      expect(Object.fromEntries(peers)).toEqual({
+        vue: { range: '>=2.5.17 <3', optional: false, overridden: true },
+        'vue-router': { range: '^3.6.0', optional: false, overridden: true },
+        vuex: { range: '^3.0.0', optional: true, overridden: false },
+        'omitted-peer': { range: '^1.0.0', optional: false, overridden: true },
       });
     });
   });

@@ -3,7 +3,7 @@ import type { AliasMapping, PackageJson, ResolvedOptions, ResolverDiagnostic } f
 import type { InstalledDependencyGraph } from './dependency-graph';
 import { AliasManager } from './alias-manager';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
-import { resolvePeerOverridesForPackage } from '../utils/peer-overrides';
+import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
 
 interface Provider {
@@ -86,19 +86,19 @@ export function validateSharedPeerContexts(
       const node = graph.nodes.get(nodeId);
       if (!node) continue;
       const manifest = readManifest(node.packagePath);
-      const overrideRange = resolvePeerOverridesForPackage(
+      const effectivePeer = getEffectivePeerDependencies(
+        manifest,
+        node.name,
         options.peerOverrides,
-        { packageName: node.name, manifestName: manifest?.name },
-        manifest?.version ?? node.version,
-      )?.[peer];
-      const range = overrideRange ?? manifest?.peerDependencies?.[peer];
-      if (!range || (!overrideRange && manifest?.peerDependenciesMeta?.[peer]?.optional)) continue;
+        node.version,
+      ).get(peer);
+      if (!effectivePeer || effectivePeer.optional) continue;
       candidateRoots.push({
         nodeId,
         nodeName: node.name,
         packagePath: node.packagePath,
         requestPath,
-        range,
+        range: effectivePeer.range,
       });
     }
     if (new Set(candidateRoots.map((entry) => entry.nodeId)).size < 2) continue;
@@ -171,16 +171,17 @@ export function validateSharedPeerContexts(
       )
         continue;
       const manifest = readManifest(node.packagePath);
-      const overrideRange = resolvePeerOverridesForPackage(
+      const effectivePeer = getEffectivePeerDependencies(
+        manifest,
+        node.name,
         options.peerOverrides,
-        { packageName: node.name, manifestName: manifest?.name },
-        manifest?.version ?? node.version,
-      )?.[peer];
-      const range = overrideRange ?? manifest?.peerDependencies?.[peer];
-      if (range && !satisfies(context.provider.version, range)) continue;
+        node.version,
+      ).get(peer);
+      const declaredRange = effectivePeer?.range ?? manifest?.dependencies?.[peer];
+      if (declaredRange && !satisfies(context.provider.version, declaredRange)) continue;
       if (
-        range &&
-        (overrideRange !== undefined || !manifest?.peerDependenciesMeta?.[peer]?.optional) &&
+        effectivePeer &&
+        !effectivePeer.optional &&
         !aliasPaths.has(node.packagePath) &&
         !options.includeRedirects[peer]?.includes(node.name)
       ) {
