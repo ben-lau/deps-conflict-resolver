@@ -5,18 +5,29 @@ import {
   writeFileSync,
   rmSync,
   realpathSync,
+  readdirSync,
+  lstatSync,
   statSync,
   symlinkSync,
+  unlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { AliasManager } from '../../src/core/alias-manager';
 import type { AliasMapping, ResolvedOptions } from '../../src/types';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, realpathSync: vi.fn(actual.realpathSync), statSync: vi.fn(actual.statSync) };
+  return {
+    ...actual,
+    realpathSync: Object.assign(vi.fn(actual.realpathSync), {
+      native: vi.fn(actual.realpathSync.native),
+    }),
+    readdirSync: vi.fn(actual.readdirSync),
+    lstatSync: vi.fn(actual.lstatSync),
+    statSync: vi.fn(actual.statSync),
+  };
 });
 
 function mapping(
@@ -133,6 +144,168 @@ describe('alias resolution across installation layouts', () => {
     ).toBeNull();
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves the Node resolution of parent segments inside a directory link',
+    () => {
+      const lexical = writePackage('node_modules/pkg', 'pkg');
+      const physical = writePackage('node_modules/store/pkg', 'pkg');
+      const installed = dirname(lexical);
+      mkdirSync(join(installed, 'store/inside'));
+      symlinkSync('store/inside', join(installed, 'jump'), 'dir');
+      const linked = join(installed, 'linked');
+      symlinkSync('jump/../pkg', linked, 'dir');
+
+      const resolver = manager([mapping('vue2', [lexical]), mapping('vue3', [physical])]);
+      expect(resolver.resolveModule({ request: 'vue', importer: join(linked, 'index.js') })).toBe(
+        'vue2',
+      );
+    },
+  );
+
+  it('shares a decision across installed files and resolves a file symlink independently', () => {
+    const legacy = writePackage('node_modules/legacy', 'legacy');
+    const target = writePackage('node_modules/target', 'target');
+    const source = join(legacy, 'src');
+    mkdirSync(source);
+    const files = Array.from({ length: 20 }, (_, index) => join(source, 'entry-' + index + '.js'));
+    for (const file of files) writeFileSync(file, '');
+    const linkedFile = join(source, 'linked.js');
+    if (process.platform !== 'win32') symlinkSync(join(target, 'index.js'), linkedFile, 'file');
+
+    const resolver = manager([mapping('vue2', [legacy]), mapping('vue3', [target])]);
+    vi.clearAllMocks();
+    for (const importer of files)
+      expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+    expect(readdirSync).not.toHaveBeenCalled();
+    expect(realpathSync.native).not.toHaveBeenCalled();
+    expect(vi.mocked(realpathSync).mock.calls.length).toBeLessThanOrEqual(4);
+    if (process.platform !== 'win32') {
+      expect(resolver.resolveModule({ request: 'vue', importer: linkedFile })).toBe('vue3');
+      expect(resolver.resolveModule({ request: 'vue', importer: linkedFile + '?raw' })).toBe(
+        'vue3',
+      );
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'checks file type on the first request after warming its directory',
+    () => {
+      const legacy = writePackage('node_modules/legacy', 'legacy');
+      const target = writePackage('node_modules/target', 'target');
+      const source = join(legacy, 'src');
+      mkdirSync(source);
+      const files = Array.from({ length: 6 }, (_, index) => join(source, `entry-${index}.js`));
+      for (const file of files) writeFileSync(file, '');
+      const resolver = manager([mapping('vue2', [legacy]), mapping('vue3', [target])]);
+      for (const importer of files.slice(0, -1)) {
+        expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+      }
+
+      const replaced = files.at(-1)!;
+      unlinkSync(replaced);
+      symlinkSync(join(target, 'index.js'), replaced, 'file');
+      expect(resolver.resolveModule({ request: 'vue', importer: replaced })).toBe('vue3');
+    },
+  );
+
+  it('only probes requested files in a directory with sparse imports', () => {
+    const legacy = writePackage('node_modules/legacy', 'legacy');
+    const files = Array.from({ length: 1024 }, (_, index) => join(legacy, `entry-${index}.js`));
+    for (const file of files) writeFileSync(file, '');
+    const resolver = manager([mapping('vue2', [legacy])]);
+    vi.clearAllMocks();
+
+    for (const importer of files.slice(0, 2)) {
+      expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+    }
+    expect(readdirSync).not.toHaveBeenCalled();
+    expect(lstatSync).not.toHaveBeenCalled();
+    expect(vi.mocked(realpathSync).mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it.each(['', '?vue&type=script'])(
+    'keeps distributed importer paths warm across multiple alias targets (%s)',
+    (suffix) => {
+      const legacy = writePackage('node_modules/legacy', 'legacy');
+      const files: string[] = [];
+      for (let index = 0; index < 1_300; index++) {
+        const directory = join(legacy, `component-${index}`);
+        mkdirSync(directory);
+        for (const name of ['first.js', 'second.js']) {
+          const importer = join(directory, name);
+          writeFileSync(importer, '');
+          files.push(importer + suffix);
+        }
+      }
+      const resolver = manager([
+        mapping('vue2', [legacy]),
+        { ...mapping('renderer1', [legacy]), originalName: 'renderer' },
+      ]);
+      const resolveAll = () => {
+        for (const importer of files) {
+          expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+          expect(resolver.resolveModule({ request: 'renderer', importer })).toBe('renderer1');
+        }
+      };
+      resolveAll();
+      vi.clearAllMocks();
+      resolveAll();
+      expect(vi.mocked(readdirSync).mock.calls).toHaveLength(0);
+      expect(vi.mocked(lstatSync).mock.calls).toHaveLength(0);
+      expect(vi.mocked(realpathSync).mock.calls).toHaveLength(0);
+      expect(vi.mocked(realpathSync.native).mock.calls).toHaveLength(0);
+    },
+  );
+
+  it('keeps active directory decisions warm during a sweep of small component directories', () => {
+    const legacy = writePackage('node_modules/legacy', 'legacy');
+    const hotDirectory = join(legacy, 'common');
+    mkdirSync(hotDirectory);
+    const importers: string[] = [];
+    for (let index = 0; index < 1_100; index++) {
+      const directory = index % 16 === 0 ? hotDirectory : join(legacy, 'component-' + index);
+      if (directory !== hotDirectory) mkdirSync(directory);
+      for (let file = 0; file < 3; file++) {
+        const importer = join(directory, `module-${index}-${file}.mjs`);
+        writeFileSync(importer, '');
+        importers.push(importer);
+      }
+    }
+
+    const resolver = manager([mapping('vue2', [legacy])]);
+    vi.clearAllMocks();
+    for (const importer of importers)
+      expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+    expect(
+      vi.mocked(realpathSync).mock.calls.filter(([directory]) => directory === hotDirectory),
+    ).toHaveLength(1);
+
+    vi.clearAllMocks();
+    for (const importer of importers)
+      expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+    expect(readdirSync).not.toHaveBeenCalled();
+    expect(lstatSync).not.toHaveBeenCalled();
+    expect(realpathSync).not.toHaveBeenCalled();
+    expect(realpathSync.native).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps file-level matching for literal backslashes in a filename',
+    () => {
+      const legacy = writePackage('node_modules/legacy', 'legacy');
+      const sibling = join(legacy, 'sibling.mjs');
+      const escaped = join(legacy, 'node_modules\\excluded\\entry.mjs');
+      writeFileSync(sibling, '');
+      writeFileSync(escaped, '');
+      options.excludeRedirects = { vue: ['excluded'] };
+      const resolver = manager([mapping('vue2', [legacy])]);
+
+      for (const importer of [join(legacy, 'index.js'), sibling])
+        expect(resolver.resolveModule({ request: 'vue', importer })).toBe('vue2');
+      expect(resolver.resolveModule({ request: 'vue', importer: escaped })).toBeNull();
+    },
+  );
+
   it.each(['', '?raw#fragment'])(
     'performs no filesystem calls for repeated warm resolutions: %s',
     (suffix) => {
@@ -150,6 +323,9 @@ describe('alias resolution across installation layouts', () => {
       }
       expect(vi.mocked(realpathSync).mock.calls.length).toBe(calls);
       expect(vi.mocked(statSync).mock.calls.length).toBe(statCalls);
+      expect(realpathSync.native).not.toHaveBeenCalled();
+      expect(readdirSync).not.toHaveBeenCalled();
+      expect(lstatSync).not.toHaveBeenCalled();
     },
   );
 
@@ -167,6 +343,39 @@ describe('alias resolution across installation layouts', () => {
           instance.resolveModule({ request: 'vue', importer: join(legacy, 'index.js') + suffix }),
         ).toBe('vue2');
       }
+    },
+  );
+
+  it('reuses the confirmed file path for different queries on the same importer', () => {
+    const legacy = writePackage('node_modules/legacy', 'legacy');
+    const importer = join(legacy, 'Comp.vue');
+    writeFileSync(importer, '');
+    const resolver = manager([mapping('vue2', [legacy])]);
+    vi.clearAllMocks();
+
+    for (const suffix of ['?vue&type=script', '?vue&type=template', '?vue&type=style']) {
+      expect(resolver.resolveModule({ request: 'vue', importer: importer + suffix })).toBe('vue2');
+    }
+    expect(vi.mocked(realpathSync).mock.calls.filter(([path]) => path === importer)).toHaveLength(
+      1,
+    );
+  });
+
+  it.skipIf(process.platform === 'win32').each(['#', '?'])(
+    'uses the literal importer file when its name contains %s',
+    (marker) => {
+      const legacy = writePackage('node_modules/legacy', 'legacy');
+      const target = writePackage('node_modules/target', 'target');
+      const source = join(legacy, 'src');
+      mkdirSync(source);
+      const importer = join(source, 'Comp.vue');
+      const literal = importer + marker + 'literal';
+      writeFileSync(importer, '');
+      symlinkSync(join(target, 'index.js'), literal, 'file');
+      const resolver = manager([mapping('vue2', [legacy]), mapping('vue3', [target])]);
+
+      expect(resolver.resolveModule({ request: 'vue', importer: literal })).toBe('vue3');
+      expect(resolver.resolveModule({ request: 'vue', importer: literal + '?raw' })).toBe('vue3');
     },
   );
 

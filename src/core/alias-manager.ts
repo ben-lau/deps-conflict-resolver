@@ -6,8 +6,8 @@ import type {
   ResolutionExplanation,
   ResolverDiagnostic,
 } from '../types/index';
-import { realpathSync, statSync } from 'node:fs';
-import { join, posix } from 'path';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, posix } from 'path';
 import { createLogger } from '../utils/logger';
 import { findPackagePath, getCachedRealPath, readPackageJsonCached } from '../utils/fs';
 import { LruCache } from '../utils/lru-cache';
@@ -47,6 +47,15 @@ interface ImporterInfo {
   paths: string[];
   instances: PackageInstance[];
 }
+interface ResolvedPath {
+  paths: string[];
+  realPath: string | undefined;
+}
+interface ImporterDirectory {
+  key: string;
+  realPath: string;
+  info: ImporterInfo;
+}
 interface RuleMatch {
   rule: AliasRule;
   specificity: number;
@@ -66,6 +75,9 @@ interface Decision {
 const NO_RULE: Decision = { reason: 'no-rule', aliases: [], matchedPaths: [] };
 const NO_IMPORTER: Decision = { reason: 'no-importer', aliases: [], matchedPaths: [] };
 const UNMATCHED: Decision = { reason: 'unmatched', aliases: [], matchedPaths: [] };
+const MAX_IMPORTER_DIRECTORIES = 4096;
+const MAX_IMPORTER_DIRECTORY_FILES = 64_000;
+const MIN_DIRECTORY_IMPORTERS = 4;
 
 function normalizePath(path: string): string {
   const normalized = posix.normalize(path.replace(/\\/g, '/'));
@@ -75,6 +87,14 @@ function normalizePath(path: string): string {
 function isWithin(path: string, directory: string): boolean {
   return (
     path === directory || path.startsWith(directory.endsWith('/') ? directory : directory + '/')
+  );
+}
+
+function isInstalledPackageDirectory(path: string): boolean {
+  return (
+    path.includes('/node_modules/') &&
+    !path.endsWith('/node_modules') &&
+    !/\/node_modules\/@[^/]*$/.test(path)
   );
 }
 
@@ -106,8 +126,19 @@ export class AliasManager {
   private aliasMappings: AliasMapping[] = [];
   private rulesMap = new Map<string, RuleIndex>();
   private importerCache = new LruCache<string, ImporterInfo>({ maxEntries: 1000 });
-  private pathCache = new LruCache<string, string[]>({ maxEntries: 5000 });
+  private pathCache = new LruCache<string, ResolvedPath>({ maxEntries: 5000 });
+  private exactPathCache = new LruCache<string, ResolvedPath>({ maxEntries: 5000 });
   private decisionCache = new LruCache<string, Decision>({ maxEntries: 5000 });
+  private seenImporters = new LruCache<string, Set<string>>({
+    maxEntries: MAX_IMPORTER_DIRECTORIES,
+  });
+  private importerDirectories = new LruCache<string, ImporterDirectory | null>({
+    maxEntries: MAX_IMPORTER_DIRECTORIES,
+  });
+  private verifiedImporterFiles = new LruCache<string, string>({
+    maxEntries: MAX_IMPORTER_DIRECTORY_FILES,
+  });
+  private directoryDecisions = new LruCache<string, Decision>({ maxEntries: 5000 });
   private diagnostics = new Map<string, ResolverDiagnostic>();
 
   constructor(private options: ResolvedOptions) {}
@@ -133,7 +164,7 @@ export class AliasManager {
       }
       index.rules.push(rule);
       for (const packagePath of mapping.importerPaths ?? []) {
-        const candidates = this.pathCandidates(packagePath);
+        const { paths: candidates } = this.pathCandidates(packagePath);
         const name =
           packageInstances(normalizePath(packagePath)).at(-1)?.name ??
           readPackageJsonCached(packagePath)?.name;
@@ -144,7 +175,7 @@ export class AliasManager {
         }
       }
       for (const packagePath of mapping.excludedImporterPaths ?? []) {
-        const candidates = this.pathCandidates(packagePath);
+        const { paths: candidates } = this.pathCandidates(packagePath);
         const name =
           packageInstances(normalizePath(packagePath)).at(-1)?.name ??
           readPackageJsonCached(packagePath)?.name;
@@ -163,13 +194,20 @@ export class AliasManager {
     this.rulesMap.clear();
     this.importerCache.clear();
     this.pathCache.clear();
+    this.exactPathCache.clear();
     this.decisionCache.clear();
+    this.seenImporters.clear();
+    this.importerDirectories.clear();
+    this.verifiedImporterFiles.clear();
+    this.directoryDecisions.clear();
     this.diagnostics.clear();
   }
 
-  private pathCandidates(path: string, moduleId = false): string[] {
-    const cacheKey = (moduleId ? 'id\0' : 'path\0') + path;
-    const cached = this.pathCache.get(cacheKey);
+  private pathCandidates(path: string, moduleId = false): ResolvedPath {
+    // Query prefixes and shared directories have their own budget so they
+    // cannot evict otherwise resident module IDs.
+    const cache = moduleId ? this.pathCache : this.exactPathCache;
+    const cached = cache.get(path);
     if (cached) return cached;
     let literalPath = path;
     let realPath = !moduleId ? getCachedRealPath(path) : undefined;
@@ -186,7 +224,8 @@ export class AliasManager {
             const candidate = path.slice(0, markers[index]!.index);
             try {
               if (!statSync(candidate).isFile()) continue;
-              realPath = realpathSync(candidate);
+              realPath = this.pathCandidates(candidate).realPath;
+              if (realPath === undefined) continue;
               literalPath = candidate;
               break;
             } catch {
@@ -198,15 +237,20 @@ export class AliasManager {
     }
     const paths = new Set([normalizePath(literalPath)]);
     if (realPath) paths.add(normalizePath(realPath));
-    const candidates = [...paths];
-    this.pathCache.set(cacheKey, candidates);
-    return candidates;
+    const result = { paths: [...paths], realPath };
+    cache.set(path, result);
+    return result;
   }
 
   private importerInfo(importer: string): ImporterInfo {
     const cached = this.importerCache.get(importer);
     if (cached) return cached;
-    const paths = this.pathCandidates(importer, true);
+    const info = this.describeImporter(this.pathCandidates(importer, true).paths);
+    this.importerCache.set(importer, info);
+    return info;
+  }
+
+  private describeImporter(paths: string[]): ImporterInfo {
     const instances = paths.flatMap(packageInstances);
     if (instances.length === 0) {
       // Workspace sources have no node_modules segment. Find their owner
@@ -225,9 +269,59 @@ export class AliasManager {
         }
       }
     }
-    const info = { paths, instances };
-    this.importerCache.set(importer, info);
-    return info;
+    return { paths, instances };
+  }
+
+  private importerDirectory(importer: string): ImporterDirectory | undefined {
+    // Use the existing file path even when its per-request decision was evicted.
+    if (this.pathCache.has(importer)) return undefined;
+
+    const verifiedDirectory = this.verifiedImporterFiles.get(importer);
+    if (
+      verifiedDirectory === undefined &&
+      (!isAbsolute(importer) || /[?#]|(?:^|[\\/])\.{1,2}(?:[\\/]|$)/.test(importer))
+    ) {
+      return undefined;
+    }
+    const directory = dirname(importer);
+    const file = basename(importer);
+    // A literal backslash can introduce a scope when the full ID is normalized.
+    if (file.includes('\\')) return undefined;
+    let cached = this.importerDirectories.get(directory);
+    if (cached === undefined) {
+      if (!isInstalledPackageDirectory(normalizePath(directory))) return undefined;
+      if (verifiedDirectory === undefined) {
+        const files = this.seenImporters.get(directory) ?? new Set<string>();
+        files.add(file);
+        if (files.size < MIN_DIRECTORY_IMPORTERS) {
+          this.seenImporters.set(directory, files);
+          return undefined;
+        }
+      }
+      this.seenImporters.delete(directory);
+      cached = this.readImporterDirectory(directory);
+      this.importerDirectories.set(directory, cached);
+    }
+    if (!cached) return undefined;
+    if (verifiedDirectory === cached.realPath) return cached;
+
+    // Check only the requested file. A symlink can belong to a different scope.
+    try {
+      if (!lstatSync(join(cached.realPath, file), { throwIfNoEntry: false })?.isFile()) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+    this.verifiedImporterFiles.set(importer, cached.realPath);
+    return cached;
+  }
+
+  private readImporterDirectory(directory: string): ImporterDirectory | null {
+    const { paths, realPath } = this.pathCandidates(directory);
+    // Linked source directories can change independently of this generation.
+    if (!realPath || !isInstalledPackageDirectory(paths.at(-1)!)) return null;
+    return { key: directory + '\0' + realPath, realPath, info: this.describeImporter(paths) };
   }
 
   private requestPackageName(request: string): string {
@@ -245,7 +339,21 @@ export class AliasManager {
     const cached = this.decisionCache.get(cacheKey);
     if (cached) return cached;
 
-    const info = this.importerInfo(importer);
+    const directory = this.importerDirectory(importer);
+    if (directory) {
+      const directoryKey = packageName + '\0' + directory.key;
+      const directoryDecision = this.directoryDecisions.get(directoryKey);
+      if (directoryDecision) return directoryDecision;
+      const decision = this.matchImporter(packageName, index, directory.info);
+      this.directoryDecisions.set(directoryKey, decision);
+      return decision;
+    }
+    const decision = this.matchImporter(packageName, index, this.importerInfo(importer));
+    this.decisionCache.set(cacheKey, decision);
+    return decision;
+  }
+
+  private matchImporter(packageName: string, index: RuleIndex, info: ImporterInfo): Decision {
     const matches = new Map<AliasRule, RuleMatch>();
     const prunedMatches = new Map<AliasRule, PrunedMatch>();
     // Walk ancestors instead of scanning every path in every rule.
@@ -367,7 +475,6 @@ export class AliasManager {
         }
       }
     }
-    this.decisionCache.set(cacheKey, decision);
     return decision;
   }
 

@@ -50,6 +50,10 @@ function pkg(name, manifest) {
       realpathCalls++;
       return originalRealpath(...args);
     };
+    fs.realpathSync.native = (...args) => {
+      realpathCalls++;
+      return originalRealpath.native(...args);
+    };
     const iterations = 100_000;
     const warmStart = performance.now();
     let result;
