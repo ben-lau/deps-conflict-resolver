@@ -18,6 +18,7 @@ import { AliasManager } from './alias-manager';
 export interface PlannedAlias {
   mapping: AliasMapping;
   consumers: readonly DependencyPath[];
+  inheritedMismatches?: readonly string[];
 }
 
 interface ConsumerPeerContext {
@@ -28,9 +29,10 @@ interface ConsumerPeerContext {
 
 export type ConsumerPeerLookup = (plan: PlannedAlias, peerName: string) => ConsumerPeerContext[];
 
-interface AliasPeerLinks {
+export interface AliasPeerLinks {
   diagnostics: ResolverDiagnostic[];
   consumerMismatches: ReadonlySet<PlannedAlias>;
+  conflictingAliases: ReadonlySet<string>;
   publish(): void;
 }
 
@@ -108,6 +110,7 @@ export async function planAliasPeerLinks(
 ): Promise<AliasPeerLinks> {
   const diagnostics: ResolverDiagnostic[] = [];
   const consumerMismatches = new Set<PlannedAlias>();
+  const conflictingAliases = new Set<string>();
   const mappings = plans.map(({ mapping }) => mapping);
   const readManifest = (directory: string) => {
     watchFiles?.add(join(canonicalPath(directory), 'package.json'));
@@ -194,6 +197,8 @@ export async function planAliasPeerLinks(
               const label = consumer + ' -> ' + mapping.aliasName + '@' + mapping.resolvedVersion;
               if (mapping.originalName !== name || !satisfies(mapping.resolvedVersion, range)) {
                 conflicts.add(label);
+                conflictingAliases.add(importer.aliasName);
+                conflictingAliases.add(mapping.aliasName);
                 continue;
               }
               const path = canonicalPath(
@@ -314,6 +319,7 @@ export async function planAliasPeerLinks(
   return {
     diagnostics,
     consumerMismatches,
+    conflictingAliases,
     publish() {
       for (const mapping of mappings) mapping.peerImporterPaths = {};
       for (const { provider, importer, paths } of links) {

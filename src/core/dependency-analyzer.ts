@@ -21,6 +21,7 @@ import {
 import type { InstalledPackageInfo } from '../types';
 import { createWorkspaceDetector, WorkspaceDetector } from './workspace-detector';
 import {
+  compare,
   satisfies,
   isValidRange,
   isValidVersion,
@@ -57,6 +58,7 @@ import {
   peerConsumerDirectory,
   planAliasPeerLinks,
   samePeerConsumer,
+  type AliasPeerLinks,
   type ConsumerPeerLookup,
   type PlannedAlias,
 } from './alias-peer-resolver';
@@ -65,6 +67,11 @@ import { validateInstalledPeerProviders } from './installed-peer-providers';
 import { AliasManager } from './alias-manager';
 
 const logger = createLogger('dependency-analyzer');
+const MAX_PEER_PLAN_ATTEMPTS = 64;
+
+function peerPlanKey(plans: PlannedAlias[]): string {
+  return JSON.stringify(plans.map(({ mapping }) => [mapping.aliasName, mapping.resolvedVersion]));
+}
 
 /**
  * 已存在的别名信息（从 package.json 的 npm: 协议解析得到）
@@ -88,6 +95,11 @@ interface ExistingAliasMatch {
   installedPath?: string;
   /** 无法取得路径时保留声明来源，避免 local/workspace alias 被错误合并 */
   scope: 'local' | 'workspace';
+}
+
+interface AliasInventory {
+  observed: ExistingAliasMatch[];
+  visible: ExistingAliasMatch[];
 }
 
 interface ReusedAliasGroup {
@@ -139,6 +151,7 @@ export class DependencyAnalyzer {
    * 这是最准确的别名识别方式
    */
   private existingAliasesMap: Map<string, ExistingAliasInfo[]> = new Map();
+  private aliasInventory = new Map<string, AliasInventory>();
   /** Workspace 检测器（用于 catalog 协议解析和 workspace 别名查找） */
   private workspaceDetector: WorkspaceDetector;
   /** Workspace 级别的别名缓存 */
@@ -459,6 +472,7 @@ export class DependencyAnalyzer {
       this.visitedPackages.clear();
       this.installedPackageCache.clear();
       this.existingAliasesMap.clear();
+      this.aliasInventory.clear();
       this.workspaceAliasesCache.clear();
       this.workspaceRootDeclaredDeps = {};
       this.rawDeclaredDeps = {};
@@ -1057,30 +1071,38 @@ export class DependencyAnalyzer {
     }
     if (plans.length === 0) return [];
 
-    const lookupConsumers = createConsumerPeerLookup(plans, this.options, conflicts);
-    let links = await planAliasPeerLinks(
-      plans,
-      this.options,
-      this.registryClient,
-      lookupConsumers,
-      this.watchFiles,
-    );
-    const resolved = await this.reselectAliasPlans(
+    const link = (candidate: PlannedAlias[]) =>
+      planAliasPeerLinks(
+        candidate,
+        this.options,
+        this.registryClient,
+        createConsumerPeerLookup(candidate, this.options, conflicts),
+        this.watchFiles,
+      );
+    let links = await link(plans);
+    let resolved = await this.reselectAliasPlans(
       plans,
       links.consumerMismatches,
-      lookupConsumers,
+      createConsumerPeerLookup(plans, this.options, conflicts),
       versionsByPackage,
       allConflictPackageNames,
       usedAliasNames,
     );
-    if (resolved !== plans) {
-      links = await planAliasPeerLinks(
+    if (resolved !== plans) links = await link(resolved);
+    if (links.conflictingAliases.size > 0) {
+      const replacement = await this.searchPeerPlans(
         resolved,
-        this.options,
-        this.registryClient,
-        createConsumerPeerLookup(resolved, this.options, conflicts),
-        this.watchFiles,
+        links,
+        versionsByPackage,
+        allConflictPackageNames,
+        link,
       );
+      if (replacement) ({ plans: resolved, links } = replacement);
+    }
+    for (const { mapping, inheritedMismatches } of resolved) {
+      if (inheritedMismatches?.length) {
+        this.inheritedMismatchesByAlias.set(mapping.aliasName, inheritedMismatches);
+      }
     }
     links.publish();
     this.diagnostics.push(...links.diagnostics);
@@ -1091,14 +1113,12 @@ export class DependencyAnalyzer {
     plans: PlannedAlias[],
     mismatches: ReadonlySet<PlannedAlias>,
     lookupConsumers: ConsumerPeerLookup,
-    versionsByPackage: ReadonlyMap<string, string[]>,
+    versionsByPackage: Map<string, string[]>,
     allConflictPackageNames: string[],
     usedAliasNames: Set<string>,
   ): Promise<PlannedAlias[]> {
     if (mismatches.size === 0) return plans;
     const replacements = new Map<PlannedAlias, AliasGroup>();
-    const affectedPackages = new Set<string>();
-    const fetchedVersions = new Map(versionsByPackage);
 
     // Reconsider only the aliases rejected by the consumer's selected provider.
     // Keep that provider fixed during selection, then verify the complete plan.
@@ -1120,12 +1140,12 @@ export class DependencyAnalyzer {
           availableNames,
           peerRedirects,
         );
-      let replacement = select(fetchedVersions.get(originalName) ?? []);
+      let replacement = select(versionsByPackage.get(originalName) ?? []);
       if (
         !replacement &&
         this.options.autoInstall &&
         !this.options.offline &&
-        !fetchedVersions.has(originalName)
+        !versionsByPackage.has(originalName)
       ) {
         let versions: string[] = [];
         try {
@@ -1136,22 +1156,31 @@ export class DependencyAnalyzer {
         } catch {
           // Preserve the original mismatch when replacement metadata is unavailable.
         }
-        fetchedVersions.set(originalName, versions);
+        versionsByPackage.set(originalName, versions);
         replacement = select(versions);
       }
       if (!replacement) continue;
       usedAliasNames.add(replacement.aliasName);
       replacements.set(plan, replacement);
-      affectedPackages.add(originalName);
     }
 
+    return this.rebuildAliasPlans(plans, replacements, allConflictPackageNames);
+  }
+
+  private rebuildAliasPlans(
+    plans: PlannedAlias[],
+    replacements: ReadonlyMap<PlannedAlias, AliasGroup>,
+    allConflictPackageNames: string[],
+  ): PlannedAlias[] {
     if (replacements.size === 0) return plans;
     const rebuiltPlans = new Map<PlannedAlias, PlannedAlias>();
+    const affectedPackages = new Set(
+      [...replacements.keys()].map(({ mapping }) => mapping.originalName),
+    );
     for (const packageName of affectedPackages) {
       const packagePlans = plans.filter(({ mapping }) => mapping.originalName === packageName);
       const groups = packagePlans.map((plan) => {
         const { aliasName, resolvedVersion, installSpec } = plan.mapping;
-        this.inheritedMismatchesByAlias.delete(aliasName);
         return (
           replacements.get(plan) ?? {
             aliasName,
@@ -1165,6 +1194,100 @@ export class DependencyAnalyzer {
       for (const [index, plan] of packagePlans.entries()) rebuiltPlans.set(plan, rebuilt[index]!);
     }
     return plans.map((plan) => rebuiltPlans.get(plan) ?? plan);
+  }
+
+  /** Revisit the consumer and its selected provider when changing just the consumer failed. */
+  private async searchPeerPlans(
+    start: PlannedAlias[],
+    initialLinks: AliasPeerLinks,
+    versionsByPackage: ReadonlyMap<string, string[]>,
+    allConflictPackageNames: string[],
+    link: (plans: PlannedAlias[]) => Promise<AliasPeerLinks>,
+  ): Promise<{ plans: PlannedAlias[]; links: AliasPeerLinks } | undefined> {
+    const seen = new Set([peerPlanKey(start)]);
+    const originalErrors = new Set(
+      initialLinks.diagnostics
+        .filter(({ severity }) => severity === 'error')
+        .map(({ message }) => message),
+    );
+    const pending = [{ plans: start, links: initialLinks }];
+    for (const { plans, links } of pending) {
+      const conflicts = plans.filter(({ mapping }) =>
+        links.conflictingAliases.has(mapping.aliasName),
+      );
+      for (const plan of conflicts) {
+        for (const alternative of this.peerPlanAlternatives(plan, plans, versionsByPackage)) {
+          const next = this.rebuildAliasPlans(
+            plans,
+            new Map([[plan, alternative]]),
+            allConflictPackageNames,
+          );
+          const key = peerPlanKey(next);
+          if (seen.has(key)) continue;
+          if (seen.size > MAX_PEER_PLAN_ATTEMPTS) {
+            this.diagnostics.push({
+              code: 'ALIAS_SEARCH_LIMIT',
+              severity: 'warning',
+              packageName: plan.mapping.originalName,
+              message:
+                'Peer alias search reached its candidate limit; narrow the peer ranges with peerOverrides or prepare an explicit provider.',
+            });
+            return undefined;
+          }
+          seen.add(key);
+          const linked = await link(next);
+          if (linked.conflictingAliases.size === 0) {
+            if (
+              !linked.diagnostics.some(
+                ({ severity, message }) => severity === 'error' && !originalErrors.has(message),
+              )
+            ) {
+              return { plans: next, links: linked };
+            }
+          } else {
+            pending.push({ plans: next, links: linked });
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private *peerPlanAlternatives(
+    plan: PlannedAlias,
+    plans: PlannedAlias[],
+    versionsByPackage: ReadonlyMap<string, string[]>,
+  ): Iterable<AliasGroup> {
+    const { originalName, aliasName, resolvedVersion } = plan.mapping;
+    const requests = plan.consumers;
+    const ranges = [...new Set(requests.map(({ requiredRange }) => requiredRange))];
+    const used = new Set(plans.map(({ mapping }) => mapping.aliasName));
+    for (const { name, version } of this.getAliasInventory(originalName).visible) {
+      if (!used.has(name) && ranges.every((range) => satisfies(version, range))) {
+        yield { aliasName: name, version, installSpec: '', requests };
+      }
+    }
+    const versions = versionsByPackage.get(originalName);
+    if (!versions || this.options.offline) return;
+    if (plan.mapping.installSpec) used.delete(aliasName);
+    const reserved = new Set([
+      ...used,
+      ...this.getExistingAliasNames(originalName),
+      ...this.getReservedDependencyNames(),
+    ]);
+    for (const version of findIntersection(versions, ranges).sort((a, b) => compare(b, a))) {
+      if (version === resolvedVersion) continue;
+      // An absent manifest would require a new request for each speculative version.
+      if (!this.registryClient.getCachedManifest?.(originalName, version, this.options.registry))
+        continue;
+      const name = this.generateUniqueAliasName(originalName, version, reserved);
+      yield {
+        aliasName: name,
+        version,
+        installSpec: createAliasInstallSpec(name, originalName, version),
+        requests,
+      };
+    }
   }
 
   private getRedirectedPeerRequests(
@@ -1254,7 +1377,7 @@ export class DependencyAnalyzer {
     // 先收集所有真实已安装的别名身份，再按范围筛选候选。否则当同名
     // alias 只有一个满足当前范围时，另一条物理路径会被过滤掉，运行时
     // 仍可能按项目根目录解析到错误的包。
-    const installedAliasMatches = this.findInstalledAliasMatches(packageName);
+    const installedAliasMatches = this.getAliasInventory(packageName).observed;
     const installedAliasesByName = new Map<string, ExistingAliasMatch[]>();
     for (const installedAlias of installedAliasMatches) {
       const aliases = installedAliasesByName.get(installedAlias.name);
@@ -1511,15 +1634,12 @@ export class DependencyAnalyzer {
         ? (path, requirements) => {
             findScopedProvider ??= this.createScopedProviderLookup(
               packageName,
-              verified.map((entry) => buildMapping(entry, () => true)),
+              verified.map((entry) => buildMapping(entry, () => true).mapping),
             );
             return findScopedProvider(path, requirements);
           }
         : undefined;
-    return groups.map((entry) => ({
-      mapping: buildMapping(entry, pruneIncompatibleBranch),
-      consumers: entry.requests,
-    }));
+    return groups.map((entry) => buildMapping(entry, pruneIncompatibleBranch));
   }
 
   /**
@@ -1665,7 +1785,7 @@ export class DependencyAnalyzer {
     group: readonly DependencyPath[],
     allConflictPackageNames: string[],
     pruneIncompatibleBranch?: PruneIncompatibleBranch,
-  ): AliasMapping {
+  ): PlannedAlias {
     // usedBy 包含声明 peerDependency 的包路径
     const usedBy = group.map((r) => r.path.join('>'));
     const workspaceEntryNames = this.dependencyGraph
@@ -1683,9 +1803,6 @@ export class DependencyAnalyzer {
       target,
       pruneIncompatibleBranch,
     );
-    if (graphResult?.inheritedMismatches.length) {
-      this.inheritedMismatchesByAlias.set(aliasName, graphResult.inheritedMismatches);
-    }
     const graphInstances = graphResult?.collected ?? null;
     const allDependents = graphInstances
       ? [...new Set(graphInstances.map((instance) => instance.name))]
@@ -1704,15 +1821,19 @@ export class DependencyAnalyzer {
       : [];
 
     return {
-      originalName: packageName,
-      aliasName,
-      installSpec,
-      resolvedVersion: version,
-      usedBy,
-      ...(workspaceEntryNames.length > 0 ? { workspaceEntryNames } : {}),
-      allDependents,
-      ...(importerPaths ? { importerPaths } : {}),
-      ...(excludedImporterPaths.length > 0 ? { excludedImporterPaths } : {}),
+      consumers: group,
+      inheritedMismatches: graphResult?.inheritedMismatches,
+      mapping: {
+        originalName: packageName,
+        aliasName,
+        installSpec,
+        resolvedVersion: version,
+        usedBy,
+        ...(workspaceEntryNames.length > 0 ? { workspaceEntryNames } : {}),
+        allDependents,
+        ...(importerPaths ? { importerPaths } : {}),
+        ...(excludedImporterPaths.length > 0 ? { excludedImporterPaths } : {}),
+      },
     };
   }
 
@@ -1763,71 +1884,69 @@ export class DependencyAnalyzer {
   }
 
   /**
-   * 收集所有已安装的现有别名，不按请求版本范围过滤。
-   * 用于在范围筛选前识别同名 alias 的多路径/多版本歧义。
+   * Keep identities observed in both declaration scopes for ambiguity checks.
+   * Only the installation visible from the host can be reused for redirects.
    */
-  private findInstalledAliasMatches(packageName: string): ExistingAliasMatch[] {
-    const matches: ExistingAliasMatch[] = [];
+  private getAliasInventory(packageName: string): AliasInventory {
+    const cached = this.aliasInventory.get(packageName);
+    if (cached) return cached;
+    const observed: ExistingAliasMatch[] = [];
+    const visible: ExistingAliasMatch[] = [];
 
-    const npmAliases = this.existingAliasesMap.get(packageName) ?? [];
-    for (const alias of npmAliases) {
+    for (const alias of this.existingAliasesMap.get(packageName) ?? []) {
       alias.installedVersion ??= this.getAliasInstalledVersion(alias.aliasName);
-      if (!alias.installedVersion) continue;
-
-      const installedAlias = this.installedPackageCache.get(alias.aliasName);
-      if (installedAlias?.realName !== packageName) continue;
-
-      matches.push({
+      const installed = this.installedPackageCache.get(alias.aliasName);
+      if (!alias.installedVersion || installed?.realName !== packageName) continue;
+      const match: ExistingAliasMatch = {
         name: alias.aliasName,
         version: alias.installedVersion,
-        installedPath: installedAlias?.path,
+        installedPath: installed.path,
         scope: 'local',
-      });
+      };
+      observed.push(match);
+      visible.push(match);
     }
 
-    const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
+    const localNames = new Set(visible.map(({ name }) => name));
+    const host = this.options.projectRoot;
     const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
-
-    for (const wsAlias of workspaceAliases) {
-      let installedVersion: string | null = null;
-      let installedPath: string | undefined;
-
-      if (workspaceRoot) {
-        const { packagePath, pkgJson } = this.resolvePackageJson(wsAlias.aliasName, workspaceRoot);
-        if (packagePath) {
-          if (pkgJson?.name !== packageName) continue;
-          installedVersion = pkgJson?.version ?? null;
-          installedPath = packagePath;
-        }
-      }
-
-      if (!installedVersion) {
-        installedVersion = this.getAliasInstalledVersion(wsAlias.aliasName);
-        if (installedVersion) {
-          const installedAlias = this.installedPackageCache.get(wsAlias.aliasName);
-          installedPath = installedAlias?.path;
-          if (installedAlias?.realName !== packageName) continue;
-        }
-      }
-
-      if (installedVersion) {
-        matches.push({
-          name: wsAlias.aliasName,
-          version: installedVersion,
-          isWorkspaceAlias: true,
-          installedPath,
-          scope: 'workspace',
-        });
-      }
+    for (const { aliasName } of this.findWorkspaceAliasesForPackage(packageName)) {
+      const workspaceAssignment = workspaceRoot
+        ? this.resolvePackageJson(aliasName, workspaceRoot)
+        : null;
+      const hostAssignment =
+        workspaceRoot === host ? workspaceAssignment! : this.resolvePackageJson(aliasName, host);
+      const asMatch = ({
+        packagePath,
+        pkgJson,
+      }: typeof hostAssignment): ExistingAliasMatch | null =>
+        packagePath && pkgJson?.name === packageName && pkgJson.version
+          ? {
+              name: aliasName,
+              version: pkgJson.version,
+              installedPath: packagePath,
+              isWorkspaceAlias: true,
+              scope: 'workspace',
+            }
+          : null;
+      const declared = asMatch(
+        workspaceAssignment?.packagePath ? workspaceAssignment : hostAssignment,
+      );
+      if (declared) observed.push(declared);
+      const reusable = asMatch(hostAssignment);
+      if (reusable && !localNames.has(aliasName)) visible.push(reusable);
     }
 
-    return matches;
+    visible.sort((a, b) =>
+      a.scope === b.scope
+        ? compare(b.version, a.version) || a.name.localeCompare(b.name)
+        : a.scope.localeCompare(b.scope),
+    );
+    const inventory = { observed, visible };
+    this.aliasInventory.set(packageName, inventory);
+    return inventory;
   }
 
-  /**
-   * 查找满足指定范围的现有别名（排除已使用的）
-   * 优先查找当前项目的别名，然后查找 workspace 级别的别名
-   */
   private findExistingAliasForRanges(
     packageName: string,
     ranges: string[],
@@ -1835,108 +1954,22 @@ export class DependencyAnalyzer {
     consumers: readonly DependencyPath[],
     peerRedirects?: PeerRedirects,
   ): ExistingAliasMatch | null {
-    logger.debug(
-      `  Searching for existing alias for ${packageName} satisfying ranges: [${ranges.join(', ')}]`,
-    );
-
-    // 1. 先查找当前项目 package.json 中的别名
-    const npmAliases = this.existingAliasesMap.get(packageName);
     let fallback: ExistingAliasMatch | null = null;
     const canPrepareReplacement = this.options.autoInstall && !this.options.offline;
-    const prefer = (candidate: ExistingAliasMatch): boolean => {
+    for (const candidate of this.getAliasInventory(packageName).visible) {
+      if (
+        excludeAliases.has(candidate.name) ||
+        !ranges.every((range) => satisfies(candidate.version, range))
+      )
+        continue;
       const compatibility = this.checkInstalledAliasPeers(candidate, consumers, peerRedirects);
-      if (compatibility === 'compatible') return true;
+      if (compatibility === 'compatible') return candidate;
       // Keep installed matches for diagnostics unless preparation can look
       // for a replacement for a known consumer mismatch.
       if (!peerRedirects && (compatibility !== 'consumer-mismatch' || !canPrepareReplacement)) {
         fallback ??= candidate;
       }
-      return false;
-    };
-
-    if (npmAliases && npmAliases.length > 0) {
-      logger.debug(`  Checking ${npmAliases.length} local alias(es)...`);
-      for (const alias of npmAliases) {
-        // 跳过已使用的别名
-        if (excludeAliases.has(alias.aliasName)) {
-          logger.debug(`    Skip ${alias.aliasName}: already used`);
-          continue;
-        }
-
-        // 获取或更新已安装版本
-        alias.installedVersion ??= this.getAliasInstalledVersion(alias.aliasName);
-
-        if (!alias.installedVersion) {
-          logger.debug(`    Skip ${alias.aliasName}: not installed`);
-          continue;
-        }
-
-        const installedAlias = this.installedPackageCache.get(alias.aliasName);
-        if (installedAlias?.realName !== packageName) {
-          logger.debug(
-            `    Skip ${alias.aliasName}: installed package name ${installedAlias?.realName ?? 'unknown'} does not match ${packageName}`,
-          );
-          continue;
-        }
-
-        // 检查版本是否满足所有范围
-        const allSatisfied = ranges.every((range) => satisfies(alias.installedVersion!, range));
-
-        if (allSatisfied) {
-          logger.debug(`    Matched local alias: ${alias.aliasName}@${alias.installedVersion}`);
-          const candidate: ExistingAliasMatch = {
-            name: alias.aliasName,
-            version: alias.installedVersion,
-            installedPath: installedAlias?.path,
-            scope: 'local',
-          };
-          if (prefer(candidate)) return candidate;
-        } else {
-          logger.debug(
-            `    Skip ${alias.aliasName}@${alias.installedVersion}: version doesn't satisfy all ranges`,
-          );
-        }
-      }
     }
-
-    // 2. 查找 workspace 级别的别名
-    const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
-
-    if (workspaceAliases.length > 0) {
-      logger.debug(`  Checking ${workspaceAliases.length} workspace alias(es)...`);
-    }
-
-    for (const wsAlias of workspaceAliases) {
-      // 跳过已使用的别名
-      if (excludeAliases.has(wsAlias.aliasName)) {
-        logger.debug(`    Skip ${wsAlias.aliasName}: already used`);
-        continue;
-      }
-
-      // Workspace declarations supply candidate names. Verify the installation
-      // visible from the same host origin used by runtime alias resolution.
-      const { packagePath, pkgJson } = this.resolvePackageJson(
-        wsAlias.aliasName,
-        this.options.projectRoot,
-      );
-      if (!packagePath || pkgJson?.name !== packageName || !pkgJson.version) continue;
-      const installedVersion = pkgJson.version;
-      if (ranges.every((range) => satisfies(installedVersion, range))) {
-        logger.debug(`    Matched workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
-        const candidate: ExistingAliasMatch = {
-          name: wsAlias.aliasName,
-          version: installedVersion,
-          isWorkspaceAlias: true,
-          installedPath: packagePath,
-          scope: 'workspace',
-        };
-        if (prefer(candidate)) return candidate;
-      }
-    }
-
-    if (!fallback) logger.debug(`  No existing alias found for ${packageName}`);
-    // Preserve validation diagnostics when every compatible version has
-    // unresolved peers. The final selected scopes are checked by linkAliasPeers.
     return fallback;
   }
 
@@ -2014,7 +2047,7 @@ export class DependencyAnalyzer {
         compatibility = 'unresolved';
         continue;
       }
-      const installed = this.findInstalledAliasMatches(peerName).filter(({ version }) =>
+      const installed = this.getAliasInventory(peerName).visible.filter(({ version }) =>
         shared.length > 0
           ? shared.every(({ requiredRange }) => satisfies(version, requiredRange))
           : planned.all.some(({ requiredRange }) => satisfies(version, requiredRange)),

@@ -458,6 +458,62 @@ describe('diagnostics and deterministic offline operation', () => {
     expect(fetch.mock.calls.map(([request]) => requestPath(request))).toEqual(['/renderer']);
   });
 
+  it.each([false, true])(
+    'reconsiders installed providers independently of declaration order (%s)',
+    async (reverse) => {
+      const providers = ['2.7.16', '2.6.14'];
+      if (reverse) providers.reverse();
+      const root = project({
+        dependencies: {
+          legacy: '1.0.0',
+          renderer: '2.0.0',
+          runtime: '3.0.0',
+          renderer1: 'npm:renderer@1.0.0',
+          ...Object.fromEntries(
+            providers.map((version) => [`runtime-${version}`, `npm:runtime@${version}`]),
+          ),
+        },
+      });
+      const legacy = pkg(root, 'legacy', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+      const renderer = pkg(root, 'renderer1', {
+        name: 'renderer',
+        peerDependencies: { runtime: '~2.6.0' },
+      });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      for (const version of providers)
+        pkg(root, `runtime-${version}`, { name: 'runtime', version });
+      const resolver = await createResolver({ ...baseOptions(root), offline: true, strict: true });
+      expect(resolver.resolveModule('renderer', join(legacy, 'index.js'))).toBe('renderer1');
+      for (const consumer of [legacy, renderer]) {
+        expect(resolver.resolveModule('runtime', join(consumer, 'index.js'))).toBe(
+          'runtime-2.6.14',
+        );
+      }
+      expect(resolver.getDiagnostics()).toEqual([]);
+    },
+  );
+
+  it('can downgrade a pending provider using metadata fetched for this preparation', async () => {
+    const root = project({
+      dependencies: { legacy: '1', renderer: '2', runtime: '3', renderer1: 'npm:renderer@1.0.0' },
+    });
+    pkg(root, 'legacy', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+    pkg(root, 'renderer', { version: '2.0.0' });
+    pkg(root, 'renderer1', { name: 'renderer', peerDependencies: { runtime: '~2.6.0' } });
+    pkg(root, 'runtime', { version: '3.0.0' });
+    const fetch = mockRegistry(
+      { name: 'runtime', version: '2.7.16' },
+      { name: 'runtime', version: '2.6.14' },
+    );
+    const resolver = await createResolver(baseOptions(root));
+    expect(resolver.getAnalysisResult()?.aliasMappings).toContainEqual(
+      expect.objectContaining({ originalName: 'runtime', resolvedVersion: '2.6.14' }),
+    );
+    expect(resolver.getDiagnostics().map(({ code }) => code)).toEqual(['ALIAS_NOT_INSTALLED']);
+    expect(fetch.mock.calls.map(([request]) => requestPath(request))).toEqual(['/runtime']);
+  });
+
   it('rejects an alias whose peers conflict with its only consumer redirect in strict mode', async () => {
     const root = project({
       dependencies: {
