@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DependencyAnalyzer } from '../../src/core/dependency-analyzer';
 import { AliasManager } from '../../src/core/alias-manager';
 import type { DependencyPath, ResolvedOptions, PackageJson } from '../../src/types';
@@ -24,172 +24,66 @@ async function writeTestPackage(
   return packagePath;
 }
 
-describe('DependencyAnalyzer', () => {
-  let mockOptions: ResolvedOptions;
-  let mockMainPackageJson: PackageJson;
-  let mockInstalledDeps: Map<string, InstalledPackageInfo>;
+const roots: string[] = [];
 
-  beforeEach(() => {
-    mockOptions = {
-      dependencies: ['package-a'],
-      projectRoot: '/test/project',
-      autoInstall: true,
-      packageManager: 'npm',
-      registry: 'https://registry.npmjs.org',
-      debug: false,
-      aliasPrefix: 'aliased-',
-      excludeRedirects: {},
-      includeRedirects: {},
-    };
+async function makeRoot(): Promise<string> {
+  const root = realpathSync(await fs.mkdtemp(join(tmpdir(), 'deps-physical-analysis-')));
+  roots.push(root);
+  return root;
+}
 
-    mockMainPackageJson = {
-      name: 'main-project',
-      version: '1.0.0',
-      dependencies: {
-        vue: '^3.0.0',
-        'vue-router': '^4.0.0',
-        'package-a': '^1.0.0',
-      },
-    };
-
-    mockInstalledDeps = new Map([
-      [
-        'vue',
-        {
-          name: 'vue',
-          version: '3.2.0',
-          path: '/test/project/node_modules/vue',
-        },
-      ],
-      [
-        'vue-router',
-        {
-          name: 'vue-router',
-          version: '4.1.0',
-          path: '/test/project/node_modules/vue-router',
-        },
-      ],
-      [
-        'package-a',
-        {
-          name: 'package-a',
-          version: '1.0.0',
-          path: '/test/project/node_modules/package-a',
-        },
-      ],
-    ]);
-  });
-
-  describe('constructor', () => {
-    it('should create analyzer with correct options', () => {
-      const analyzer = new DependencyAnalyzer(mockOptions, mockMainPackageJson, mockInstalledDeps);
-
-      expect(analyzer).toBeDefined();
-    });
-  });
-
-  describe('analyze', () => {
-    it('should analyze dependencies and return result structure', async () => {
-      // This test verifies the structure of analysis result
-      // In real scenario, it would need mocked file system and npm registry
-
-      const analyzer = new DependencyAnalyzer(mockOptions, mockMainPackageJson, mockInstalledDeps);
-
-      // Mock the internal methods for unit testing
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      vi.spyOn(analyzer as any, 'analyzeDependencyRecursive').mockReturnValue(null);
-
-      const result = await analyzer.analyze();
-
-      expect(result).toHaveProperty('analyzedDependencies');
-      expect(result).toHaveProperty('peerConflicts');
-      expect(result).toHaveProperty('aliasMappings');
-      expect(result).toHaveProperty('missingFirstLevelPeers');
-      expect(result.analyzedDependencies).toBeInstanceOf(Map);
-      expect(Array.isArray(result.peerConflicts)).toBe(true);
-      expect(Array.isArray(result.aliasMappings)).toBe(true);
-    });
-  });
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-describe('DependencyAnalyzer declared-only peer conflict gating', () => {
-  it('should NOT mark needsAlias for peer deps that are not declared in main package.json, but should report missingFirstLevelPeers', async () => {
-    const options: ResolvedOptions = {
-      dependencies: ['package-a'],
-      projectRoot: '/test/project',
-      autoInstall: true,
-      packageManager: 'npm',
-      registry: 'https://registry.npmjs.org',
-      debug: false,
-      aliasPrefix: 'aliased-',
-      excludeRedirects: {},
-      includeRedirects: {},
-    };
+const physicalOptions: ResolvedOptions = {
+  dependencies: ['package-a'],
+  projectRoot: '/test/project',
+  autoInstall: false,
+  offline: true,
+  packageManager: 'npm',
+  registry: 'https://registry.npmjs.org',
+  debug: false,
+  aliasPrefix: 'aliased-',
+  excludeRedirects: {},
+  includeRedirects: {},
+};
 
-    // 主工程只声明了 package-a（未声明 peer-x）
-    const mainPkg: PackageJson = {
-      name: 'main-project',
-      version: '1.0.0',
-      dependencies: {
-        'package-a': '^1.0.0',
-      },
-    };
+describe('DependencyAnalyzer', () => {
+  it('returns the installed graph projection, including packages without peers', async () => {
+    const projectRoot = await makeRoot();
+    const manifest = { name: 'host', dependencies: { 'package-a': '^1' } };
+    await writeTestPackage(projectRoot, 'package-a', { dependencies: { child: '^1' } });
+    await writeTestPackage(projectRoot, 'child', {});
+    const result = await new DependencyAnalyzer(
+      { ...physicalOptions, projectRoot },
+      manifest,
+    ).analyze();
+    expect(result.analyzedDependencies).toBeInstanceOf(Map);
+    expect(result.analyzedDependencies.get('package-a')?.version).toBe('1.0.0');
+    expect(result.analyzedDependencies.get('child')?.dependencyPath).toEqual(['package-a']);
+    expect(result.peerConflicts).toEqual([]);
+    expect(result.missingFirstLevelPeers).toEqual([]);
+    expect(result.aliasMappings).toEqual([]);
+  });
 
-    // 即使 peer-x 在 node_modules 里可见（例如 pnpm peer/hoist），也不应触发 needsAlias
-    const installedDeps: Map<string, InstalledPackageInfo> = new Map([
-      [
-        'peer-x',
-        {
-          name: 'peer-x',
-          version: '2.0.0',
-          path: '/test/project/node_modules/peer-x',
-        },
-      ],
-      [
-        'package-a',
-        {
-          name: 'package-a',
-          version: '1.0.0',
-          path: '/test/project/node_modules/package-a',
-        },
-      ],
+  it('reports an incompatible visible peer the host has never declared', async () => {
+    const projectRoot = await makeRoot();
+    const manifest = { name: 'host', dependencies: { 'package-a': '^1' } };
+    await writeTestPackage(projectRoot, 'package-a', { peerDependencies: { 'peer-x': '^1.0.0' } });
+    await writeTestPackage(projectRoot, 'peer-x', { version: '2.0.0' });
+    const result = await new DependencyAnalyzer(
+      { ...physicalOptions, projectRoot },
+      manifest,
+    ).analyze();
+
+    expect(result.peerConflicts).toEqual([
+      expect.objectContaining({ packageName: 'peer-x', needsAlias: false }),
     ]);
-
-    const analyzer = new DependencyAnalyzer(options, mainPkg, installedDeps);
-
-    // 让 analyzedDependencies 中的 package-a 存在 peerDependencies：peer-x@^1.0.0
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (analyzer as any).analyzeDependencyRecursive = vi.fn(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (analyzer as any).analyzedDependencies.set('package-a', {
-        name: 'package-a',
-        version: '1.0.0',
-        dependencyPath: [],
-        dependencies: {},
-        peerDependencies: { 'peer-x': '^1.0.0' },
-        peerDependenciesMeta: {},
-      });
-      return null;
-    });
-
-    const result = await analyzer.analyze();
-
-    // peer-x 未声明：needsAlias 必须为 false
-    const peerX = result.peerConflicts.find((c) => c.packageName === 'peer-x');
-    expect(peerX).toBeDefined();
-    expect(peerX?.needsAlias).toBe(false);
-
-    // 同时应进入 missingFirstLevelPeers
     expect(result.missingFirstLevelPeers).toEqual([
-      {
-        packageName: 'peer-x',
-        requiredRange: '^1.0.0',
-        requestedBy: 'package-a',
-      },
+      { packageName: 'peer-x', requiredRange: '^1.0.0', requestedBy: 'package-a' },
     ]);
-
-    // 不应生成任何别名安装映射
-    expect(result.aliasMappings).toHaveLength(0);
+    expect(result.aliasMappings).toEqual([]);
   });
 });
 
@@ -248,41 +142,9 @@ describe('DependencyAnalyzer workspace declared merging', () => {
         excludeRedirects: {},
         includeRedirects: {},
       };
-      const installedDeps: Map<string, InstalledPackageInfo> = new Map([
-        [
-          'peer-x',
-          {
-            name: 'peer-x',
-            version: '2.0.0',
-            path: join(rootDir, 'node_modules', 'peer-x'),
-          },
-        ],
-        [
-          'package-a',
-          {
-            name: 'package-a',
-            version: '1.0.0',
-            path: join(rootDir, 'node_modules', 'package-a'),
-          },
-        ],
-      ]);
-
-      const analyzer = new DependencyAnalyzer(options, pkgJson, installedDeps);
-
-      // 让 analyzedDependencies 中的 package-a 存在 peerDependencies：peer-x@^2.0.0（满足，不触发 alias 安装）
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (analyzer as any).analyzeDependencyRecursive = vi.fn(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (analyzer as any).analyzedDependencies.set('package-a', {
-          name: 'package-a',
-          version: '1.0.0',
-          dependencyPath: [],
-          dependencies: {},
-          peerDependencies: { 'peer-x': '^2.0.0' },
-          peerDependenciesMeta: {},
-        });
-        return null;
-      });
+      await writeTestPackage(rootDir, 'peer-x', { version: '2.0.0' });
+      await writeTestPackage(rootDir, 'package-a', { peerDependencies: { 'peer-x': '^2.0.0' } });
+      const analyzer = new DependencyAnalyzer(options, pkgJson);
 
       const result = await analyzer.analyze();
 
@@ -458,7 +320,7 @@ describe('DependencyAnalyzer offline alias reuse', () => {
         includeRedirects: {},
       };
 
-      const analyzer = new DependencyAnalyzer(options, mainPackageJson, undefined, registryClient);
+      const analyzer = new DependencyAnalyzer(options, mainPackageJson, registryClient);
       const result = await analyzer.analyze();
 
       expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
@@ -553,7 +415,6 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       const result = await new DependencyAnalyzer(
         options,
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -651,7 +512,6 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       const result = await new DependencyAnalyzer(
         options,
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -751,7 +611,6 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       const result = await new DependencyAnalyzer(
         options,
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -877,7 +736,6 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       const result = await new DependencyAnalyzer(
         options,
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -1002,7 +860,6 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       const result = await new DependencyAnalyzer(
         options,
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -1044,7 +901,6 @@ const groupRanges = (requests: DependencyPath[], availableVersions: string[]) =>
       includeRedirects: {},
     },
     { name: 'semver-grouping-host', version: '1.0.0' },
-    new Map(),
   );
 
   return (
@@ -1185,16 +1041,13 @@ describe('DependencyAnalyzer semver grouping', () => {
     const registryClient = {
       fetchAllVersions: vi.fn().mockResolvedValue(availableVersions),
     };
+    const projectRoot = await makeRoot();
     const options: ResolvedOptions = {
+      ...physicalOptions,
       dependencies: requests.map(({ name }) => name),
-      projectRoot: '/test/project',
+      projectRoot,
+      offline: false,
       autoInstall: true,
-      packageManager: 'npm',
-      registry: 'https://registry.example.test',
-      debug: false,
-      aliasPrefix: 'aliased-',
-      excludeRedirects: {},
-      includeRedirects: {},
     };
     const analyzer = new DependencyAnalyzer(
       options,
@@ -1203,35 +1056,12 @@ describe('DependencyAnalyzer semver grouping', () => {
         version: '1.0.0',
         dependencies: { vue: '^4.0.0' },
       },
-      new Map([
-        [
-          'vue',
-          {
-            name: 'vue',
-            version: '4.0.0',
-            path: '/test/project/node_modules/vue',
-          },
-        ],
-      ]),
       registryClient,
     );
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (analyzer as any).analyzeDependencyRecursive = vi.fn((packageName: string) => {
-      const request = requests.find(({ name }) => name === packageName);
-      if (!request) return null;
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (analyzer as any).analyzedDependencies.set(packageName, {
-        name: packageName,
-        version: '1.0.0',
-        dependencyPath: [],
-        dependencies: {},
-        peerDependencies: { vue: request.range },
-        peerDependenciesMeta: {},
-      });
-      return null;
-    });
+    await writeTestPackage(projectRoot, 'vue', { version: '4.0.0' });
+    for (const { name, range } of requests) {
+      await writeTestPackage(projectRoot, name, { peerDependencies: { vue: range } });
+    }
 
     const result = await analyzer.analyze();
 
@@ -1264,11 +1094,7 @@ describe('DependencyAnalyzer Edge Cases', () => {
       includeRedirects: {},
     };
 
-    const analyzer = new DependencyAnalyzer(
-      mockOptions,
-      { name: 'test', version: '1.0.0' },
-      new Map(),
-    );
+    const analyzer = new DependencyAnalyzer(mockOptions, { name: 'test', version: '1.0.0' });
 
     const result = await analyzer.analyze();
 
@@ -1315,7 +1141,6 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
           includeRedirects: {},
         },
         mainPackageJson,
-        undefined,
         { fetchAllVersions: vi.fn() },
       ).analyze();
 
@@ -1373,7 +1198,6 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
           includeRedirects: {},
         },
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -1447,7 +1271,6 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
             vue: '^4.0.0',
           },
         },
-        undefined,
         registryClient,
       ).analyze();
 
@@ -1532,7 +1355,6 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
             'vue-router': '^5.0.0',
           },
         },
-        undefined,
         registryClient,
       ).analyze();
 
@@ -1627,7 +1449,6 @@ describe('DependencyAnalyzer alias ownership', () => {
       const result = await new DependencyAnalyzer(
         options,
         mainPackageJson,
-        undefined,
         registryClient,
       ).analyze();
 
@@ -1692,8 +1513,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -1702,7 +1530,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.6.14',
           },
         },
-        mockInstalledDeps,
       );
 
       // 使用反射访问私有方法进行测试
@@ -1839,8 +1666,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -1848,7 +1682,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             'aliased-vue2': 'npm:vue@3.0.0',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -1894,8 +1727,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -1904,7 +1744,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.6.14',
           },
         },
-        mockInstalledDeps,
       );
 
       const getExistingAliasNames = (
@@ -1937,8 +1776,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -1946,7 +1792,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.6.14',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -1979,8 +1824,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -1988,7 +1840,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             'aliased-vue2': 'npm:vue@2.7.0',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -2020,10 +1871,16 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         { name: 'test', version: '1.0.0' },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -2058,8 +1915,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -2067,7 +1931,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.6.14',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -2103,8 +1966,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -2112,7 +1982,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.6.5',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -2148,8 +2017,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -2157,7 +2033,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             'aliased-scope-pkg1': 'npm:@scope/pkg@1.0.0',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -2179,13 +2054,7 @@ describe('DependencyAnalyzer Alias Detection', () => {
 
   describe('generateUniqueAliasName', () => {
     it('should generate unique alias name avoiding conflicts', () => {
-      const mockInstalledDeps: Map<string, InstalledPackageInfo> = new Map();
-
-      const analyzer = new DependencyAnalyzer(
-        baseOptions,
-        { name: 'test', version: '1.0.0' },
-        mockInstalledDeps,
-      );
+      const analyzer = new DependencyAnalyzer(baseOptions, { name: 'test', version: '1.0.0' });
 
       const generateUniqueAliasName = (
         analyzer as unknown as {
@@ -2242,8 +2111,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -2252,7 +2128,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.7.16',
           },
         },
-        mockInstalledDeps,
       );
 
       // 模拟 analyzePeerConflicts 的行为
@@ -2322,8 +2197,15 @@ describe('DependencyAnalyzer Alias Detection', () => {
         ],
       ]);
 
+      const projectRoot = await makeRoot();
+      for (const [name, info] of mockInstalledDeps) {
+        await writeTestPackage(projectRoot, name, {
+          name: info.realName ?? info.name,
+          version: info.version,
+        });
+      }
       const analyzer = new DependencyAnalyzer(
-        baseOptions,
+        { ...baseOptions, projectRoot },
         {
           name: 'test',
           version: '1.0.0',
@@ -2332,7 +2214,6 @@ describe('DependencyAnalyzer Alias Detection', () => {
             vue2: 'npm:vue@2.7.16',
           },
         },
-        mockInstalledDeps,
       );
 
       const findExistingAliasForRanges = (
@@ -2362,154 +2243,41 @@ describe('DependencyAnalyzer Alias Detection', () => {
   });
 });
 
-describe('Regression: collectAllRelatedPackages excludePackages', () => {
-  const baseOptions: ResolvedOptions = {
-    dependencies: ['legacy-lib'],
-    projectRoot: '/test/project',
-    autoInstall: true,
-    packageManager: 'npm',
-    registry: 'https://registry.npmjs.org',
-    debug: false,
-    aliasPrefix: 'aliased-',
-    excludeRedirects: {},
-    includeRedirects: {},
-  };
-
-  it('should never include excludePackages in result (pinia scenario)', () => {
-    const analyzer = new DependencyAnalyzer(
-      baseOptions,
-      { name: 'test', version: '1.0.0', dependencies: { vue: '^3.0.0', 'vue-router': '^5.0.0' } },
-      new Map(),
-    );
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ad = (analyzer as any).analyzedDependencies as Map<string, any>;
-
-    ad.set('legacy-lib', {
-      name: 'legacy-lib',
-      version: '1.0.0',
-      dependencyPath: [],
-      dependencies: {},
-      peerDependencies: { vue: '^2.0.0', 'vue-router': '^3.0.0' },
-    });
-    ad.set('vue', {
-      name: 'vue',
-      version: '3.2.0',
-      dependencyPath: [],
-      dependencies: {},
-      peerDependencies: {},
-    });
-    ad.set('vue-router', {
-      name: 'vue-router',
-      version: '5.0.4',
-      dependencyPath: [],
-      dependencies: {},
-      peerDependencies: { vue: '^3.3.0', pinia: '^3.0.0' },
-    });
-    ad.set('pinia', {
-      name: 'pinia',
-      version: '3.0.1',
-      dependencyPath: [],
-      dependencies: {},
-      peerDependencies: { vue: '^3.3.0' },
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
-    const result = (analyzer as any).collectAllRelatedPackages(
-      ['legacy-lib'],
-      ['vue', 'vue-router'],
-    ) as string[];
-
-    expect(result).not.toContain('vue');
-    expect(result).not.toContain('vue-router');
-    // pinia is a sub-dep of vue-router (excluded), so it should NOT be pulled in
-    expect(result).not.toContain('pinia');
-    expect(result).toContain('legacy-lib');
-  });
-
-  it('should still collect non-excluded sub-dependencies', () => {
-    const analyzer = new DependencyAnalyzer(
-      baseOptions,
-      { name: 'test', version: '1.0.0', dependencies: { vue: '^3.0.0' } },
-      new Map(),
-    );
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ad = (analyzer as any).analyzedDependencies as Map<string, any>;
-
-    ad.set('legacy-lib', {
-      name: 'legacy-lib',
-      version: '1.0.0',
-      dependencyPath: [],
-      dependencies: { 'sub-a': '^1.0.0' },
-      peerDependencies: { vue: '^2.0.0' },
-    });
-    ad.set('sub-a', {
-      name: 'sub-a',
-      version: '1.0.0',
-      dependencyPath: [],
-      dependencies: { 'sub-b': '^1.0.0' },
-      peerDependencies: {},
-    });
-    ad.set('sub-b', {
-      name: 'sub-b',
-      version: '1.0.0',
-      dependencyPath: [],
-      dependencies: {},
-      peerDependencies: {},
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
-    const result = (analyzer as any).collectAllRelatedPackages(['legacy-lib'], ['vue']) as string[];
-
-    expect(result).toContain('legacy-lib');
-    expect(result).toContain('sub-a');
-    expect(result).toContain('sub-b');
-    expect(result).not.toContain('vue');
-  });
-});
-
-describe('Regression: analysisResult stability after analyze()', () => {
-  it('should return stable analyzedDependencies even after internal cleanup', async () => {
-    const options: ResolvedOptions = {
-      dependencies: ['package-a'],
-      projectRoot: '/test/project',
-      autoInstall: true,
-      packageManager: 'npm',
-      registry: 'https://registry.npmjs.org',
-      debug: false,
-      aliasPrefix: 'aliased-',
-      excludeRedirects: {},
-      includeRedirects: {},
-    };
-
-    const mainPkg: PackageJson = {
-      name: 'test',
-      version: '1.0.0',
-      dependencies: { 'package-a': '^1.0.0' },
-    };
-
-    const analyzer = new DependencyAnalyzer(options, mainPkg, new Map());
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    vi.spyOn(analyzer as any, 'analyzeDependencyRecursive').mockImplementation(
-      function (this: any) {
-        this.analyzedDependencies.set('package-a', {
-          name: 'package-a',
-          version: '1.0.0',
-          dependencyPath: [],
-          dependencies: {},
-          peerDependencies: {},
-        });
-        return null;
+describe('Alias scope projections', () => {
+  it('excludes conflicting providers and their descendants while preserving ordinary dependencies', async () => {
+    const projectRoot = await makeRoot();
+    const manifest = {
+      name: 'host',
+      dependencies: {
+        'package-a': '1.0.0',
+        vue: '^3',
+        vue2: 'npm:vue@2.7.16',
+        'vue-router': '^5',
+        router3: 'npm:vue-router@3.0.0',
       },
-    );
+    };
+    await writeTestPackage(projectRoot, 'package-a', {
+      dependencies: { 'sub-a': '^1' },
+      peerDependencies: { vue: '^2', 'vue-router': '^3' },
+    });
+    await writeTestPackage(projectRoot, 'sub-a', { dependencies: { 'sub-b': '^1' } });
+    await writeTestPackage(projectRoot, 'sub-b', {});
+    await writeTestPackage(projectRoot, 'vue', { version: '3.4.0' });
+    await writeTestPackage(projectRoot, 'vue2', { name: 'vue', version: '2.7.16' });
+    await writeTestPackage(projectRoot, 'vue-router', {
+      version: '5.0.4',
+      dependencies: { pinia: '^3' },
+    });
+    await writeTestPackage(projectRoot, 'router3', { name: 'vue-router', version: '3.0.0' });
+    await writeTestPackage(projectRoot, 'pinia', { version: '3.0.1' });
 
-    const result = await analyzer.analyze();
-
-    expect(result.analyzedDependencies).toBeInstanceOf(Map);
-    expect(result.analyzedDependencies.size).toBe(1);
-    expect(result.analyzedDependencies.get('package-a')).toBeDefined();
-    expect(result.analyzedDependencies.get('package-a')?.version).toBe('1.0.0');
+    const result = await new DependencyAnalyzer(
+      { ...physicalOptions, projectRoot },
+      manifest,
+    ).analyze();
+    const mapping = result.aliasMappings.find(({ originalName }) => originalName === 'vue');
+    expect(new Set(mapping?.allDependents)).toEqual(new Set(['package-a', 'sub-a', 'sub-b']));
+    expect(mapping?.importerPaths).toHaveLength(3);
+    expect(result.analyzedDependencies.has('pinia')).toBe(true);
   });
 });
