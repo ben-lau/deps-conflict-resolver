@@ -41,7 +41,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     this.config = config;
 
     if (config.debug) {
-      logger.setLevel(LogLevel.DEBUG);
+      logger.setLevel(LogLevel.ALL);
     }
   }
 
@@ -81,6 +81,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       this.analysisResult = null;
       this.initialized = false;
       logger.error('Error initializing dependencies resolver:', error);
+      if (this.config.strict) return Promise.reject(error);
       return Promise.resolve();
     }
 
@@ -95,9 +96,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         this.analysisResult = resolver.getAnalysisResult();
 
         if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
-          logger.info(
-            `Detected ${this.analysisResult.aliasMappings.length} peer dependency conflicts`,
-          );
+          logger.info(`Planned ${this.analysisResult.aliasMappings.length} alias mappings`);
 
           if (this.config.debug) {
             logger.debug(
@@ -124,6 +123,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         this.analysisResult = null;
         this.initialized = false;
         logger.error('Error initializing dependencies resolver:', error);
+        if (this.config.strict) throw error;
       })
       .finally(() => {
         if (generation === this.generation && this.initPromise === initialization) {
@@ -132,6 +132,9 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       });
 
     this.initPromise = initialization;
+    // Initialization starts before compiler.run; keep an early strict failure
+    // handled until a compiler hook awaits the original promise.
+    void initialization.catch(() => undefined);
     return initialization;
   }
 
@@ -207,6 +210,10 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   }
 
   apply(compiler: Compiler): void {
+    this.config = {
+      ...this.config,
+      projectRoot: this.config.projectRoot ?? compiler.context,
+    };
     logger.info('Applying DepsConflictResolverWebpackPlugin...');
 
     // 立即开始初始化（不阻塞）
@@ -214,7 +221,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     // 在编译开始前确保初始化完成
     compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, async () => {
-      await this.initPromise;
+      await this.initialize();
     });
 
     // 对于 watch 模式
@@ -236,6 +243,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
           this.handleResolve(resolveData);
         } catch (err) {
           logger.error('Error during module resolution:', err);
+          if (this.config.strict) throw err;
         }
       });
     });
@@ -246,10 +254,9 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         return;
       }
 
-      if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
-        logger.info(
-          `Resolved ${this.analysisResult.aliasMappings.length} peer dependency conflicts`,
-        );
+      const activeCount = this.resolver?.getAliasPathMappings().length ?? 0;
+      if (activeCount > 0) {
+        logger.info(`Activated ${activeCount} alias mappings`);
       }
     });
   }

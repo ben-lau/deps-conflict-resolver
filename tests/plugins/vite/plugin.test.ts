@@ -9,6 +9,7 @@ const mockResolverInstance = {
   getAliasPathMappings: vi.fn(),
   getOptions: vi.fn(),
   resolveModule: vi.fn(),
+  getDiagnostics: vi.fn().mockReturnValue([]),
 };
 
 vi.mock('../../../src/core/resolver', () => ({
