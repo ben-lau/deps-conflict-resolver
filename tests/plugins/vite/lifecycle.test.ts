@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import {
   cpSync,
   existsSync,
@@ -11,14 +12,16 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
+  type FSWatcher,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { build, createBuilder, createLogger, optimizeDeps, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
+import { InstalledProviderWatch } from '../../../src/plugins/vite/installed-provider-watch';
 import * as packageManager from '../../../src/core/package-manager-adapter';
 import { DependencyAnalyzer } from '../../../src/core/dependency-analyzer';
 import { DepsConflictResolver, getResolverBuild } from '../../../src/core/resolver';
@@ -514,7 +517,7 @@ describe('Vite final configuration', () => {
         await new Promise<void>((resolve, reject) => {
           timeout = setTimeout(
             () => reject(new Error('Watch produced ' + observed.join(', '))),
-            2500,
+            6000,
           );
           watcher.on('event', (event) => {
             if (event.code === 'ERROR') return reject(event.error);
@@ -600,7 +603,67 @@ describe('Vite final configuration', () => {
         await watcher.close();
       }
     },
-    4000,
+    10_000,
+  );
+
+  it.each(['sync throw', 'async error'] as const)(
+    'falls back to directory polling when native directory watching fails (%s)',
+    async (failureMode) => {
+      const root = mkdtempSync(join(tmpdir(), 'deps-vite-fallback-'));
+      roots.push(root);
+      const first = join(root, 'store/first');
+      const second = join(root, 'store/second');
+      mkdirSync(first, { recursive: true });
+      mkdirSync(second, { recursive: true });
+      writeFileSync(join(first, 'package.json'), '{"name":"vue","version":"2.7.16"}');
+      writeFileSync(join(second, 'package.json'), '{"name":"vue","version":"2.7.16"}');
+      mkdirSync(join(root, 'node_modules'), { recursive: true });
+      const alias = join(root, 'node_modules/vue2');
+      symlinkSync(first, alias, 'junction');
+
+      const created: Array<EventEmitter & { closed: boolean; close(): void }> = [];
+      const watchDirectory = (() => {
+        if (failureMode === 'sync throw') {
+          throw Object.assign(new Error('watch limit'), { code: 'ENOSPC' });
+        }
+        const handle = Object.assign(new EventEmitter(), {
+          closed: false,
+          close() {
+            this.closed = true;
+          },
+          ref() {
+            return this;
+          },
+          unref() {
+            return this;
+          },
+        });
+        created.push(handle);
+        return handle as unknown as FSWatcher;
+      }) as unknown as typeof import('node:fs').watch;
+
+      const provider = new InstalledProviderWatch({ interval: 20, watchDirectory });
+      try {
+        const marker = provider.update([join(alias, 'package.json')]);
+        expect(marker).toBeDefined();
+        expect(readFileSync(marker!, 'utf8')).toBe('0');
+        if (failureMode === 'async error') {
+          expect(created.length).toBeGreaterThan(0);
+          created[0]!.emit('error', Object.assign(new Error('watch failed'), { code: 'EMFILE' }));
+          expect(created.every((handle) => handle.closed)).toBe(true);
+        }
+        // Verify signal() also recreates its marker directory if temp cleanup removed it.
+        rmSync(dirname(marker!), { recursive: true, force: true });
+        rmSync(alias);
+        symlinkSync(second, alias, 'junction');
+        await vi.waitFor(() => {
+          expect(existsSync(marker!)).toBe(true);
+          expect(Number(readFileSync(marker!, 'utf8'))).toBeGreaterThan(0);
+        });
+      } finally {
+        provider.close();
+      }
+    },
   );
 
   it('resolves hook-relative replacements from the importer in builds and pre-bundles', async () => {

@@ -1,4 +1,5 @@
 import {
+  mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
@@ -42,26 +43,28 @@ export class InstalledProviderWatch {
   private marker?: string;
   private timer?: ReturnType<typeof setInterval>;
   private pending?: ReturnType<typeof setTimeout>;
-  private failure?: Error;
   private revision = 0;
-  private readonly interval?: number;
+  private interval?: number;
+  private readonly fallbackInterval: number;
+  private readonly watchDirectory: typeof watch;
 
-  constructor(options: { usePolling?: boolean; interval?: number } = {}) {
+  constructor(
+    options: { usePolling?: boolean; interval?: number; watchDirectory?: typeof watch } = {},
+  ) {
+    this.watchDirectory = options.watchDirectory ?? watch;
+    const configured = process.env.CHOKIDAR_INTERVAL
+      ? Number.parseInt(process.env.CHOKIDAR_INTERVAL, 10)
+      : (options.interval ?? 100);
+    this.fallbackInterval = Number.isFinite(configured) && configured > 0 ? configured : 100;
     const setting = process.env.CHOKIDAR_USEPOLLING?.toLowerCase();
     const polling =
       setting === undefined
         ? options.usePolling === true
         : setting !== '' && setting !== 'false' && setting !== '0';
-    if (polling) {
-      const interval = process.env.CHOKIDAR_INTERVAL
-        ? Number.parseInt(process.env.CHOKIDAR_INTERVAL, 10)
-        : (options.interval ?? 100);
-      this.interval = Number.isFinite(interval) && interval > 0 ? interval : 100;
-    }
+    if (polling) this.interval = this.fallbackInterval;
   }
 
   update(files: Iterable<string>): string | undefined {
-    if (this.failure) throw this.failure;
     const previous = this.slots;
     this.slots = new Map();
     for (const file of files) {
@@ -74,12 +77,42 @@ export class InstalledProviderWatch {
     if (this.slots.size > 0 && !this.marker) {
       // Rollup has no plugin-context invalidation method. A watched marker
       // wakes this environment without changing its source or dependency files.
-      this.directory = realpathSync(mkdtempSync(join(tmpdir(), 'deps-vite-watch-')));
-      this.marker = join(this.directory, 'revision');
-      writeFileSync(this.marker, '0');
+      try {
+        this.directory = realpathSync(mkdtempSync(join(tmpdir(), 'deps-vite-watch-')));
+        this.marker = join(this.directory, 'revision');
+        writeFileSync(this.marker, '0');
+      } catch {
+        this.directory = undefined;
+        this.marker = undefined;
+      }
     }
     this.syncDirectories();
-    if (this.slots.size > 0 && this.interval !== undefined) {
+    this.syncTimer();
+    return this.marker;
+  }
+
+  close(): void {
+    clearInterval(this.timer);
+    clearTimeout(this.pending);
+    this.timer = undefined;
+    this.pending = undefined;
+    this.slots.clear();
+    const entries = [...this.directories.values()];
+    this.directories.clear();
+    for (const entry of entries) entry.watcher?.close();
+    this.marker = undefined;
+    if (this.directory) {
+      try {
+        rmSync(this.directory, { recursive: true, force: true, maxRetries: 2 });
+      } catch {
+        // Windows watchers may release directory handles asynchronously.
+      }
+    }
+    this.directory = undefined;
+  }
+
+  private syncTimer(): void {
+    if (this.slots.size > 0 && this.marker && this.interval !== undefined) {
       this.timer ??= setInterval(() => {
         for (const [path, entry] of this.directories) {
           if (directoryState(path)?.stamp === entry.stamp) continue;
@@ -91,20 +124,16 @@ export class InstalledProviderWatch {
       clearInterval(this.timer);
       this.timer = undefined;
     }
-    return this.marker;
   }
 
-  close(): void {
-    clearInterval(this.timer);
-    clearTimeout(this.pending);
-    this.timer = undefined;
-    this.pending = undefined;
-    this.slots.clear();
-    for (const entry of this.directories.values()) entry.watcher?.close();
-    this.directories.clear();
-    this.marker = undefined;
-    if (this.directory) rmSync(this.directory, { recursive: true, force: true });
-    this.directory = undefined;
+  private fallbackToPolling(): void {
+    this.interval ??= this.fallbackInterval;
+    for (const entry of this.directories.values()) {
+      entry.watcher?.close();
+      entry.watcher = undefined;
+    }
+    this.syncTimer();
+    this.schedule();
   }
 
   private syncDirectories(): void {
@@ -135,18 +164,23 @@ export class InstalledProviderWatch {
         entry.identity = current?.identity;
       }
       if (this.interval !== undefined || !current || entry.watcher) continue;
-      const watcher = watch(path, { persistent: false }, (_event, filename) => {
-        const changed = filename ? join(path, filename.toString()) : undefined;
-        if (!changed || this.slots.has(changed) || this.directories.has(changed)) this.schedule();
-      });
-      entry.watcher = watcher;
-      watcher.on('error', (error) => {
-        if (this.directories.get(path) !== entry || entry.watcher !== watcher) return;
-        watcher.close();
-        entry.watcher = undefined;
+      try {
+        const watcher = this.watchDirectory(path, { persistent: false }, (_event, filename) => {
+          const changed = filename ? join(path, filename.toString()) : undefined;
+          if (!changed || this.slots.has(changed) || this.directories.has(changed)) this.schedule();
+        });
+        entry.watcher = watcher;
+        watcher.on('error', () => {
+          if (this.directories.get(path) !== entry || entry.watcher !== watcher) return;
+          watcher.close();
+          entry.watcher = undefined;
+          if (directoryState(path)?.identity !== entry.identity) this.schedule();
+          else this.fallbackToPolling();
+        });
+      } catch {
         if (directoryState(path)?.identity !== entry.identity) this.schedule();
-        else this.fail(error);
-      });
+        else this.fallbackToPolling();
+      }
     }
   }
 
@@ -159,31 +193,29 @@ export class InstalledProviderWatch {
   }
 
   private inspect(): void {
-    try {
-      this.syncDirectories();
-      let moved = false;
-      for (const [slot, previous] of this.slots) {
-        const target = targetOf(slot);
-        if (target === previous) continue;
-        this.slots.set(slot, target);
-        moved = true;
-      }
-      if (moved) this.signal();
-    } catch (error) {
-      this.fail(error as Error);
+    this.syncDirectories();
+    let moved = false;
+    for (const [slot, previous] of this.slots) {
+      const target = targetOf(slot);
+      if (target === previous) continue;
+      this.slots.set(slot, target);
+      moved = true;
     }
-  }
-
-  private fail(error: Error): void {
-    this.failure = new Error('Cannot observe installed dependency links: ' + error.message, {
-      cause: error,
-    });
-    clearInterval(this.timer);
-    this.timer = undefined;
-    this.signal();
+    if (moved) this.signal();
   }
 
   private signal(): void {
-    if (this.marker) writeFileSync(this.marker, String(++this.revision));
+    if (!this.marker) return;
+    const next = String(++this.revision);
+    try {
+      writeFileSync(this.marker, next);
+    } catch {
+      try {
+        if (this.directory) mkdirSync(this.directory, { recursive: true });
+        writeFileSync(this.marker, next);
+      } catch {
+        // Keep Rollup's own watcher running if the temporary directory is unavailable.
+      }
+    }
   }
 }

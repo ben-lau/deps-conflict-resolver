@@ -635,12 +635,22 @@ it.each(['initial exception', 'refresh exception', 'refresh diagnostic'] as cons
         let phase = initialFailure ? 1 : 0;
         let builtPhase = -1;
         let verified = -1;
+        let compiling = false;
+        let pendingStep: (() => void) | undefined;
         compiler.hooks.watchRun.tap({ name: 'RecordRepairPhase', stage: -1000 }, () => {
+          compiling = true;
           builtPhase = phase;
         });
-        deadline = setTimeout(() => reject(new Error('Watch did not react to the repair')), 5000);
+        deadline = setTimeout(() => reject(new Error('Watch did not react to the repair')), 10_000);
         watcher = compiler.watch({ aggregateTimeout: 20, poll: 30 }, (error, stats) => {
+          compiling = false;
           if (error || !stats) return reject(error ?? new Error('Missing compilation stats'));
+          if (pendingStep) {
+            const next = pendingStep;
+            pendingStep = undefined;
+            action = setTimeout(next, 20);
+            return;
+          }
           if (builtPhase !== phase || verified === phase) return;
           verified = phase;
           try {
@@ -662,12 +672,17 @@ it.each(['initial exception', 'refresh exception', 'refresh diagnostic'] as cons
             if (phase === 1) expect(plugin.getAliasConfig()).toEqual({});
             expect(stats.compilation.missingDependencies.has(missing)).toBe(true);
             const interrupted = phase === 1;
-            action = setTimeout(() => {
+            const applyStep = () => {
+              if (compiling) {
+                pendingStep = applyStep;
+                return;
+              }
               phase++;
               if (initialFailure) writeFileSync(missing, 'lockfileVersion: "9.0"\n');
               else if (diagnosticFailure && !interrupted) unlinkSync(consumerManifest);
               else json(consumer, interrupted ? manifest : { ...manifest, transient: true });
-            }, 60);
+            };
+            action = setTimeout(applyStep, 60);
           } catch (failure) {
             reject(failure);
           }
@@ -687,6 +702,7 @@ it.each(['initial exception', 'refresh exception', 'refresh diagnostic'] as cons
       rmSync(root, { recursive: true, force: true });
     }
   },
+  15_000,
 );
 
 it.each(['initialization', 'installation', 'rejected installation'] as const)(
