@@ -154,6 +154,30 @@ describe('fs utils', () => {
   });
 
   describe('findPackagePath', () => {
+    it.each([false, true])(
+      'checks current Node lookup directories without accepting a stale resolved path: exists=%s',
+      (exists) => {
+        const nativeResolve = Object.assign(
+          vi.fn().mockReturnValue('/old/store/provider/package.json'),
+          {
+            paths: () => ['/project/node_modules', '/global'],
+          },
+        );
+        vi.mocked(createRequire).mockReturnValue({
+          resolve: nativeResolve,
+        } as unknown as NodeRequire);
+        vi.mocked(readFileSync).mockImplementation(() => {
+          throw new Error('No package scope');
+        });
+        vi.mocked(existsSync).mockImplementation(
+          (path) => exists && path === join('/global', '@scope/provider'),
+        );
+        expect(findPackagePath('@scope/provider', '/project')).toBe(
+          exists ? '/global/@scope/provider' : null,
+        );
+      },
+    );
+
     it('should find package using require.resolve', () => {
       const mockRequireFn = vi.fn().mockReturnValue('/project/node_modules/lodash/package.json');
       vi.mocked(createRequire).mockReturnValue({
