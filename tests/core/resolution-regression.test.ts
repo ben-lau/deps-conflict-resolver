@@ -55,6 +55,10 @@ function baseOptions(root: string, dependencies = ['legacy']) {
   };
 }
 
+function requestPath(request: Parameters<typeof fetch>[0]): string {
+  return new URL(request instanceof Request ? request.url : request).pathname;
+}
+
 afterEach(() => {
   roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }));
   clearPackageJsonCache();
@@ -238,6 +242,232 @@ describe('diagnostics and deterministic offline operation', () => {
       });
     },
   );
+
+  it.each([
+    { context: 'same consumer', recentPeer: '^4', expected: 'renderer-compatible' },
+    { context: 'same consumer', recentPeer: '^3', expected: 'renderer-compatible' },
+    { context: 'different consumers', recentPeer: '^3', expected: 'renderer-new' },
+    { context: 'explicit exclusion', recentPeer: '^3', expected: 'renderer-new' },
+    { context: 'excluded renderer consumer', recentPeer: '^3', expected: 'renderer-new' },
+    { context: 'excluded renderer peer', recentPeer: '^3', expected: 'renderer-new' },
+  ])(
+    'chooses an installed renderer for $context and a newer $recentPeer peer',
+    async ({ context, recentPeer, expected }) => {
+      const shared = context !== 'different consumers';
+      const root = project({
+        dependencies: {
+          legacy: '1.0.0',
+          ...(!shared && { 'legacy-runtime': '1.0.0' }),
+          renderer: '2.0.0',
+          runtime: '3.0.0',
+          'renderer-new': 'npm:renderer@1.2.0',
+          'renderer-compatible': 'npm:renderer@1.1.0',
+          'runtime-two': 'npm:runtime@2.0.0',
+        },
+      });
+      const legacy = pkg(root, 'legacy', {
+        peerDependencies: { renderer: '^1', ...(shared && { runtime: '^2' }) },
+      });
+      if (!shared) pkg(root, 'legacy-runtime', { peerDependencies: { runtime: '^2' } });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      pkg(root, 'renderer-new', {
+        name: 'renderer',
+        version: '1.2.0',
+        peerDependencies: { runtime: recentPeer },
+      });
+      pkg(root, 'renderer-compatible', {
+        name: 'renderer',
+        version: '1.1.0',
+        peerDependencies: { runtime: '^2' },
+      });
+      pkg(root, 'runtime-two', { name: 'runtime', version: '2.0.0' });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, shared ? ['legacy'] : ['legacy', 'legacy-runtime']),
+        offline: true,
+        strict: true,
+        excludeRedirects: {
+          runtime:
+            context === 'explicit exclusion'
+              ? ['legacy']
+              : context === 'excluded renderer peer'
+                ? ['renderer-new']
+                : [],
+          renderer: context === 'excluded renderer consumer' ? ['legacy'] : [],
+        },
+      });
+      expect(resolver.getAliasPathMappings()).toContainEqual(
+        expect.objectContaining({ aliasName: expected }),
+      );
+      expect(resolver.resolveModule('renderer', join(legacy, 'index.js'))).toBe(
+        context === 'excluded renderer consumer' ? null : expected,
+      );
+      expect(
+        resolver.resolveModule('runtime', join(root, 'node_modules', expected, 'index.js')),
+      ).toBe(expected === 'renderer-compatible' ? 'runtime-two' : null);
+    },
+  );
+
+  it.each(['^3', '^4'])(
+    'uses registry metadata to avoid a renderer with the incompatible peer %s',
+    async (recentPeer) => {
+      const root = project({
+        dependencies: { legacy: '1.0.0', renderer: '2.0.0', runtime: '3.0.0' },
+      });
+      pkg(root, 'legacy', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      const manifests: Record<string, Record<string, PackageJson>> = {
+        renderer: {
+          '1.2.0': {
+            name: 'renderer',
+            version: '1.2.0',
+            peerDependencies: { runtime: recentPeer },
+          },
+          '1.1.0': { name: 'renderer', version: '1.1.0', peerDependencies: { runtime: '^2' } },
+        },
+        runtime: { '2.0.0': { name: 'runtime', version: '2.0.0' } },
+      };
+      const registryFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (request) => {
+        const [, name = '', version] = requestPath(request).split('/');
+        const versions = manifests[name];
+        return Response.json(version ? versions?.[version] : { name, versions });
+      });
+
+      const resolver = await createResolver(baseOptions(root));
+      expect(resolver.getAnalysisResult()?.aliasMappings).toEqual([
+        expect.objectContaining({ originalName: 'renderer', resolvedVersion: '1.1.0' }),
+        expect.objectContaining({ originalName: 'runtime', resolvedVersion: '2.0.0' }),
+      ]);
+      expect(registryFetch.mock.calls.map(([request]) => requestPath(request)).sort()).toEqual([
+        '/renderer',
+        '/runtime',
+      ]);
+    },
+  );
+
+  it.each(['multiple installed peers', 'explicit inclusion'])(
+    'reselects an installed renderer for the chosen peer with %s',
+    async (context) => {
+      const included = context === 'explicit inclusion';
+      const root = project({
+        dependencies: {
+          legacy: '1.0.0',
+          ...(included && { 'legacy-runtime': '1.0.0' }),
+          renderer: '2.0.0',
+          runtime: '3.0.0',
+          'renderer-new': 'npm:renderer@1.2.0',
+          'renderer-compatible': 'npm:renderer@1.1.0',
+          runtime27: 'npm:runtime@2.7.16',
+          ...(!included && { runtime26: 'npm:runtime@2.6.14' }),
+        },
+      });
+      const legacy = pkg(root, 'legacy', {
+        peerDependencies: { renderer: '^1', runtime: included ? '^2 || ^3' : '^2' },
+      });
+      if (included) pkg(root, 'legacy-runtime', { peerDependencies: { runtime: '^2' } });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      pkg(root, 'renderer-new', {
+        name: 'renderer',
+        version: '1.2.0',
+        peerDependencies: { runtime: included ? '^3' : '~2.6.0' },
+      });
+      const renderer = pkg(root, 'renderer-compatible', {
+        name: 'renderer',
+        version: '1.1.0',
+        peerDependencies: { runtime: '~2.7.0' },
+      });
+      pkg(root, 'runtime27', { name: 'runtime', version: '2.7.16' });
+      if (!included) pkg(root, 'runtime26', { name: 'runtime', version: '2.6.14' });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, included ? ['legacy', 'legacy-runtime'] : ['legacy']),
+        includeRedirects: included ? { runtime: ['legacy'] } : {},
+        offline: true,
+        strict: true,
+      });
+      expect(resolver.resolveModule('renderer', join(legacy, 'index.js'))).toBe(
+        'renderer-compatible',
+      );
+      expect(resolver.resolveModule('runtime', join(legacy, 'index.js'))).toBe('runtime27');
+      expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe('runtime27');
+      expect(resolver.getDiagnostics()).toEqual([]);
+    },
+  );
+
+  it('reuses fetched versions when reselecting a registry alias for an explicit redirect', async () => {
+    const root = project({
+      dependencies: {
+        legacy: '1.0.0',
+        'legacy-runtime': '1.0.0',
+        renderer: '2.0.0',
+        runtime: '3.0.0',
+        runtime27: 'npm:runtime@2.7.16',
+      },
+    });
+    pkg(root, 'legacy', { peerDependencies: { renderer: '^1', runtime: '^2 || ^3' } });
+    pkg(root, 'legacy-runtime', { peerDependencies: { runtime: '^2' } });
+    pkg(root, 'renderer', { version: '2.0.0' });
+    pkg(root, 'runtime', { version: '3.0.0' });
+    pkg(root, 'runtime27', { name: 'runtime', version: '2.7.16' });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      Response.json({
+        name: 'renderer',
+        versions: {
+          '1.2.0': { name: 'renderer', version: '1.2.0', peerDependencies: { runtime: '^3' } },
+          '1.1.0': { name: 'renderer', version: '1.1.0', peerDependencies: { runtime: '~2.7.0' } },
+        },
+      }),
+    );
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['legacy', 'legacy-runtime']),
+      includeRedirects: { runtime: ['legacy'] },
+    });
+    expect(resolver.getAnalysisResult()?.aliasMappings).toEqual([
+      expect.objectContaining({ originalName: 'renderer', resolvedVersion: '1.1.0' }),
+      expect.objectContaining({ aliasName: 'runtime27' }),
+    ]);
+    expect(resolver.getDiagnostics().map(({ code }) => code)).toEqual(['ALIAS_NOT_INSTALLED']);
+    expect(fetch.mock.calls.map(([request]) => requestPath(request))).toEqual(['/renderer']);
+  });
+
+  it('rejects an alias whose peers conflict with its only consumer redirect in strict mode', async () => {
+    const root = project({
+      dependencies: {
+        legacy: '1.0.0',
+        renderer: '2.0.0',
+        runtime: '3.0.0',
+        renderer1: 'npm:renderer@1.0.0',
+        runtime2: 'npm:runtime@2.0.0',
+      },
+    });
+    pkg(root, 'legacy', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+    pkg(root, 'renderer', { version: '2.0.0' });
+    pkg(root, 'runtime', { version: '3.0.0' });
+    pkg(root, 'renderer1', {
+      name: 'renderer',
+      version: '1.0.0',
+      peerDependencies: { runtime: '^3' },
+    });
+    pkg(root, 'runtime2', { name: 'runtime', version: '2.0.0' });
+
+    await expect(
+      createResolver({ ...baseOptions(root), offline: true, strict: true }),
+    ).rejects.toMatchObject({
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'ALIAS_PEER_UNSATISFIED',
+          severity: 'error',
+          packageName: 'runtime',
+          requestedBy: ['renderer1'],
+          message: expect.stringContaining('runtime2@2.0.0'),
+        }),
+      ]),
+    });
+  });
 
   it('assigns distinct aliases to scoped and unscoped packages with the same normalized name', async () => {
     const root = project({
@@ -1487,7 +1717,7 @@ describe('resolution correctness with installed packages', () => {
     },
   );
 
-  it('links a selected alias only to a peer version satisfying its own range', async () => {
+  it('reports a consumer mismatch while keeping a usable peer fallback in non-strict mode', async () => {
     const root = project({
       dependencies: {
         legacy: '1.0.0',
@@ -1513,6 +1743,13 @@ describe('resolution correctness with installed packages', () => {
 
     const resolver = await createResolver(baseOptions(root, ['legacy', 'modern']));
     expect(resolver.resolveModule('vue', join(renderer, 'index.js'))).toBe('vue3');
+    expect(resolver.getDiagnostics()).toContainEqual(
+      expect.objectContaining({
+        code: 'ALIAS_PEER_UNSATISFIED',
+        severity: 'error',
+        message: expect.stringContaining('legacy -> vue2@2.7.16'),
+      }),
+    );
   });
 
   it.each(['host', 'nested'])(
@@ -1736,6 +1973,7 @@ describe('resolution correctness with installed packages', () => {
     const root = project({
       dependencies: {
         legacy: '1.0.0',
+        'legacy-ui': '1.0.0',
         modern: '1.0.0',
         renderer: '2.0.0',
         vue: '4.0.0',
@@ -1744,7 +1982,8 @@ describe('resolution correctness with installed packages', () => {
         vue3: 'npm:vue@3.5.0',
       },
     });
-    pkg(root, 'legacy', { peerDependencies: { renderer: '^1.0.0', vue: '^2.0.0' } });
+    pkg(root, 'legacy', { peerDependencies: { renderer: '^1.0.0' } });
+    pkg(root, 'legacy-ui', { peerDependencies: { vue: '^2.0.0' } });
     pkg(root, 'modern', { peerDependencies: { vue: '^3.0.0' } });
     pkg(root, 'renderer', { version: '2.0.0' });
     pkg(root, 'vue', { version: '4.0.0' });
@@ -1756,7 +1995,7 @@ describe('resolution correctness with installed packages', () => {
     pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
     pkg(root, 'vue3', { name: 'vue', version: '3.5.0' });
     const resolver = await createResolver(
-      { ...baseOptions(root, ['legacy', 'modern']), autoInstall: true, strict: true },
+      { ...baseOptions(root, ['legacy', 'legacy-ui', 'modern']), autoInstall: true, strict: true },
       {
         onAnalysisComplete: () => {
           writeFileSync(

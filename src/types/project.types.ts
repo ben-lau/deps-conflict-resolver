@@ -15,14 +15,7 @@ export interface NpmPackageInfo {
   /**
    * 版本对应的包信息
    */
-  versionDetails: Record<
-    string,
-    {
-      dependencies?: Record<string, string>;
-      peerDependencies?: Record<string, string>;
-      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
-    }
-  >;
+  versionDetails: Record<string, PackageJson>;
 
   /**
    * dist-tags（如 latest, next 等）

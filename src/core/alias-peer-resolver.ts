@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type {
   AliasMapping,
+  DependencyPath,
   PackageJson,
   PeerConflict,
   ResolvedOptions,
@@ -14,40 +15,109 @@ import { createWorkspaceDetector } from './workspace-detector';
 import type { RegistryClient } from './registry-client';
 import { AliasManager } from './alias-manager';
 
+export interface PlannedAlias {
+  mapping: AliasMapping;
+  consumers: readonly DependencyPath[];
+}
+
+interface ConsumerPeerContext {
+  consumer: string;
+  directory: string;
+  redirects: AliasMapping[];
+}
+
+export type ConsumerPeerLookup = (plan: PlannedAlias, peerName: string) => ConsumerPeerContext[];
+
+interface AliasPeerLinks {
+  diagnostics: ResolverDiagnostic[];
+  consumerMismatches: ReadonlySet<PlannedAlias>;
+  publish(): void;
+}
+
+export function samePeerConsumer(a: DependencyPath, b: DependencyPath): boolean {
+  return a.packagePath && b.packagePath
+    ? a.packagePath === b.packagePath
+    : a.path.join('>') === b.path.join('>');
+}
+
+export function peerConsumerDirectory(request: DependencyPath, projectRoot: string): string | null {
+  if (request.packagePath) return request.packagePath;
+  let directory = projectRoot;
+  for (const name of request.path) {
+    const path = findPackagePath(name, directory);
+    if (!path) return null;
+    directory = canonicalPath(path);
+  }
+  return directory;
+}
+
+/** Match the consumer against the same scopes used by the runtime resolver. */
+export function createConsumerPeerLookup(
+  plans: readonly PlannedAlias[],
+  options: ResolvedOptions,
+  conflicts: readonly PeerConflict[],
+): ConsumerPeerLookup {
+  const requestsByPeer = new Map(
+    conflicts.map(({ packageName, requestedBy }) => [packageName, requestedBy]),
+  );
+  const mappings = plans.map(({ mapping }) => mapping);
+  const aliases = new Map(mappings.map((mapping) => [mapping.aliasName, mapping]));
+  let resolver: AliasManager | undefined;
+
+  return ({ mapping, consumers }, peerName) => {
+    const requests = requestsByPeer.get(peerName);
+    if (!requests) return [];
+    const contexts: ConsumerPeerContext[] = [];
+    for (const owner of consumers) {
+      if (!requests.some((request) => samePeerConsumer(owner, request))) continue;
+      const directory = peerConsumerDirectory(owner, options.projectRoot);
+      if (!directory) continue;
+      if (!resolver) {
+        resolver = new AliasManager({ ...options, strict: false });
+        resolver.initFromAnalysisResult({
+          aliasMappings: mappings,
+          peerConflicts: [...conflicts],
+          analyzedDependencies: new Map(),
+          missingFirstLevelPeers: [],
+        });
+      }
+      const probe = join(directory, '__peer_context__.js');
+      const alias = resolver.explainResolution(mapping.originalName, probe);
+      if (alias.reason === 'excluded' || !alias.aliases.includes(mapping.aliasName)) continue;
+      const peer = resolver.explainResolution(peerName, probe);
+      const redirects =
+        peer.reason === 'redirected' || peer.reason === 'ambiguous'
+          ? peer.aliases.map((name) => aliases.get(name)!)
+          : [];
+      contexts.push({ consumer: owner.path.join('>'), directory, redirects });
+    }
+    return contexts;
+  };
+}
+
 /**
  * Link the peers of the selected versions, never those of the host versions.
  * Installed aliases work offline; only new aliases need registry manifests.
  */
-export async function linkAliasPeers(
-  mappings: AliasMapping[],
+export async function planAliasPeerLinks(
+  plans: readonly PlannedAlias[],
   options: ResolvedOptions,
   registry: RegistryClient,
-  diagnostics: ResolverDiagnostic[],
-  peerConflicts: readonly PeerConflict[] = [],
+  lookupConsumers: ConsumerPeerLookup,
   watchFiles?: Set<string>,
-): Promise<void> {
-  if (mappings.length === 0) return;
+): Promise<AliasPeerLinks> {
+  const diagnostics: ResolverDiagnostic[] = [];
+  const consumerMismatches = new Set<PlannedAlias>();
+  const mappings = plans.map(({ mapping }) => mapping);
   const readManifest = (directory: string) => {
     watchFiles?.add(join(canonicalPath(directory), 'package.json'));
     return readPackageJsonCached(directory);
   };
-  // Rebuild derived peer edges after installation or manifest changes. Keeping
-  // the previous edges would give one importer two providers after a refresh.
-  for (const mapping of mappings) {
-    const previousPaths = new Set(Object.values(mapping.peerImporterPaths ?? {}).flat());
-    if (mapping.importerPaths && previousPaths.size > 0) {
-      mapping.importerPaths = mapping.importerPaths.filter((path) => !previousPaths.has(path));
-    }
-    mapping.peerImporterPaths = {};
-  }
   const workspace = createWorkspaceDetector(options.projectRoot);
   const workspaceRoot = workspace.getWorkspaceRoot();
   const manifests = new Map<AliasMapping, PackageJson>();
   const installedPaths = new Map<AliasMapping, string>();
-  const consumerRequests = new Map(
-    peerConflicts.map((conflict) => [conflict.packageName, conflict.requestedBy]),
-  );
-  let contextResolver: AliasManager | undefined;
+  const links: Array<{ provider: AliasMapping; importer: string; paths: string[] }> = [];
 
   for (const mapping of mappings) {
     const installedPath = findPackagePath(mapping.aliasName, options.projectRoot);
@@ -87,7 +157,10 @@ export async function linkAliasPeers(
     }
   }
 
-  for (const [importer, manifest] of manifests) {
+  for (const plan of plans) {
+    const { mapping: importer } = plan;
+    const manifest = manifests.get(importer);
+    if (!manifest) continue;
     const importerPaths = new Set([
       join(options.projectRoot, 'node_modules', importer.aliasName),
       join(canonicalPath(options.projectRoot), 'node_modules', importer.aliasName),
@@ -108,58 +181,27 @@ export async function linkAliasPeers(
 
     for (const [peerName, { range: spec, optional }] of effectivePeers) {
       if (optional) continue;
-      const { range } = resolveDependencyRequirement(peerName, spec, workspace);
+      const { name, range } = resolveDependencyRequirement(peerName, spec, workspace);
       // A shared physical alias cannot change runtime according to its caller.
       // Include consumers satisfied by the host; they have no alias mapping.
       const providers = new Map<string, string[]>();
       const providerAliases = new Set<string>();
-      const checkContexts = importer.usedBy.length > 1 && consumerRequests.has(peerName);
-      if (checkContexts) {
-        for (const consumer of importer.usedBy) {
-          const request = consumerRequests
-            .get(peerName)
-            ?.find((entry) => entry.path.join('>') === consumer);
-          if (!request) continue;
-          let directory: string | null = request.packagePath ?? options.projectRoot;
-          if (!request.packagePath) {
-            for (const name of request.path) {
-              const packageDirectory = findPackagePath(name, directory);
-              // Normalize legacy requests before probing a synthetic importer.
-              directory = packageDirectory ? canonicalPath(packageDirectory) : null;
-              if (!directory) break;
-            }
-          }
-          if (!directory) continue;
-          if (!contextResolver) {
-            // Reuse the runtime matcher so include/exclude overrides and path
-            // specificity have identical meaning during context validation.
-            contextResolver = new AliasManager({ ...options, strict: false });
-            contextResolver.initFromAnalysisResult({
-              aliasMappings: mappings,
-              peerConflicts: [...peerConflicts],
-              analyzedDependencies: new Map(),
-              missingFirstLevelPeers: [],
-            });
-          }
-          const decision = contextResolver.explainResolution(
-            peerName,
-            join(directory, '__peer_context__.js'),
-          );
-          const selected =
-            decision.reason === 'redirected' || decision.reason === 'ambiguous'
-              ? mappings.filter((mapping) => decision.aliases.includes(mapping.aliasName))
-              : [];
-          if (selected.length > 0) {
-            for (const mapping of selected) {
-              if (!satisfies(mapping.resolvedVersion, range)) continue;
+      const conflicts = new Set<string>();
+      const redirectAllowed = !options.excludeRedirects[peerName]?.includes(importer.aliasName);
+      if (redirectAllowed) {
+        for (const { consumer, directory, redirects } of lookupConsumers(plan, peerName)) {
+          if (redirects.length > 0) {
+            for (const mapping of redirects) {
+              const label = consumer + ' -> ' + mapping.aliasName + '@' + mapping.resolvedVersion;
+              if (mapping.originalName !== name || !satisfies(mapping.resolvedVersion, range)) {
+                conflicts.add(label);
+                continue;
+              }
               const path = canonicalPath(
                 findPackagePath(mapping.aliasName, options.projectRoot) ??
                   join(options.projectRoot, 'node_modules', mapping.aliasName),
               );
-              providers.set(path, [
-                ...(providers.get(path) ?? []),
-                consumer + ' -> ' + mapping.aliasName + '@' + mapping.resolvedVersion,
-              ]);
+              providers.set(path, [...(providers.get(path) ?? []), label]);
               providerAliases.add(mapping.aliasName);
             }
           } else {
@@ -174,6 +216,18 @@ export async function linkAliasPeers(
             }
           }
         }
+      }
+      if (conflicts.size > 0) {
+        consumerMismatches.add(plan);
+        diagnostics.push({
+          code: 'ALIAS_PEER_UNSATISFIED',
+          severity: 'error',
+          packageName: peerName,
+          aliases: [importer.aliasName],
+          requestedBy: [importer.aliasName],
+          importerPaths: [...importerPaths],
+          message: `${importer.aliasName} requires ${name}@${range}, but its consumers redirect to ${[...conflicts].join(', ')}`,
+        });
       }
       if (providers.size > 1) {
         diagnostics.push({
@@ -191,16 +245,17 @@ export async function linkAliasPeers(
         });
         continue;
       }
-      let candidates = mappings.filter(
-        (mapping) =>
-          mapping !== importer &&
-          mapping.originalName === peerName &&
-          satisfies(mapping.resolvedVersion, range),
-      );
+      let candidates = redirectAllowed
+        ? mappings.filter(
+            (mapping) =>
+              mapping !== importer &&
+              mapping.originalName === peerName &&
+              mapping.originalName === name &&
+              satisfies(mapping.resolvedVersion, range),
+          )
+        : [];
       const sharedContexts = candidates.filter((candidate) =>
-        checkContexts
-          ? providerAliases.has(candidate.aliasName)
-          : candidate.usedBy.some((consumer) => importer.usedBy.includes(consumer)),
+        providerAliases.has(candidate.aliasName),
       );
       if (sharedContexts.length > 0) {
         candidates = sharedContexts;
@@ -215,18 +270,7 @@ export async function linkAliasPeers(
       if (candidates.length === 1) {
         const peer = candidates[0]!;
         if (peer.importerPaths === undefined) continue;
-        const paths = [...importerPaths];
-        const pathSet = new Set(paths);
-        peer.importerPaths = [...new Set([...peer.importerPaths, ...paths])];
-        if (peer.excludedImporterPaths?.length) {
-          peer.excludedImporterPaths = peer.excludedImporterPaths.filter(
-            (excludedPath) => !pathSet.has(excludedPath),
-          );
-        }
-        peer.peerImporterPaths = {
-          ...peer.peerImporterPaths,
-          [importer.aliasName]: paths,
-        };
+        links.push({ provider: peer, importer: importer.aliasName, paths: [...importerPaths] });
         continue;
       }
 
@@ -249,6 +293,7 @@ export async function linkAliasPeers(
         continue;
       }
 
+      if (conflicts.size > 0) continue;
       diagnostics.push({
         code: 'ALIAS_PEER_UNSATISFIED',
         severity: pendingInstallation ? 'warning' : 'error',
@@ -266,4 +311,22 @@ export async function linkAliasPeers(
       });
     }
   }
+
+  return {
+    diagnostics,
+    consumerMismatches,
+    publish() {
+      for (const mapping of mappings) mapping.peerImporterPaths = {};
+      for (const { provider, importer, paths } of links) {
+        const pathSet = new Set(paths);
+        provider.importerPaths = [...new Set([...(provider.importerPaths ?? []), ...paths])];
+        if (provider.excludedImporterPaths?.length) {
+          provider.excludedImporterPaths = provider.excludedImporterPaths.filter(
+            (excludedPath) => !pathSet.has(excludedPath),
+          );
+        }
+        provider.peerImporterPaths = { ...provider.peerImporterPaths, [importer]: paths };
+      }
+    },
+  };
 }

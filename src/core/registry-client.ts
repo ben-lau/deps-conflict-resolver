@@ -7,6 +7,11 @@ const logger = createLogger('npm-registry');
 
 export interface RegistryClient {
   fetchAllVersions(packageName: string, registry: string): Promise<string[]>;
+  getCachedManifest?(
+    packageName: string,
+    version: string,
+    registry: string,
+  ): PackageJson | undefined;
   fetchPackageManifest?(
     packageName: string,
     version: string,
@@ -90,14 +95,7 @@ async function fetchPackageInfo(
           response: fetchedResponse,
           data: (await fetchedResponse.json()) as {
             name: string;
-            versions: Record<
-              string,
-              {
-                dependencies?: Record<string, string>;
-                peerDependencies?: Record<string, string>;
-                peerDependenciesMeta?: Record<string, { optional?: boolean }>;
-              }
-            >;
+            versions: Record<string, PackageJson>;
             'dist-tags': Record<string, string>;
           },
         };
@@ -115,18 +113,29 @@ async function fetchPackageInfo(
     const packageInfo: NpmPackageInfo = {
       name: data!.name,
       versions: Object.keys(data!.versions),
-      versionDetails: data!.versions,
+      // Installation metadata includes peer declarations. Retain only the
+      // fields needed for planning, and only for identifiable manifests.
+      versionDetails: Object.fromEntries(
+        Object.entries(data!.versions)
+          .filter(
+            ([version, manifest]) => manifest?.name === packageName && manifest.version === version,
+          )
+          .map(([version, manifest]) => [
+            version,
+            {
+              name: manifest.name,
+              version: manifest.version,
+              dependencies: manifest.dependencies,
+              optionalDependencies: manifest.optionalDependencies,
+              peerDependencies: manifest.peerDependencies,
+              peerDependenciesMeta: manifest.peerDependenciesMeta,
+            },
+          ]),
+      ),
       distTags: data!['dist-tags'],
     };
 
-    // 缓存时只保留版本列表和 distTags，丢弃庞大的 versionDetails 以节省内存
-    const cacheEntry: NpmPackageInfo = {
-      name: packageInfo.name,
-      versions: packageInfo.versions,
-      versionDetails: {},
-      distTags: packageInfo.distTags,
-    };
-    packageCache.set(cacheKey, cacheEntry);
+    packageCache.set(cacheKey, packageInfo);
 
     return packageInfo;
   } catch (error) {
@@ -142,14 +151,22 @@ async function fetchPackageInfo(
   }
 }
 
+function getCachedManifest(packageName: string, version: string, registry: string) {
+  return (
+    manifestCache.get(`${registry}\0${packageName}\0${version}`) ??
+    packageCache.get(`${registry}:${packageName}`)?.versionDetails[version]
+  );
+}
+
 export const npmRegistryClient: RegistryClient = {
   async fetchAllVersions(packageName: string, registry: string): Promise<string[]> {
     const info = await fetchPackageInfo(packageName, registry);
     return info?.versions ?? [];
   },
+  getCachedManifest,
   async fetchPackageManifest(packageName, version, registry) {
     const key = `${registry}\0${packageName}\0${version}`;
-    const cached = manifestCache.get(key);
+    const cached = getCachedManifest(packageName, version, registry);
     if (cached) return cached;
     const encodedName = packageName.startsWith('@')
       ? `@${encodeURIComponent(packageName.slice(1))}`

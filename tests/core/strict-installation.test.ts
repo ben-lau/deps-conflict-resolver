@@ -377,6 +377,83 @@ describe('strict peer validation across installation', () => {
     expect(install).not.toHaveBeenCalled();
   });
 
+  it('rejects a planned alias before installation when it cannot use the consumer peer', async () => {
+    const { root, install } = fixture(false, '^2');
+    writePackage(root, {
+      name: 'host',
+      dependencies: {
+        consumer: '1.0.0',
+        renderer: '2.0.0',
+        runtime: '2.0.0',
+        runtime1: 'npm:runtime@1.0.0',
+      },
+    });
+    writePackage(join(root, 'node_modules/consumer'), {
+      name: 'consumer',
+      version: '1.0.0',
+      peerDependencies: { renderer: '^1', runtime: '^1' },
+    });
+    writePackage(join(root, 'node_modules/runtime1'), { name: 'runtime', version: '1.0.0' });
+
+    await expect(
+      createResolver({
+        projectRoot: root,
+        dependencies: ['consumer'],
+        packageManager: 'npm',
+        autoInstall: true,
+        strict: true,
+      }),
+    ).rejects.toMatchObject({
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'ALIAS_PEER_UNSATISFIED',
+          severity: 'error',
+          packageName: 'runtime',
+          message: expect.stringContaining('consumer -> runtime1@1.0.0'),
+        }),
+      ]),
+    });
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it('can prepare a replacement for a previously installed alias with the wrong consumer peer', async () => {
+    const { root, install } = fixture(false);
+    writePackage(root, {
+      name: 'host',
+      dependencies: {
+        consumer: '1.0.0',
+        renderer: '2.0.0',
+        runtime: '2.0.0',
+        runtime1: 'npm:runtime@1.0.0',
+        'renderer-new': 'npm:renderer@1.2.0',
+      },
+    });
+    writePackage(join(root, 'node_modules/consumer'), {
+      name: 'consumer',
+      version: '1.0.0',
+      peerDependencies: { renderer: '^1', runtime: '^1' },
+    });
+    writePackage(join(root, 'node_modules/runtime1'), { name: 'runtime', version: '1.0.0' });
+    writePackage(join(root, 'node_modules/renderer-new'), {
+      name: 'renderer',
+      version: '1.2.0',
+      peerDependencies: { runtime: '^2' },
+    });
+
+    const resolver = await createResolver({
+      projectRoot: root,
+      dependencies: ['consumer'],
+      packageManager: 'npm',
+      autoInstall: true,
+      strict: true,
+    });
+    expect(install).toHaveBeenCalledExactlyOnceWith(['aliased-renderer1@npm:renderer@1.0.0']);
+    expect(
+      resolver.resolveModule('runtime', join(root, 'node_modules/aliased-renderer1/index.js')),
+    ).toBe('runtime1');
+    expect(resolver.getDiagnostics()).toEqual([]);
+  });
+
   it('rechecks provisional ambiguity against the alias installed nested provider', async () => {
     const { root, install } = fixture(true, '>=1 <4');
     writePackage(root, {

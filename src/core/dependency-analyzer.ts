@@ -25,6 +25,7 @@ import {
   isValidRange,
   isValidVersion,
   rangesIntersect,
+  findIntersection,
   findBestVersion,
   generateAliasName,
   createAliasInstallSpec,
@@ -51,7 +52,14 @@ import {
   type InstalledPackageNode,
 } from './dependency-graph';
 
-import { linkAliasPeers } from './alias-peer-resolver';
+import {
+  createConsumerPeerLookup,
+  peerConsumerDirectory,
+  planAliasPeerLinks,
+  samePeerConsumer,
+  type ConsumerPeerLookup,
+  type PlannedAlias,
+} from './alias-peer-resolver';
 import { validateSharedPeerContexts } from './shared-peer-contexts';
 import { validateInstalledPeerProviders } from './installed-peer-providers';
 import { AliasManager } from './alias-manager';
@@ -85,6 +93,22 @@ interface ExistingAliasMatch {
 interface ReusedAliasGroup {
   alias: ExistingAliasMatch;
   requests: DependencyPath[];
+}
+
+interface AliasGroup {
+  aliasName: string;
+  version: string;
+  installSpec: string;
+  requests: readonly DependencyPath[];
+}
+
+type PeerRedirects = (peerName: string) => readonly AliasMapping[];
+
+type PeerCompatibility = 'compatible' | 'unresolved' | 'consumer-mismatch';
+
+interface PlannedPeerRequests {
+  all: readonly DependencyPath[];
+  redirected: readonly DependencyPath[];
 }
 
 interface AliasScopeTarget {
@@ -128,6 +152,7 @@ export class DependencyAnalyzer {
   /** 当前 analyze 使用的按安装路径区分的依赖图 */
   private dependencyGraph: InstalledDependencyGraph | null = null;
   private readonly inheritedMismatchesByAlias = new Map<string, readonly string[]>();
+  private readonly peerAliasRequests = new Map<string, PlannedPeerRequests>();
   /** 注册表访问适配器（可注入以支持离线分析和确定性测试） */
   private registryClient: RegistryClient;
   private graphPopulated = false;
@@ -443,6 +468,7 @@ export class DependencyAnalyzer {
       this.declaredDeps = {};
       this.collectCache.clear();
       this.inheritedMismatchesByAlias.clear();
+      this.peerAliasRequests.clear();
       this.dependencyGraph = null;
     }
   }
@@ -1010,14 +1036,21 @@ export class DependencyAnalyzer {
    * 生成别名映射
    */
   private async generateAliasMappings(conflicts: PeerConflict[]): Promise<AliasMapping[]> {
-    const aliasMappings: AliasMapping[] = [];
+    const plans: PlannedAlias[] = [];
     const usedAliasNames = new Set<string>();
+    const versionsByPackage = new Map<string, string[]>();
 
     // 按包名分组需要别名的冲突
     const aliasNeeded = conflicts.filter((c) => c.needsAlias);
 
     // 收集所有冲突包的名称
     const allConflictPackageNames = aliasNeeded.map((c) => c.packageName);
+    for (const { packageName, conflictingRanges } of aliasNeeded) {
+      this.peerAliasRequests.set(packageName, {
+        all: conflictingRanges,
+        redirected: this.getRedirectedPeerRequests(packageName, conflictingRanges),
+      });
+    }
 
     // 对于每个需要别名的包
     for (const conflict of aliasNeeded) {
@@ -1025,20 +1058,155 @@ export class DependencyAnalyzer {
         conflict,
         allConflictPackageNames,
         usedAliasNames,
+        versionsByPackage,
       );
-      aliasMappings.push(...mappings);
+      plans.push(...mappings);
     }
+    if (plans.length === 0) return [];
 
-    await linkAliasPeers(
-      aliasMappings,
+    const lookupConsumers = createConsumerPeerLookup(plans, this.options, conflicts);
+    let links = await planAliasPeerLinks(
+      plans,
       this.options,
       this.registryClient,
-      this.diagnostics,
-      conflicts,
+      lookupConsumers,
       this.watchFiles,
     );
+    const resolved = await this.reselectAliasPlans(
+      plans,
+      links.consumerMismatches,
+      lookupConsumers,
+      versionsByPackage,
+      allConflictPackageNames,
+      usedAliasNames,
+    );
+    if (resolved !== plans) {
+      links = await planAliasPeerLinks(
+        resolved,
+        this.options,
+        this.registryClient,
+        createConsumerPeerLookup(resolved, this.options, conflicts),
+        this.watchFiles,
+      );
+    }
+    links.publish();
+    this.diagnostics.push(...links.diagnostics);
+    return resolved.map(({ mapping }) => mapping);
+  }
 
-    return aliasMappings;
+  private async reselectAliasPlans(
+    plans: PlannedAlias[],
+    mismatches: ReadonlySet<PlannedAlias>,
+    lookupConsumers: ConsumerPeerLookup,
+    versionsByPackage: ReadonlyMap<string, string[]>,
+    allConflictPackageNames: string[],
+    usedAliasNames: Set<string>,
+  ): Promise<PlannedAlias[]> {
+    if (mismatches.size === 0) return plans;
+    const replacements = new Map<PlannedAlias, AliasGroup>();
+    const affectedPackages = new Set<string>();
+    const fetchedVersions = new Map(versionsByPackage);
+
+    // Reconsider only the aliases rejected by the consumer's selected provider.
+    // Keep that provider fixed during selection, then verify the complete plan.
+    for (const plan of mismatches) {
+      const { originalName, aliasName } = plan.mapping;
+      const ranges = [...new Set(plan.consumers.map(({ requiredRange }) => requiredRange))];
+      const peerRedirects = (peer: string) =>
+        lookupConsumers(plan, peer).flatMap(({ redirects }) => redirects);
+      const availableNames = new Set(usedAliasNames);
+      availableNames.delete(aliasName);
+      const declaredNames = this.getExistingAliasNames(originalName);
+      const select = (versions: string[]) =>
+        this.planAliasMappingForGroup(
+          originalName,
+          plan.consumers,
+          ranges,
+          versions,
+          declaredNames,
+          availableNames,
+          peerRedirects,
+        );
+      let replacement = select(fetchedVersions.get(originalName) ?? []);
+      if (
+        !replacement &&
+        this.options.autoInstall &&
+        !this.options.offline &&
+        !fetchedVersions.has(originalName)
+      ) {
+        let versions: string[] = [];
+        try {
+          versions = await this.registryClient.fetchAllVersions(
+            originalName,
+            this.options.registry,
+          );
+        } catch {
+          // Preserve the original mismatch when replacement metadata is unavailable.
+        }
+        fetchedVersions.set(originalName, versions);
+        replacement = select(versions);
+      }
+      if (!replacement) continue;
+      usedAliasNames.add(replacement.aliasName);
+      replacements.set(plan, replacement);
+      affectedPackages.add(originalName);
+    }
+
+    if (replacements.size === 0) return plans;
+    const rebuiltPlans = new Map<PlannedAlias, PlannedAlias>();
+    for (const packageName of affectedPackages) {
+      const packagePlans = plans.filter(({ mapping }) => mapping.originalName === packageName);
+      const groups = packagePlans.map((plan) => {
+        const { aliasName, resolvedVersion, installSpec } = plan.mapping;
+        this.inheritedMismatchesByAlias.delete(aliasName);
+        return (
+          replacements.get(plan) ?? {
+            aliasName,
+            version: resolvedVersion,
+            installSpec,
+            requests: plan.consumers,
+          }
+        );
+      });
+      const rebuilt = this.buildAliasPlans(packageName, groups, allConflictPackageNames);
+      for (const [index, plan] of packagePlans.entries()) rebuiltPlans.set(plan, rebuilt[index]!);
+    }
+    return plans.map((plan) => rebuiltPlans.get(plan) ?? plan);
+  }
+
+  private getRedirectedPeerRequests(
+    packageName: string,
+    requests: DependencyPath[],
+  ): DependencyPath[] {
+    if (!this.options.excludeRedirects[packageName]?.length) return requests;
+    // All conflicting roots are potential scopes before their versions have
+    // been selected. Only explicit exclusions can rule out a root this early.
+    const paths = requests.flatMap(({ packagePath }) => (packagePath ? [packagePath] : []));
+    const matcher = new AliasManager({ ...this.options, strict: false });
+    matcher.initFromAnalysisResult({
+      aliasMappings: [
+        {
+          originalName: packageName,
+          aliasName: packageName,
+          resolvedVersion: '',
+          installSpec: '',
+          usedBy: [],
+          allDependents: requests.flatMap(({ path }) => path.slice(-1)),
+          ...(paths.length > 0 && { importerPaths: paths }),
+        },
+      ],
+      analyzedDependencies: new Map(),
+      peerConflicts: [],
+      missingFirstLevelPeers: [],
+    });
+    return requests.filter((request) => {
+      const directory = peerConsumerDirectory(request, this.options.projectRoot);
+      return (
+        !directory ||
+        matcher.explainResolution(packageName, join(directory, '__peer_context__.js')).reason !==
+          'excluded'
+      );
+    });
   }
 
   /**
@@ -1048,7 +1216,8 @@ export class DependencyAnalyzer {
     conflict: PeerConflict,
     allConflictPackageNames: string[],
     usedAliasNames: Set<string>,
-  ): Promise<AliasMapping[]> {
+    versionsByPackage: Map<string, string[]>,
+  ): Promise<PlannedAlias[]> {
     const { packageName, conflictingRanges } = conflict;
 
     logger.info(`Creating alias for "${packageName}"`);
@@ -1088,7 +1257,6 @@ export class DependencyAnalyzer {
     // 获取已存在的别名（用于复用和避免命名冲突）
     const existingAliasNames = this.getExistingAliasNames(packageName);
     // Names are reserved across all conflicts in this analysis generation.
-    const mappings: AliasMapping[] = [];
 
     // 先收集所有真实已安装的别名身份，再按范围筛选候选。否则当同名
     // alias 只有一个满足当前范围时，另一条物理路径会被过滤掉，运行时
@@ -1157,12 +1325,12 @@ export class DependencyAnalyzer {
       if (packagePath && ranges && ranges.size > 1 && !sharedAliases.has(packagePath)) {
         sharedAliases.set(
           packagePath,
-          this.findExistingAliasForRanges(packageName, [...ranges], new Set()),
+          this.findExistingAliasForRanges(packageName, [...ranges], new Set(), [request]),
         );
       }
       const existingAlias =
         (packagePath ? sharedAliases.get(packagePath) : undefined) ??
-        this.findExistingAliasForRanges(packageName, [request.requiredRange], new Set());
+        this.findExistingAliasForRanges(packageName, [request.requiredRange], new Set(), [request]);
 
       if (!existingAlias) {
         unresolvedRequests.push(request);
@@ -1221,12 +1389,7 @@ export class DependencyAnalyzer {
       return [];
     }
 
-    const plannedGroups: Array<{
-      aliasName: string;
-      version: string;
-      installSpec: string;
-      requests: DependencyPath[];
-    }> = [];
+    const plannedGroups: AliasGroup[] = [];
 
     for (const reusedGroup of reusedAliasGroups.values()) {
       logger.info(
@@ -1240,41 +1403,8 @@ export class DependencyAnalyzer {
       });
     }
 
-    const finalizeMappings = () => {
-      const buildMapping = (
-        entry: (typeof plannedGroups)[number],
-        pruneIncompatibleBranch?: PruneIncompatibleBranch,
-      ) =>
-        this.buildAliasMapping(
-          packageName,
-          entry.aliasName,
-          entry.version,
-          entry.installSpec,
-          entry.requests,
-          allConflictPackageNames,
-          pruneIncompatibleBranch,
-        );
-
-      // Infer a substitute only from a verified alias's independently
-      // compatible scope. Its reachability cannot rely on an incompatible
-      // branch that is itself waiting to decide whether to inherit.
-      const verified = plannedGroups.filter(({ installSpec }) => !installSpec);
-      let findScopedProvider: PruneIncompatibleBranch | undefined;
-      const pruneIncompatibleBranch: PruneIncompatibleBranch | undefined =
-        this.dependencyGraph && plannedGroups.length > 1 && verified.length > 0
-          ? (path, requirements) => {
-              findScopedProvider ??= this.createScopedProviderLookup(
-                packageName,
-                verified.map((entry) => buildMapping(entry, () => true)),
-              );
-              return findScopedProvider(path, requirements);
-            }
-          : undefined;
-      for (const entry of plannedGroups) {
-        mappings.push(buildMapping(entry, pruneIncompatibleBranch));
-      }
-      return mappings;
-    };
+    const finalizeMappings = () =>
+      this.buildAliasPlans(packageName, plannedGroups, allConflictPackageNames);
 
     // 没有未匹配的请求时，不访问 registry。
     if (unresolvedRequests.length === 0) {
@@ -1296,7 +1426,9 @@ export class DependencyAnalyzer {
     let versions: string[];
     try {
       versions = await this.registryClient.fetchAllVersions(packageName, this.options.registry);
+      versionsByPackage.set(packageName, versions);
     } catch (error) {
+      versionsByPackage.set(packageName, []);
       this.diagnostics.push({
         code: 'REGISTRY_ERROR',
         severity: 'error',
@@ -1362,6 +1494,41 @@ export class DependencyAnalyzer {
     return finalizeMappings();
   }
 
+  private buildAliasPlans(
+    packageName: string,
+    groups: AliasGroup[],
+    allConflictPackageNames: string[],
+  ): PlannedAlias[] {
+    const buildMapping = (entry: AliasGroup, pruneIncompatibleBranch?: PruneIncompatibleBranch) =>
+      this.buildAliasMapping(
+        packageName,
+        entry.aliasName,
+        entry.version,
+        entry.installSpec,
+        entry.requests,
+        allConflictPackageNames,
+        pruneIncompatibleBranch,
+      );
+
+    // Infer a substitute only from a verified alias's independently compatible scope.
+    const verified = groups.filter(({ installSpec }) => !installSpec);
+    let findScopedProvider: PruneIncompatibleBranch | undefined;
+    const pruneIncompatibleBranch: PruneIncompatibleBranch | undefined =
+      this.dependencyGraph && groups.length > 1 && verified.length > 0
+        ? (path, requirements) => {
+            findScopedProvider ??= this.createScopedProviderLookup(
+              packageName,
+              verified.map((entry) => buildMapping(entry, () => true)),
+            );
+            return findScopedProvider(path, requirements);
+          }
+        : undefined;
+    return groups.map((entry) => ({
+      mapping: buildMapping(entry, pruneIncompatibleBranch),
+      consumers: entry.requests,
+    }));
+  }
+
   /**
    * 按范围兼容性分组
    * 有交集的范围放在一组，互斥的分开
@@ -1414,19 +1581,21 @@ export class DependencyAnalyzer {
    */
   private planAliasMappingForGroup(
     packageName: string,
-    group: DependencyPath[],
+    group: readonly DependencyPath[],
     groupRanges: string[],
     versions: string[],
     existingAliasNames: Set<string>,
     usedAliasNames: Set<string>,
-  ): {
-    aliasName: string;
-    version: string;
-    installSpec: string;
-    requests: DependencyPath[];
-  } | null {
+    peerRedirects?: PeerRedirects,
+  ): AliasGroup | null {
     // 1. 先检查是否有现有别名可复用（包括 workspace 级别）
-    const existingAlias = this.findExistingAliasForRanges(packageName, groupRanges, usedAliasNames);
+    const existingAlias = this.findExistingAliasForRanges(
+      packageName,
+      groupRanges,
+      usedAliasNames,
+      group,
+      peerRedirects,
+    );
 
     if (existingAlias) {
       logger.info(
@@ -1442,7 +1611,9 @@ export class DependencyAnalyzer {
     }
 
     // 2. 找到满足该组所有范围的最佳版本
-    const bestVersion = findBestVersion(versions, groupRanges);
+    if (versions.length === 0) return null;
+    const matchingVersions = findIntersection(versions, groupRanges);
+    let bestVersion = findBestVersion(matchingVersions, []);
 
     if (!bestVersion) {
       logger.warn(
@@ -1457,6 +1628,26 @@ export class DependencyAnalyzer {
       ...usedAliasNames,
       ...this.getReservedDependencyNames(),
     ]);
+    const cachedManifest = (version: string) =>
+      this.registryClient.getCachedManifest?.(packageName, version, this.options.registry);
+    const compatiblePeers = (version: string, manifest: PackageJson) =>
+      this.checkPeerCompatibility(
+        manifest,
+        this.generateUniqueAliasName(packageName, version, combinedExisting),
+        this.options.projectRoot,
+        group,
+        peerRedirects,
+      ) === 'compatible';
+    const preferred = cachedManifest(bestVersion);
+    if (peerRedirects || (preferred && !compatiblePeers(bestVersion, preferred))) {
+      const compatible = matchingVersions.filter((version) => {
+        const manifest = cachedManifest(version);
+        return manifest && compatiblePeers(version, manifest);
+      });
+      const alternative = findBestVersion(compatible, []);
+      if (peerRedirects && !alternative) return null;
+      bestVersion = alternative ?? bestVersion;
+    }
     const aliasName = this.generateUniqueAliasName(packageName, bestVersion, combinedExisting);
     const installSpec = createAliasInstallSpec(aliasName, packageName, bestVersion);
 
@@ -1478,7 +1669,7 @@ export class DependencyAnalyzer {
     aliasName: string,
     version: string,
     installSpec: string,
-    group: DependencyPath[],
+    group: readonly DependencyPath[],
     allConflictPackageNames: string[],
     pruneIncompatibleBranch?: PruneIncompatibleBranch,
   ): AliasMapping {
@@ -1648,6 +1839,8 @@ export class DependencyAnalyzer {
     packageName: string,
     ranges: string[],
     excludeAliases: Set<string>,
+    consumers: readonly DependencyPath[],
+    peerRedirects?: PeerRedirects,
   ): ExistingAliasMatch | null {
     logger.debug(
       `  Searching for existing alias for ${packageName} satisfying ranges: [${ranges.join(', ')}]`,
@@ -1655,6 +1848,18 @@ export class DependencyAnalyzer {
 
     // 1. 先查找当前项目 package.json 中的别名
     const npmAliases = this.existingAliasesMap.get(packageName);
+    let fallback: ExistingAliasMatch | null = null;
+    const canPrepareReplacement = this.options.autoInstall && !this.options.offline;
+    const prefer = (candidate: ExistingAliasMatch): boolean => {
+      const compatibility = this.checkInstalledAliasPeers(candidate, consumers, peerRedirects);
+      if (compatibility === 'compatible') return true;
+      // Keep installed matches for diagnostics unless preparation can look
+      // for a replacement for a known consumer mismatch.
+      if (!peerRedirects && (compatibility !== 'consumer-mismatch' || !canPrepareReplacement)) {
+        fallback ??= candidate;
+      }
+      return false;
+    };
 
     if (npmAliases && npmAliases.length > 0) {
       logger.debug(`  Checking ${npmAliases.length} local alias(es)...`);
@@ -1686,12 +1891,13 @@ export class DependencyAnalyzer {
 
         if (allSatisfied) {
           logger.debug(`    Matched local alias: ${alias.aliasName}@${alias.installedVersion}`);
-          return {
+          const candidate: ExistingAliasMatch = {
             name: alias.aliasName,
             version: alias.installedVersion,
             installedPath: installedAlias?.path,
             scope: 'local',
           };
+          if (prefer(candidate)) return candidate;
         } else {
           logger.debug(
             `    Skip ${alias.aliasName}@${alias.installedVersion}: version doesn't satisfy all ranges`,
@@ -1724,18 +1930,112 @@ export class DependencyAnalyzer {
       const installedVersion = pkgJson.version;
       if (ranges.every((range) => satisfies(installedVersion, range))) {
         logger.debug(`    Matched workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
-        return {
+        const candidate: ExistingAliasMatch = {
           name: wsAlias.aliasName,
           version: installedVersion,
           isWorkspaceAlias: true,
           installedPath: packagePath,
           scope: 'workspace',
         };
+        if (prefer(candidate)) return candidate;
       }
     }
 
-    logger.debug(`  No existing alias found for ${packageName}`);
-    return null;
+    if (!fallback) logger.debug(`  No existing alias found for ${packageName}`);
+    // Preserve validation diagnostics when every compatible version has
+    // unresolved peers. The final selected scopes are checked by linkAliasPeers.
+    return fallback;
+  }
+
+  private checkInstalledAliasPeers(
+    candidate: ExistingAliasMatch,
+    consumers: readonly DependencyPath[],
+    peerRedirects?: PeerRedirects,
+  ): PeerCompatibility {
+    if (!candidate.installedPath) return 'unresolved';
+    const manifest = readPackageJsonCached(candidate.installedPath);
+    return manifest
+      ? this.checkPeerCompatibility(
+          manifest,
+          candidate.name,
+          candidate.installedPath,
+          consumers,
+          peerRedirects,
+        )
+      : 'unresolved';
+  }
+
+  private checkPeerCompatibility(
+    manifest: PackageJson,
+    requestName: string,
+    baseDir: string,
+    consumers: readonly DependencyPath[],
+    peerRedirects?: PeerRedirects,
+  ): PeerCompatibility {
+    let compatibility: PeerCompatibility = 'compatible';
+    const ownPlan = manifest.name ? this.peerAliasRequests.get(manifest.name) : undefined;
+    const redirectedConsumers =
+      ownPlan && ownPlan.all !== ownPlan.redirected
+        ? consumers.filter((consumer) =>
+            ownPlan.redirected.some((request) => samePeerConsumer(consumer, request)),
+          )
+        : consumers;
+    const peers = getEffectivePeerDependencies(manifest, requestName, this.options.peerOverrides);
+    for (const [peerName, peer] of peers) {
+      if (peer.optional) continue;
+      const { name, range } = resolveDependencyRequirement(
+        peerName,
+        peer.range,
+        this.workspaceDetector,
+      );
+      const planned = this.peerAliasRequests.get(peerName);
+      const redirectAllowed = !this.options.excludeRedirects[peerName]?.includes(requestName);
+      const selected = redirectAllowed ? peerRedirects?.(peerName) : undefined;
+      if (selected?.length) {
+        if (
+          selected.some(
+            (provider) =>
+              provider.originalName !== name || !satisfies(provider.resolvedVersion, range),
+          )
+        ) {
+          return 'consumer-mismatch';
+        }
+        continue;
+      }
+      const shared =
+        redirectAllowed && !peerRedirects
+          ? (planned?.redirected.filter((request) =>
+              redirectedConsumers.some((consumer) => samePeerConsumer(consumer, request)),
+            ) ?? [])
+          : [];
+      if (shared.length === 0) {
+        const { pkgJson } = this.resolvePackageJson(peerName, baseDir);
+        if (pkgJson?.name === name && pkgJson.version && satisfies(pkgJson.version, range))
+          continue;
+      } else if (
+        name !== peerName ||
+        shared.some(({ requiredRange }) => !rangesIntersect(requiredRange, range))
+      ) {
+        return 'consumer-mismatch';
+      }
+      if (!redirectAllowed || !planned || name !== peerName) {
+        compatibility = 'unresolved';
+        continue;
+      }
+      const installed = this.findInstalledAliasMatches(peerName).filter(({ version }) =>
+        shared.length > 0
+          ? shared.every(({ requiredRange }) => satisfies(version, requiredRange))
+          : planned.all.some(({ requiredRange }) => satisfies(version, requiredRange)),
+      );
+      if (installed.some(({ version }) => satisfies(version, range))) continue;
+      if (shared.length > 0 && installed.length > 0) return 'consumer-mismatch';
+      if (
+        this.options.offline ||
+        !planned.all.some(({ requiredRange }) => rangesIntersect(requiredRange, range))
+      )
+        compatibility = 'unresolved';
+    }
+    return compatibility;
   }
 
   /**
