@@ -271,6 +271,72 @@ describe('Vite final configuration', () => {
     },
     6000,
   );
+  it.each(['retargeted alias', 'nearer peer'] as const)(
+    'wakes production watch for a %s without editing source',
+    async (change) => {
+      const root = fixture('2.7.16');
+      const alias = join(root, 'node_modules/vue2');
+      const first = join(root, 'first');
+      const second = join(root, 'second');
+      renameSync(alias, first);
+      mkdirSync(second);
+      writeFileSync(join(second, 'package.json'), readFileSync(join(first, 'package.json')));
+      writeFileSync(join(second, 'index.js'), 'export const version = "new-provider";');
+      symlinkSync(first, alias, 'junction');
+      const watcher = await build({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [plugin({ dependencies: ['legacy'], offline: true, strict: true })],
+        build: {
+          lib: { entry: join(root, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
+          watch: { chokidar: { usePolling: true, interval: 30 }, buildDelay: 30 },
+        },
+      });
+      if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
+      const output = join(root, 'dist/runtime.cjs');
+      const require = createRequire(import.meta.url);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let edit: ReturnType<typeof setTimeout> | undefined;
+      const observed: string[] = [];
+      try {
+        await new Promise<void>((resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Watch produced ' + observed.join(', '))),
+            2500,
+          );
+          watcher.on('event', (event) => {
+            if (event.code === 'ERROR') return reject(event.error);
+            if (event.code !== 'END') return undefined;
+            delete require.cache[output];
+            const { version } = require(output) as { version: string };
+            observed.push(version);
+            if (version === 'new-provider') resolve();
+            if (edit) return undefined;
+            if (version !== '2.7.16') return reject(new Error('Unexpected provider: ' + version));
+            edit = setTimeout(() => {
+              if (change === 'retargeted alias') {
+                rmSync(alias);
+                symlinkSync(second, alias, 'junction');
+              } else {
+                const nested = join(root, 'node_modules/legacy/node_modules/vue');
+                mkdirSync(nested, { recursive: true });
+                renameSync(join(second, 'index.js'), join(nested, 'index.js'));
+                renameSync(join(second, 'package.json'), join(nested, 'package.json'));
+              }
+            }, 200);
+            return undefined;
+          });
+        });
+      } finally {
+        clearTimeout(edit);
+        clearTimeout(timeout);
+        await watcher.close();
+      }
+    },
+    4000,
+  );
+
   it('resolves hook-relative replacements from the importer in builds and pre-bundles', async () => {
     const root = fixture('2.7.16');
     const legacy = join(root, 'node_modules/legacy');

@@ -628,7 +628,8 @@ export class DepsConflictResolver {
     this.watch.recordFiles(
       this.options.projectRoot,
       this.preparation!.owner,
-      this.analysisResult?.watchFiles ?? [],
+      this.analysisResult,
+      this.options.dependencies,
       this.snapshotError !== null,
     );
   }

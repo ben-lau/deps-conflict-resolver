@@ -175,6 +175,12 @@ export function findProjectRoot(startDir: string): string | null {
  * lookup order; current filesystem links supply identity. Entry points and
  * exports remain the responsibility of the module/bundler resolver.
  */
+export function packageLookupPaths(baseDir: string): string[] | null {
+  return createRequire(pathToFileURL(join(baseDir, 'package.json'))).resolve.paths(
+    'deps-conflict-resolver/package.json',
+  );
+}
+
 export function findPackagePath(
   packageName: string,
   baseDir: string,

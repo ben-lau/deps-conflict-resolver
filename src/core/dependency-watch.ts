@@ -1,8 +1,14 @@
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { LOCK_FILE_MAP } from '../constants';
 import type { AnalysisResult } from '../types';
 import { observeLockfile, type DependencyInputs } from '../utils/dependency-inputs';
-import { canonicalPath, fileExists, findProjectRoot, iterateParentDirs } from '../utils/fs';
+import {
+  canonicalPath,
+  fileExists,
+  findProjectRoot,
+  iterateParentDirs,
+  packageLookupPaths,
+} from '../utils/fs';
 import { getProjectPreparation } from './project-preparation';
 
 export interface WatchChanges {
@@ -13,6 +19,8 @@ export interface WatchChanges {
 export interface WatchedFiles {
   existing: Set<string>;
   missing: Set<string>;
+  providerFiles: Set<string>;
+  providerDirectories: Set<string>;
 }
 
 export interface AnalysisSnapshot {
@@ -58,20 +66,54 @@ export class DependencyWatch {
       }
       if (directory === owner) inPreparationOwner = false;
     }
-    return { existing, missing };
+    return { existing, missing, providerFiles: new Set(), providerDirectories: new Set() };
   }
 
   recordFiles(
     projectRoot: string,
     owner: string,
-    manifestFiles: readonly string[],
+    analysis: AnalysisResult | null,
+    entries: readonly string[],
     failed: boolean,
   ): void {
     const watched = this.collectLockfiles(projectRoot, owner);
+    const manifestFiles = analysis?.watchFiles ?? [];
     if (failed) {
       this.addRecoveryWatchFiles(watched, this.files, manifestFiles);
     } else {
       for (const file of manifestFiles) watched.existing.add(file);
+    }
+    const lookups = new Map<string, string[]>();
+    const watchProvider = (base: string, name: string) => {
+      let paths = lookups.get(base);
+      if (!paths) lookups.set(base, (paths = packageLookupPaths(base) ?? []));
+      for (const directory of paths) {
+        const file = join(directory, name, 'package.json');
+        watched.providerFiles.add(file);
+        if (!fileExists(file)) {
+          watched.missing.add(file);
+          // Chokidar needs an existing directory when an entire package slot
+          // is absent. Stay within the lookup directory or its installed owner.
+          let parent = dirname(file);
+          const boundary = dirname(directory);
+          while (parent !== boundary && !fileExists(parent)) parent = dirname(parent);
+          if (/[/\\]node_modules(?:[/\\]|$)/.test(parent)) watched.providerDirectories.add(parent);
+          continue;
+        }
+        watched.existing.add(file);
+        const installed = dirname(file);
+        if (canonicalPath(installed) !== installed) watched.existing.add(installed);
+        break;
+      }
+    };
+    for (const name of entries) watchProvider(projectRoot, name);
+    for (const mapping of analysis?.aliasMappings ?? [])
+      watchProvider(projectRoot, mapping.aliasName);
+    for (const conflict of analysis?.peerConflicts ?? []) {
+      watchProvider(projectRoot, conflict.packageName);
+      for (const request of conflict.requestedBy) {
+        if (request.packagePath) watchProvider(request.packagePath, conflict.packageName);
+      }
     }
     this.files = watched;
   }

@@ -8,7 +8,7 @@ import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } fr
 import { createSsrExternalPolicy } from './ssr-external';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const logger = createLogger('vite-plugin');
 const VITE_LOG_LEVELS = {
@@ -60,6 +60,34 @@ interface EnvironmentWatch {
   published?: string;
   fingerprint: string;
   rulesChanged: boolean;
+}
+
+function watchInstalledProviders(config: ResolvedConfig, files: ReadonlySet<string>): void {
+  if (viteMajor >= 8) return;
+  const paths = new Set<string>();
+  for (const file of files) {
+    let path = normalizePath(file);
+    while (/\/node_modules(?:\/|$)/.test(path)) {
+      paths.add(path);
+      path = normalizePath(dirname(path));
+    }
+  }
+  const ignored = [...paths].map((path) => '!' + path.replace(/[*?{}()[\]\\!+@]/g, '\\$&'));
+  for (const watchBuild of [
+    config.build,
+    ...Object.values(config.environments ?? {}).map((environment) => environment.build),
+  ]) {
+    const rollupWatch = watchBuild?.rollupOptions?.watch;
+    if (
+      !watchBuild?.watch ||
+      watchBuild.watch.chokidar?.ignored ||
+      (rollupWatch && rollupWatch.chokidar?.ignored)
+    )
+      continue;
+    // Vite's Rollup watcher ignores node_modules. Match only the exact
+    // provider slots and their ancestors, keeping the rest of the tree ignored.
+    watchBuild.watch.chokidar = { ...watchBuild.watch.chokidar, ignored };
+  }
 }
 
 /**
@@ -384,6 +412,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         await withViteLogger(config, Boolean(options.debug), () =>
           getResolverBuild(active).refreshForWatch({}),
         );
+        const files = getResolverBuild(active).snapshot().watchFiles?.providerFiles;
+        if (files?.size) watchInstalledProviders(config, files);
         watch = {
           first: true,
           fingerprint: active.getResolutionFingerprint(),
@@ -570,7 +600,21 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         const { analysis, watchFiles } = build.snapshot();
         session.files = new Set(watchFiles?.existing ?? analysis?.watchFiles ?? []);
         for (const file of session.files) this.addWatchFile(file);
-        for (const file of watchFiles?.missing ?? []) this.addWatchFile(file);
+        for (const file of watchFiles?.missing ?? []) {
+          // Chokidar watches the existing ancestor instead. Registering the
+          // missing leaf as well can race its scan of the newly created slot.
+          if (
+            viteMajor < 8 &&
+            watchFiles?.providerFiles.has(file) &&
+            /\/node_modules\//.test(normalizePath(file))
+          )
+            continue;
+          this.addWatchFile(file);
+        }
+        if (viteMajor < 8) {
+          for (const directory of watchFiles?.providerDirectories ?? [])
+            this.addWatchFile(directory);
+        }
       }
     },
     generateBundle: {
