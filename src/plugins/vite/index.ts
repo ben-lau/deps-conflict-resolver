@@ -2,7 +2,7 @@ import type { Alias, Plugin, UserConfig } from 'vite';
 import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
-import { version as viteVersion } from 'vite';
+import { createFilter, version as viteVersion } from 'vite';
 import { createOptimizerOptions } from './optimizer';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
@@ -154,6 +154,10 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       const aliasPackages = Array.from(new Set(aliasPathMappings.map((m) => m.aliasName)));
       const activeNames = new Set(aliasPackages);
       const ssrPackages = new Set(aliasPackages);
+      // Pre-bundle roots, then let the optimizer follow actual imports. Eagerly
+      // including every declared transitive dependency can load unused native
+      // addons and optional platform packages before any SSR entry requests them.
+      const ssrOptimizerPackages = new Set(aliasPackages);
       for (const mapping of analysisResult.aliasMappings) {
         if (!activeNames.has(mapping.aliasName)) continue;
         const excluded = new Set(resolverOptions.excludeRedirects?.[mapping.originalName] ?? []);
@@ -164,7 +168,32 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         ]) {
           if (!excluded.has(name)) ssrPackages.add(name);
         }
+        for (const name of [
+          ...mapping.usedBy.map((path) => path.split('>')[0]!),
+          ...(resolverOptions.includeRedirects?.[mapping.originalName] ?? []),
+        ]) {
+          if (!excluded.has(name)) ssrOptimizerPackages.add(name);
+        }
       }
+
+      const ssrEnvironment = config.environments?.ssr;
+      const external = ssrEnvironment?.resolve?.external ?? config.ssr?.external;
+      const ssrExternal = Array.isArray(external) ? external : [];
+      const ssrExcluded = [
+        ...ssrExternal,
+        ...(config.ssr?.optimizeDeps?.exclude ?? []),
+        ...(ssrEnvironment?.optimizeDeps?.exclude ?? []),
+      ];
+      const manualNoExternal = ssrEnvironment?.resolve?.noExternal ?? config.ssr?.noExternal;
+      const keepsInternal =
+        manualNoExternal === true
+          ? () => true
+          : manualNoExternal && (!Array.isArray(manualNoExternal) || manualNoExternal.length > 0)
+            ? createFilter(manualNoExternal, undefined, { resolve: false })
+            : () => false;
+      const allowsSsrOptimization = (name: string) =>
+        (external !== true || keepsInternal(name)) &&
+        !ssrExcluded.some((excluded) => name === excluded || name.startsWith(excluded + '/'));
 
       logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 
@@ -178,7 +207,10 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         ...(ssr === 'auto'
           ? {
               ssr: {
-                noExternal: config.ssr?.noExternal === true ? true : [...ssrPackages],
+                noExternal:
+                  config.ssr?.noExternal === true
+                    ? true
+                    : [...ssrPackages].filter(allowsSsrOptimization),
                 ...(command === 'serve'
                   ? {
                       optimizeDeps: {
@@ -186,7 +218,10 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
                           ? { disabled: false as const }
                           : {}),
                         ...optimizeDeps,
-                        include: [...ssrPackages],
+                        include: [...ssrOptimizerPackages].filter(allowsSsrOptimization),
+                        // Vite's SSR optimizer is a separate bundler; forward
+                        // explicit externals so nested imports stay external too.
+                        exclude: ssrExternal,
                       },
                     }
                   : {}),

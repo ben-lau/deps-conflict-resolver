@@ -167,6 +167,8 @@ offline=true 禁止 registry 查询及包管理器安装，即使同时设置 au
 
 Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal，开发时也将它们加入 SSR 预构建并使用相同的 alias 解析规则，使 CommonJS 的 require 和 ESM 的 import 都能重定向。默认 ssr='manual'，由使用者配置。已有 noExternal=true 和 SSR 预构建配置会合并保留。显式 ssr.external 仍遵循 Vite 自身的优先级；需要自动重定向时，应避免同时外置这些包或禁用 SSR 预构建。
 
+开发预构建只将有效 alias、直接消费方和 includeRedirects 作为入口，再跟随实际的 import / require，不会提前加载整个依赖清单。显式 ssr.external 和 SSR optimizeDeps.exclude（包括 environments.ssr 的配置）优先于自动生成的配置；外置的依赖也会传给 SSR 优化器。显式排除需要重定向的消费方时，需要手动配置其解析方式。
+
 ### 查看某次解析的原因
 
 ```typescript
@@ -188,7 +190,9 @@ explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason �
 - Vite 4.0 的原生 SSR 预构建在混用 Vue 2 的 ESM / CommonJS 入口时会产生独立实例，插件也受此限制；此场景建议使用 Vite 5 或更新版本。包的条件导出由 Vite 解析，插件不强制合并本来就不同的导出入口。
 - Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
 - 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
+- workspace 根目录通过 dependencies、devDependencies 或 optionalDependencies 声明的 alias 均可离线复用，前提是实际安装的包名正确、版本满足目标 peer。
 - workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。
+- 同一个 alias 被多个消费方共享时，会检查各方的有效 peer provider，包含使用宿主版本的消费方及 include/exclude 覆盖。provider 不一致会报告 AMBIGUOUS_IMPORTER，strict=true 时拒绝初始化；不声明该 peer 的消费方不会被误判为冲突。
 - 当前未提供 Yarn PnP 的完整适配，也未实现私有 registry 的 scope 路由与认证配置继承。
 - 多版本运行时共存仍需要合适的挂载/更新/卸载桥接；本插件不承担 SFC 编译器转换、跨版本组件协议或 CSS 隔离。
 

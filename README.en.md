@@ -167,6 +167,8 @@ offline=true prohibits registry queries and package-manager installation, includ
 
 Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal. During development it also includes them in SSR pre-bundling with the same alias resolution rules, redirecting both CommonJS require and ESM import requests. The default is ssr='manual'. Existing noExternal=true and SSR optimizer settings are preserved and merged. Explicit ssr.external entries retain Vite's own precedence; avoid externalizing affected packages or disabling SSR pre-bundling when automatic redirection is needed.
 
+Development pre-bundling uses active aliases, direct consumers, and includeRedirects as entries, then follows actual import / require requests instead of eagerly loading every declared dependency. Explicit ssr.external and SSR optimizeDeps.exclude settings, including environments.ssr settings, take precedence over generated configuration. Externals are also forwarded to the SSR optimizer. Consumers explicitly excluded from automatic handling require manual resolution configuration.
+
 ### Explain a Resolution
 
 ```typescript
@@ -188,7 +190,9 @@ explainResolution returns resolved, reason, aliases, and matchedPaths. Reasons d
 - Native Vite 4.0 SSR pre-bundling creates separate Vue 2 instances when ESM and CommonJS entries are mixed; the plugin shares this limitation. Use Vite 5 or newer for that scenario. Vite resolves conditional exports; the plugin does not force distinct export entry points into one implementation.
 - Webpack 5 uses beforeResolve. Initialization failures remain permissive by default; strict=true propagates failures to the compiler.
 - Installed optionalDependencies participate in the runtime graph. The existing optional-peer policy is unchanged.
+- Installed aliases declared in workspace-root dependencies, devDependencies, or optionalDependencies can be reused offline when their actual package name is correct and their installed version satisfies the target peer.
 - Workspace real paths and node_modules links both match. Multiple aliases for the same physical importer produce AMBIGUOUS_IMPORTER rather than a name-based arbitrary choice; strict=true rejects the request.
+- Shared aliases validate every consumer's effective peer provider, including host-satisfied consumers and include/exclude overrides. Different providers produce AMBIGUOUS_IMPORTER and strict=true rejects initialization. Consumers that do not declare that peer are not treated as conflicting.
 - Full Yarn PnP support and private-registry scope/authentication inheritance are not implemented.
 - Coexisting framework versions still require suitable mount/update/unmount bridges. SFC compiler conversion, cross-version component protocols, and CSS isolation are outside this plugin's scope.
 
