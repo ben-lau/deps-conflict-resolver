@@ -86,6 +86,17 @@ it.each([false, true])(
       await new Promise<void>((resolve, reject) => {
         let phase = 0;
         let verifiedPhase = -1;
+        let buildingPhase = 0;
+        const compilationPhases = new WeakMap<webpack.Compilation, number>();
+        compiler.hooks.watchRun.tap(
+          { name: 'RecordInputPhase', stage: Number.NEGATIVE_INFINITY },
+          () => {
+            buildingPhase = phase;
+          },
+        );
+        compiler.hooks.thisCompilation.tap('RecordCompilationPhase', (compilation) => {
+          compilationPhases.set(compilation, buildingPhase);
+        });
         deadline = setTimeout(
           () => reject(new Error('Watch did not react to changed analysis inputs')),
           5000,
@@ -94,7 +105,10 @@ it.each([false, true])(
           if (error || !stats) return reject(error ?? new Error('Missing compilation stats'));
           try {
             if (stats.hasErrors()) throw new Error(stats.toString({ all: false, errors: true }));
-            if (phase === verifiedPhase) return;
+            // A watch already in flight may finish after the next edit. Only
+            // judge compilations that started with the inputs for this phase.
+            if (compilationPhases.get(stats.compilation) !== phase || phase === verifiedPhase)
+              return;
             delete require.cache[output];
             expect(require(output)).toEqual({
               version: phase === 1 ? '3.0.0' : '2.7.16',

@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigEnv, UserConfig } from 'vite';
+import { resolveConfig } from 'vite';
 import { createRequire } from 'node:module';
 import { createResolver } from '../../src/core/resolver';
 import { ResolutionError } from '../../src/core/resolution-error';
@@ -799,8 +799,10 @@ describe('resolution correctness with installed packages', () => {
         },
       },
     });
-    const hook = plugin.config as (config: UserConfig, env: ConfigEnv) => Promise<unknown>;
-    await hook({ root }, { command: 'build', mode: 'test' });
+    await resolveConfig(
+      { root, configFile: false, logLevel: 'silent', plugins: [plugin] },
+      'build',
+    );
 
     expect(analysis?.aliasMappings.map((mapping) => mapping.aliasName)).toEqual(['vue2']);
   });
