@@ -343,6 +343,16 @@ describe('Vite Plugin', () => {
       },
     );
 
+    it('keeps build guards and omits the resolution hook for an empty strict plan', async () => {
+      mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'], strict: true });
+      const config = await configure(plugin);
+      const active = (await applyToEnvironment(plugin, config)) as Plugin;
+      expect(active.buildStart).toBe(plugin.buildStart);
+      expect(active.generateBundle).toBe(plugin.generateBundle);
+      expect(active.resolveId).toBeUndefined();
+    });
+
     it('delegates redirected requests from the final host context and preserves native results', async () => {
       const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
       await configure(plugin);

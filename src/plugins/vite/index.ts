@@ -489,16 +489,19 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       // The target set can change between builds in the same environment.
       if (watch) return true;
       if (!filterRequests) return true;
-      if (!requestFilter) return resolverOptions.strict ? true : false;
+      const lifecycle: Plugin = {
+        name: PLUGIN_NAME,
+        enforce: 'pre',
+        buildStart: plugin.buildStart,
+        generateBundle: plugin.generateBundle,
+      };
+      if (!requestFilter) return resolverOptions.strict ? lifecycle : false;
       // Vite caches compiled filters by plugin identity. Give each environment
       // a fresh hook so restarting a shared plugin can change the target set.
       const hook = plugin.resolveId;
       if (!hook || typeof hook === 'function') return true;
       return {
-        name: PLUGIN_NAME,
-        enforce: 'pre',
-        buildStart: plugin.buildStart,
-        generateBundle: plugin.generateBundle,
+        ...lifecycle,
         resolveId: { ...hook, filter: { id: requestFilter } },
       };
     },
