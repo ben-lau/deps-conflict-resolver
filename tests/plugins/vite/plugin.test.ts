@@ -16,6 +16,9 @@ const mockResolverInstance = {
 };
 
 vi.mock('../../../src/core/resolver', () => ({
+  getResolverBuild: () => ({
+    snapshot: () => ({ analysis: mockResolverInstance.getAnalysisResult() }),
+  }),
   DepsConflictResolver: class MockDepsConflictResolver {
     constructor() {
       return mockResolverInstance;

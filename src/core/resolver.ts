@@ -85,6 +85,7 @@ interface ResolverBuild {
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
   snapshot(): {
+    analysis: AnalysisResult | null;
     providers: ReadonlyMap<string, string>;
     watchFiles: WatchedFiles | undefined;
   };
@@ -181,7 +182,11 @@ export class DepsConflictResolver {
         this.watchSnapshot = undefined;
         this.watchedFiles = undefined;
       },
-      snapshot: () => ({ providers: this.providerVersions, watchFiles: this.watchedFiles }),
+      snapshot: () => ({
+        analysis: this.analysisResult,
+        providers: this.providerVersions,
+        watchFiles: this.watchedFiles,
+      }),
     });
 
     // 设置日志级别（如果用户已指定）
@@ -519,7 +524,7 @@ export class DepsConflictResolver {
     );
     // Keep the reusable candidate separate from user code. Hooks can also
     // prepare the same workspace, so the notification runs outside the lock.
-    const observed = candidate ? structuredClone(result) : result;
+    const observed = structuredClone(result);
     this.analysisResult = observed;
     await this.runPreparationHook(() => hook.call(this.hooks, observed));
     return candidate;
@@ -973,7 +978,7 @@ export class DepsConflictResolver {
       this.installResult,
       true,
     );
-    await this.runPreparationHook(() => hook.call(this.hooks, completed));
+    await this.runPreparationHook(() => hook.call(this.hooks, structuredClone(completed)));
     // A hook can queue more preparation work while the lock is released.
     await waitForProjectPreparation(this.preparation!);
   }
@@ -1176,7 +1181,7 @@ export class DepsConflictResolver {
    * 获取分析结果
    */
   getAnalysisResult(): AnalysisResult | null {
-    return this.analysisResult;
+    return structuredClone(this.analysisResult);
   }
 
   private generationDiagnostics(): ResolverDiagnostic[] {

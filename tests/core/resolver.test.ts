@@ -199,7 +199,7 @@ describe('DepsConflictResolver', () => {
       await resolver.initialize();
 
       expect(analyze).toHaveBeenCalledTimes(2);
-      expect(resolver.getAnalysisResult()).toBe(analysisResult);
+      expect(resolver.getAnalysisResult()).toEqual(analysisResult);
     });
 
     it('refreshes redirect rules after invalidation', async () => {

@@ -23,7 +23,11 @@ vi.mock('../../../src/core/resolver', () => ({
       await mockResolverInstance.initialize();
       return false;
     },
-    snapshot: () => ({ providers: new Map(), watchFiles: undefined }),
+    snapshot: () => ({
+      analysis: mockResolverInstance.getAnalysisResult(),
+      providers: new Map(),
+      watchFiles: undefined,
+    }),
     closeWatch: vi.fn(),
   }),
   DepsConflictResolver: class MockDepsConflictResolver {

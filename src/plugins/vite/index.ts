@@ -1,7 +1,7 @@
 import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite';
 import { randomUUID } from 'node:crypto';
 import type { PluginConfig, PluginHooks, AliasPathMapping } from '../../types/index';
-import { DepsConflictResolver } from '../../core/resolver';
+import { DepsConflictResolver, getResolverBuild } from '../../core/resolver';
 import { createLogger, LogLevel, withLogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
 import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
@@ -137,7 +137,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   ): UserConfig | undefined {
     const command = config.command;
     // 获取分析结果
-    const analysisResult = activeResolver.getAnalysisResult();
+    const { analysis: analysisResult } = getResolverBuild(activeResolver).snapshot();
 
     if (!analysisResult) return undefined;
     if (aliasPathMappings.length === 0) {
@@ -362,7 +362,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       if (config.isWorker) return;
       if (config.command === 'serve') {
         const watched = new Set(config.configFileDependencies);
-        for (const file of active.getAnalysisResult()?.watchFiles ?? []) {
+        for (const file of getResolverBuild(active).snapshot().analysis?.watchFiles ?? []) {
           const path = normalizePath(file);
           // Vite ignores installed dependency directories by default. Track
           // project and linked source manifests as config inputs instead.

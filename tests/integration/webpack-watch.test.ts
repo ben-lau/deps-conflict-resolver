@@ -27,6 +27,15 @@ function json(directory: string, value: object): void {
   writeFileSync(join(directory, 'package.json'), JSON.stringify(value));
 }
 
+function observeAnalyses() {
+  const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+  return {
+    count: () =>
+      log.mock.calls.filter(([, message]) => message === 'Starting dependency analysis...').length,
+    restore: () => log.mockRestore(),
+  };
+}
+
 function linkedConsumerFixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'deps-webpack-watch-preparation-')));
   const consumer = join(root, 'packages', 'legacy');
@@ -168,12 +177,13 @@ it.each([false, true])(
     let watcher: webpack.Watching | undefined;
     let change: ReturnType<typeof setTimeout> | undefined;
     let deadline: ReturnType<typeof setTimeout> | undefined;
+    const analyses = observeAnalyses();
     try {
       await new Promise<void>((resolve, reject) => {
         let phase = 0;
         let verifiedPhase = -1;
         let buildingPhase = 0;
-        let previousAnalysis: ReturnType<typeof plugin.getAnalysisResult>;
+        let previousAnalyses = 0;
         const compilationPhases = new WeakMap<webpack.Compilation, number>();
         compiler.hooks.watchRun.tap(
           { name: 'RecordInputPhase', stage: Number.NEGATIVE_INFINITY },
@@ -212,7 +222,7 @@ it.each([false, true])(
                 modules.find((module) => module.name?.endsWith('/legacy/index.js'))?.built,
               ).toBe(true);
             if (phase === 3) {
-              expect(plugin.getAnalysisResult()).toBe(previousAnalysis);
+              expect(analyses.count()).toBe(previousAnalyses);
               expect(factoryRequests).toBeGreaterThanOrEqual(3);
               expect(runtimeRequests).toBe(factoryRequests);
               expect(
@@ -221,8 +231,8 @@ it.each([false, true])(
               resolve();
               return;
             }
-            expect(plugin.getAnalysisResult()).not.toBe(previousAnalysis);
-            previousAnalysis = plugin.getAnalysisResult();
+            expect(analyses.count()).toBeGreaterThan(previousAnalyses);
+            previousAnalyses = analyses.count();
             verifiedPhase = phase;
             const next = phase + 1;
             change = setTimeout(() => {
@@ -251,6 +261,7 @@ it.each([false, true])(
       await new Promise<void>((resolve, reject) =>
         compiler.close((error) => (error ? reject(error) : resolve())),
       );
+      analyses.restore();
       rmSync(root, { recursive: true, force: true });
       clearPackageJsonCache();
     }
@@ -306,7 +317,8 @@ it('rechecks ignored package links, missing lookup paths and the lockfile on sou
     watchOptions: { ignored: /[\\/]node_modules[\\/]/ },
   });
   const refresh = () => compiler.hooks.watchRun.promise(compiler);
-  const analysis = () => plugin.getAnalysisResult();
+  const analyses = observeAnalyses();
+  const analysis = analyses.count;
   try {
     await refresh();
     expect(plugin.getAliasConfig().vue2).toBe(first);
@@ -362,6 +374,7 @@ it('rechecks ignored package links, missing lookup paths and the lockfile on sou
     await new Promise<void>((resolve, reject) =>
       compiler.close((error) => (error ? reject(error) : resolve())),
     );
+    analyses.restore();
     rmSync(root, { recursive: true, force: true });
     clearPackageJsonCache();
   }

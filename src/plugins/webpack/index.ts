@@ -105,8 +105,8 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
           return;
         }
 
-        this.analysisResult = resolver.getAnalysisResult();
-        const { providers: aliasVersions } = build.snapshot();
+        const { analysis, providers: aliasVersions } = build.snapshot();
+        this.analysisResult = analysis;
         if (
           generation > 1 &&
           (aliasVersions.size !== this.aliasVersions.size ||
@@ -333,7 +333,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     compiler.hooks.normalModuleFactory.tap(PLUGIN_NAME, (nmf: NormalModuleFactory) => {
       // Direct compile() calls do not run beforeRun. Share their preparation
       // within this factory and retry at the start of the next compilation.
-      let preparation = ! compiler.running ? undefined : runPreparation;
+      let preparation = !compiler.running ? undefined : runPreparation;
       // beforeResolve: 在模块解析之前修改请求
       // 这是最早能够拦截模块请求的时机
       // AsyncSeriesBailHook<[ResolveData], false | void>
@@ -378,7 +378,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
    * 获取分析结果
    */
   getAnalysisResult(): AnalysisResult | null {
-    return this.analysisResult;
+    return structuredClone(this.analysisResult);
   }
 
   /**

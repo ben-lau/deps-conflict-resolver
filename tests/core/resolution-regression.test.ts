@@ -104,6 +104,34 @@ describe('diagnostics and deterministic offline operation', () => {
     ).toEqual(before);
   });
 
+  it('isolates published rules from analysis results and installation notifications', async () => {
+    const { root, legacy } = vueProject();
+    const onInstallComplete = vi.fn((mappings: AnalysisResult['aliasMappings']) => {
+      mappings[0]!.aliasName = 'vue';
+    });
+    const resolver = await createResolver(
+      { ...baseOptions(root), autoInstall: true, strict: true },
+      { onInstallComplete },
+    );
+    const fingerprint = resolver.getResolutionFingerprint();
+    const result = resolver.getAnalysisResult()!;
+    result.aliasMappings[0]!.aliasName = 'edited';
+    result.analyzedDependencies.clear();
+    result.diagnostics!.push({
+      code: 'PEER_NOT_INSTALLED',
+      severity: 'error',
+      packageName: 'vue',
+      message: 'edited',
+    });
+
+    expect(onInstallComplete).toHaveBeenCalledTimes(1);
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+    expect(resolver.getAliasPathMappings().map(({ aliasName }) => aliasName)).toEqual(['vue2']);
+    expect(resolver.getAnalysisResult()?.analyzedDependencies.has('legacy')).toBe(true);
+    expect(resolver.getDiagnostics()).toEqual([]);
+    expect(resolver.getResolutionFingerprint()).toBe(fingerprint);
+  });
+
   it('reports unresolved offline aliases and rejects them in strict mode', async () => {
     const { root } = vueProject(false);
     const fetch = vi.spyOn(globalThis, 'fetch');
