@@ -16,6 +16,16 @@ const mockResolverInstance = {
 };
 
 vi.mock('../../../src/core/resolver', () => ({
+  getResolverBuild: () => ({
+    assertWatchCanWait: vi.fn(),
+    async refreshForWatch() {
+      if (mockResolverInstance.initialize.mock.calls.length > 0) mockResolverInstance.invalidate();
+      await mockResolverInstance.initialize();
+      return false;
+    },
+    snapshot: () => ({ providers: new Map(), watchFiles: undefined }),
+    closeWatch: vi.fn(),
+  }),
   DepsConflictResolver: class MockDepsConflictResolver {
     constructor() {
       return mockResolverInstance;
@@ -174,7 +184,7 @@ describe('Webpack Plugin', () => {
         expect(plugin.getAliasConfig()).toEqual({});
       });
 
-      it('should initialize on watchRun', async () => {
+      it('initializes once on the first watch run', async () => {
         mockResolverInstance.initialize.mockResolvedValue(undefined);
         mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
         mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
@@ -195,6 +205,8 @@ describe('Webpack Plugin', () => {
         const watchRunCallback = watchRunCall[1];
         await watchRunCallback();
 
+        expect(mockResolverInstance.initialize).toHaveBeenCalledTimes(1);
+        expect(mockResolverInstance.invalidate).not.toHaveBeenCalled();
         expect(plugin.isInitialized()).toBe(true);
       });
 
@@ -208,6 +220,24 @@ describe('Webpack Plugin', () => {
         plugin.apply(compiler as unknown as Compiler);
         const beforeRun = compiler.hooks.beforeRun.tapPromise.mock.calls[0]![1];
         await expect(beforeRun()).rejects.toThrow('unresolved peer');
+        expect(plugin.isInitialized()).toBe(false);
+      });
+
+      it('propagates unexpected failures while refreshing strict watch rules', async () => {
+        mockResolverInstance.initialize.mockResolvedValue(undefined);
+        const plugin = new DepsConflictResolverWebpackPlugin({
+          dependencies: ['legacy'],
+          strict: true,
+        });
+        const compiler = createMockCompiler();
+        plugin.apply(compiler as unknown as Compiler);
+        await compiler.hooks.beforeRun.tapPromise.mock.calls[0]![1]();
+        mockResolverInstance.invalidate.mockImplementationOnce(() => {
+          throw new Error('Could not invalidate watch rules');
+        });
+        await expect(compiler.hooks.watchRun.tapPromise.mock.calls[0]![1]()).rejects.toThrow(
+          'Could not invalidate watch rules',
+        );
         expect(plugin.isInitialized()).toBe(false);
       });
 

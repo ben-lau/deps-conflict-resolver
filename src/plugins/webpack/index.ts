@@ -1,11 +1,8 @@
 import type { Compiler, NormalModule, WebpackPluginInstance, ResolveData } from 'webpack';
 import type { PluginConfig, AnalysisResult } from '../../types/index';
-import { DepsConflictResolver } from '../../core/resolver';
+import { DepsConflictResolver, getResolverBuild } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
 import { isPathLikeRequest, isWebpackInternalRequest } from '../../utils/module-request';
-import { readPackageJsonCached } from '../../utils/fs';
-import { realpathSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 const logger = createLogger('webpack-plugin');
@@ -26,6 +23,9 @@ type NormalModuleFactory = Parameters<
 type RedirectBuildInfo = NonNullable<NormalModule['buildInfo']> & {
   depsConflictResolver?: string;
 };
+type ResolveOptions = NonNullable<ResolveData['resolveOptions']>;
+
+const emptyResolveOptions: ResolveOptions = {};
 
 /**
  * Webpack 插件主类
@@ -44,7 +44,8 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   private initPromise: Promise<void> | null = null;
   private initialized = false;
   private generation = 0;
-  private aliasVersions = new Map<string, string>();
+  private aliasVersions: ReadonlyMap<string, string> = new Map();
+  private redirectOptions = new WeakMap<ResolveOptions, Map<string, ResolveOptions>>();
 
   constructor(config: PluginConfig) {
     this.config = config;
@@ -57,11 +58,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   /**
    * 初始化解析器
    */
-  private initialize(refresh = false): Promise<void> {
-    if (refresh) {
-      return this.refreshInitialization();
-    }
-
+  private initialize(compiler: Compiler): Promise<void> {
     if (this.initialized) {
       return Promise.resolve();
     }
@@ -70,13 +67,13 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       return this.initPromise;
     }
 
-    return this.startInitialization();
+    return this.startInitialization(compiler);
   }
 
   /**
    * 开始新一轮初始化，并只在该 generation 成功后公开解析器状态。
    */
-  private startInitialization(): Promise<void> {
+  private startInitialization(compiler: Compiler, watch = false): Promise<void> {
     const generation = ++this.generation;
 
     try {
@@ -95,29 +92,32 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     }
 
     const resolver = this.resolver;
+    const build = getResolverBuild(resolver);
+    this.initialized = false;
     const initialization = Promise.resolve()
-      .then(() => resolver.initialize())
-      .then(() => {
+      .then(async () => (watch ? build.refreshForWatch(compiler) : resolver.initialize()))
+      .then((reused) => {
         if (generation !== this.generation || this.resolver !== resolver) {
+          return;
+        }
+        if (reused) {
+          this.initialized = true;
           return;
         }
 
         this.analysisResult = resolver.getAnalysisResult();
-        this.aliasVersions.clear();
-        for (const mapping of resolver.getAliasPathMappings()) {
-          let path = mapping.path;
-          try {
-            path = realpathSync(path);
-          } catch {
-            /* Keep the verified lookup path. */
-          }
-          this.aliasVersions.set(
-            mapping.aliasName,
-            createHash('sha256')
-              .update(JSON.stringify([path, readPackageJsonCached(path)]))
-              .digest('hex'),
-          );
+        const { providers: aliasVersions } = build.snapshot();
+        if (
+          generation > 1 &&
+          (aliasVersions.size !== this.aliasVersions.size ||
+            [...aliasVersions].some(([name, version]) => this.aliasVersions.get(name) !== version))
+        ) {
+          // The compiler can cache every link in a provider's lookup path.
+          // Purge filesystem reads when the provider changes, keeping module caches.
+          compiler.inputFileSystem?.purge?.();
+          this.redirectOptions = new WeakMap();
         }
+        this.aliasVersions = aliasVersions;
 
         if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
           logger.info(`Planned ${this.analysisResult.aliasMappings.length} alias mappings`);
@@ -146,7 +146,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
         this.analysisResult = null;
         this.initialized = false;
-        this.aliasVersions.clear();
+        this.aliasVersions = new Map();
         logger.error('Error initializing dependencies resolver:', error);
         if (this.config.strict) throw error;
       })
@@ -157,34 +157,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       });
 
     this.initPromise = initialization;
-    // Initialization starts before compiler.run; keep an early strict failure
-    // handled until a compiler hook awaits the original promise.
-    void initialization.catch(() => undefined);
     return initialization;
-  }
-
-  /**
-   * watch 模式开始新一轮分析。等待上一轮结束，避免 invalidate 触发 resolver 的并发保护。
-   */
-  private async refreshInitialization(): Promise<void> {
-    if (this.initPromise) {
-      await this.initPromise;
-    }
-
-    if (this.resolver) {
-      try {
-        this.resolver.invalidate();
-      } catch (error: unknown) {
-        this.analysisResult = null;
-        this.initialized = false;
-        logger.error('Error invalidating dependencies resolver:', error);
-        return;
-      }
-    }
-
-    this.analysisResult = null;
-    this.initialized = false;
-    await this.startInitialization();
   }
 
   /**
@@ -235,11 +208,28 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     // Resolve the verified alias from the host, preserving Webpack's exports
     // and dependency-type conditions even for linked packages outside it.
     resolveData.context = this.resolver.getOptions().projectRoot;
+    const alias = resolvedModule.match(/^(?:@[^/?#]+\/)?[^/?#]+/)?.[0];
+    const version = alias && this.aliasVersions.get(alias);
+    if (version) {
+      const original = resolveData.resolveOptions ?? emptyResolveOptions;
+      let versions = this.redirectOptions.get(original);
+      if (!versions) this.redirectOptions.set(original, (versions = new Map()));
+      let options = versions.get(version);
+      if (!options) {
+        // Webpack keys its native resolver cache by the request and these options.
+        // Keep exports and dependency-type conditions, with a key for the verified provider.
+        const updated = { ...original, unsafeCache: false, depsConflictResolverProvider: version };
+        versions.set(version, (options = updated));
+      }
+      resolveData.resolveOptions = options;
+    }
   }
 
   private moduleResolutionVersion(module: NormalModule): string {
     if (!this.initialized || !module.resource || !this.resolver || this.aliasVersions.size === 0)
       return '';
+    // Webpack uses nameForCondition() as the issuer when resolving dependencies.
+    const importer = module.nameForCondition?.() ?? module.resource;
     const requests = new Set<string>();
     const versions: string[] = [];
     const blocks: Array<Pick<NormalModule, 'blocks' | 'dependencies'>> = [module];
@@ -256,7 +246,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         )
           continue;
         requests.add(request);
-        const decision = this.resolver.explainResolution(request, module.resource, {
+        const decision = this.resolver.explainResolution(request, importer, {
           skipHook: true,
         });
         if (!decision.resolved && decision.reason !== 'ambiguous') continue;
@@ -279,24 +269,31 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     };
     logger.info('Applying DepsConflictResolverWebpackPlugin...');
 
-    // 立即开始初始化（不阻塞）
-    this.initPromise = this.initialize();
-
-    // 在编译开始前确保初始化完成
+    // Start preparation at the first compilation so watchRun doesn't repeat it.
     compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, async () => {
-      await this.initialize();
+      await this.initialize(compiler);
     });
 
     // 对于 watch 模式
     compiler.hooks.watchRun.tapPromise(PLUGIN_NAME, async () => {
-      await this.initialize(true);
+      if (this.initPromise) {
+        getResolverBuild(this.resolver!).assertWatchCanWait();
+        await this.initPromise;
+      }
+      await this.startInitialization(compiler, true);
+    });
+    compiler.hooks.watchClose?.tap(PLUGIN_NAME, () => {
+      if (this.resolver) getResolverBuild(this.resolver).closeWatch();
     });
 
     let legacyCacheHookInstalled = false;
     compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation) => {
-      for (const file of this.analysisResult?.watchFiles ?? [])
+      const watched = this.resolver && getResolverBuild(this.resolver).snapshot().watchFiles;
+      for (const file of watched?.existing ?? this.analysisResult?.watchFiles ?? [])
         compilation.fileDependencies.add(file);
-      compilation.fileDependencies.add(join(this.config.projectRoot!, 'package.json'));
+      for (const file of watched?.missing ?? []) compilation.missingDependencies?.add(file);
+      const manifest = join(this.config.projectRoot!, 'package.json');
+      if (!watched?.missing.has(manifest)) compilation.fileDependencies.add(manifest);
       compilation.hooks.succeedModule.tap(PLUGIN_NAME, (module) => {
         if ('resource' in module && module.buildInfo)
           (module.buildInfo as RedirectBuildInfo).depsConflictResolver =
@@ -341,7 +338,8 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       // - 返回 undefined/void 表示继续处理
       nmf.hooks.beforeResolve.tapPromise(PLUGIN_NAME, async (resolveData) => {
         try {
-          await this.initialize();
+          // watchRun prepares once per compilation, including permissive failures.
+          if (!compiler.watchMode) await this.initialize(compiler);
           this.handleResolve(resolveData);
         } catch (err) {
           logger.error('Error during module resolution:', err);
@@ -352,7 +350,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     // 在编译完成后输出信息
     compiler.hooks.done.tap(PLUGIN_NAME, (stats) => {
-      if (stats.hasErrors()) {
+      if (!this.initialized || stats.hasErrors()) {
         return;
       }
 
