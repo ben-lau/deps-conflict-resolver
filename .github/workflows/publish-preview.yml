@@ -1,0 +1,50 @@
+name: Publish Preview
+
+on:
+  workflow_call:
+    outputs:
+      sha:
+        description: Published commit SHA
+        value: ${{ jobs.publish.outputs.sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # pkg.pr.new labels PR packages with the head SHA, not the merge SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.node-version'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm publint
+      - run: pnpm attw
+      - name: Publish preview package
+        id: publish
+        env:
+          PREVIEW_COMMENT: ${{ github.event_name == 'pull_request' && 'update' || 'off' }}
+        run: >-
+          pnpm exec pkg-pr-new publish --pnpm --previewVersion
+          --no-compact --no-template --comment="$PREVIEW_COMMENT"
+          --commentWithSha --commentWithDev --packageManager=pnpm,npm
+      - name: Show install command
+        env:
+          PREVIEW_SHA: ${{ steps.publish.outputs.sha }}
+          PREVIEW_URL: ${{ steps.publish.outputs.urls }}
+        run: |
+          {
+            printf '## 预览包\n\n提交：`%s`\n\n' "$PREVIEW_SHA"
+            printf '```sh\npnpm add -D %s\n```\n' "$PREVIEW_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
