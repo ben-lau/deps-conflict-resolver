@@ -5,12 +5,87 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { createResolver } from '../../src/core/resolver';
 import { runCli } from '../../src/core/cli-runner';
-import { resolvePackageManagerInvocation } from '../../src/core/package-manager-adapter';
+import {
+  createPackageManagerAdapter,
+  resolvePackageManagerInvocation,
+} from '../../src/core/package-manager-adapter';
 
 const run = promisify(execFile);
+
+it.each(['npm', 'pnpm'] as const)(
+  '%s requests a scoped alias from the explicit registry without changing a similar scope',
+  async (packageManager) => {
+    const root = await mkdtemp(join(tmpdir(), 'deps-scoped-install-'));
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(decodeURIComponent(request.url ?? ''));
+      response.writeHead(404, { 'Content-Type': 'application/json' });
+      response.end('{}');
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Missing registry address');
+      const host = 'http://127.0.0.1:' + address.port;
+      const userConfig = join(root, 'user.npmrc');
+      const globalConfig = join(root, 'global.npmrc');
+      await writeFile(userConfig, '');
+      await writeFile(globalConfig, '');
+      vi.stubEnv('npm_config_userconfig', userConfig);
+      vi.stubEnv('npm_config_globalconfig', globalConfig);
+      vi.stubEnv('NPM_CONFIG_USERCONFIG', userConfig);
+      vi.stubEnv('NPM_CONFIG_GLOBALCONFIG', globalConfig);
+      await writeFile(
+        join(root, '.npmrc'),
+        [
+          '@review_team:registry=' + host + '/original/',
+          '@review-team:registry=' + host + '/neighbor/',
+          'cache=' + join(root, 'cache'),
+          'store-dir=' + join(root, 'pnpm-store'),
+          'ignore-scripts=true',
+          'audit=false',
+          'fund=false',
+          'fetch-retries=0',
+          'fetch-timeout=2000',
+          'update-notifier=false',
+        ].join('\n'),
+      );
+      await writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({
+          name: 'scoped-host',
+          private: true,
+          dependencies: { '@review-team/neighbor': '1.0.0' },
+        }),
+      );
+      const adapter = createPackageManagerAdapter(
+        { projectRoot: root, packageManager, registry: host + '/explicit/' },
+        { timeoutMs: 6500, terminateGraceMs: 1000 },
+      );
+      const result = await adapter.install(['runtime@npm:@review_team/runtime@1.0.0']);
+      expect(result.timedOut).toBe(false);
+      expect(requests.filter((url) => url.includes('/@review'))).toEqual(
+        expect.arrayContaining([
+          '/explicit/@review_team/runtime',
+          '/neighbor/@review-team/neighbor',
+        ]),
+      );
+      expect(requests).not.toContain('/original/@review_team/runtime');
+      expect(requests).not.toContain('/explicit/@review-team/neighbor');
+    } finally {
+      vi.unstubAllEnvs();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  10_000,
+);
 
 it('prepares a real npm alias from imported options and reuses it offline after a frozen install', async () => {
   const root = await mkdtemp(join(tmpdir(), 'deps-real-install-'));

@@ -96,17 +96,22 @@ describe('createPackageManagerAdapter', () => {
     }
   });
 
-  it.skipIf(process.platform === 'win32').each(['npm', 'pnpm'] as const)(
-    'passes %s an explicit registry for the original package scope',
-    async (packageManager) => {
+  it.skipIf(process.platform === 'win32').each([
+    ['npm', '--'],
+    ['pnpm', '--config.'],
+  ] as const)(
+    'passes %s an exact registry option for the original package scope',
+    async (packageManager, flagPrefix) => {
       vi.mocked(spawn).mockReturnValue(createChildProcess(0) as never);
       const adapter = createPackageManagerAdapter({ ...options, packageManager });
       await expect(
-        adapter.install(['@local/runtime@npm:@upstream/runtime@2.7.16']),
+        adapter.install(['@local/runtime@npm:@upstream_team/runtime@2.7.16']),
       ).resolves.toMatchObject({ success: true });
-      const env = vi.mocked(spawn).mock.lastCall?.[2]?.env;
-      expect(env?.['npm_config_@upstream:registry']).toBe(options.registry);
-      expect(env?.['npm_config_@local:registry']).toBeUndefined();
+      const [, args, child] = vi.mocked(spawn).mock.lastCall!;
+      expect(args.filter((arg) => arg.includes(':registry='))).toEqual([
+        flagPrefix + '@upstream_team:registry=' + options.registry,
+      ]);
+      expect(child?.env?.['npm_config_@upstream_team:registry']).toBeUndefined();
     },
   );
 

@@ -71,15 +71,25 @@ export function createPackageManagerAdapter(
           timedOut: false,
         };
       }
+      const { packageManager, registry } = options;
       const scopes = new Set<string>();
-      if (options.registry) {
+      if (registry) {
         for (const spec of specs) {
           const alias = spec.indexOf('@npm:');
           const name = alias < 0 ? undefined : parseNpmAlias(spec.slice(alias + 1))?.[0];
           if (name?.startsWith('@')) scopes.add(name.split('/', 1)[0]!);
         }
       }
-      const env = registryEnvironment(options.packageManager, options.registry, scopes);
+      const env = registryEnvironment(packageManager, registry, scopes);
+      // npm and pnpm translate underscores in npm_config_* names to dashes.
+      // Their CLI options preserve the exact scope, including underscores.
+      const registryFlags =
+        registry && packageManager !== 'yarn'
+          ? [...scopes].map(
+              (scope) =>
+                (packageManager === 'pnpm' ? '--config.' : '--') + scope + ':registry=' + registry,
+            )
+          : [];
 
       const invocation = resolvePackageManagerInvocation(
         options.packageManager,
@@ -133,7 +143,7 @@ export function createPackageManagerAdapter(
 
       logger.info(`Running: ${command} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`);
 
-      const child = spawn(command, args, {
+      const child = spawn(command, [...args, ...registryFlags], {
         cwd: options.projectRoot,
         env,
         shell: false,
@@ -579,11 +589,13 @@ function registryEnvironment(
   if (!registry) return environment;
   const overrides = {
     npm_config_registry: registry,
-    ...Object.fromEntries(
-      [...scopes].map((scope) => ['npm_config_' + scope + ':registry', registry]),
-    ),
     // Classic Yarn reads npm's registry setting; modern Yarn uses this key.
-    ...(packageManager === 'yarn' ? { YARN_NPM_REGISTRY_SERVER: registry } : {}),
+    ...(packageManager === 'yarn' && {
+      YARN_NPM_REGISTRY_SERVER: registry,
+      ...Object.fromEntries(
+        [...scopes].map((scope) => ['npm_config_' + scope + ':registry', registry]),
+      ),
+    }),
   };
   const overridden = new Set(Object.keys(overrides).map((key) => key.toLowerCase()));
   for (const key of Object.keys(environment)) {
