@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  realpathSync,
+  renameSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -307,64 +316,80 @@ describe('resolution correctness with installed packages', () => {
     expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe('runtime2');
   });
 
-  it.each(['host', 'same-alias', 'unspecified', 'override'])(
-    'checks every consumer of a shared alias: %s',
-    async (context) => {
-      const root = project({
-        dependencies: {
-          a: '1.0.0',
-          b: '1.0.0',
-          renderer: '2.0.0',
-          runtime: '3.0.0',
-          renderer1: 'npm:renderer@1.0.0',
-          runtime2: 'npm:runtime@2.0.0',
-        },
-      });
-      pkg(root, 'a', { peerDependencies: { renderer: '^1', runtime: '^2' } });
-      pkg(root, 'b', {
-        peerDependencies: {
-          renderer: '^1',
-          ...(context === 'unspecified'
-            ? {}
-            : { runtime: context === 'host' || context === 'override' ? '^3' : '^2' }),
-        },
-      });
-      pkg(root, 'renderer', { version: '2.0.0' });
-      pkg(root, 'runtime', { version: '3.0.0' });
-      const renderer = pkg(root, 'renderer1', {
-        name: 'renderer',
-        version: '1.0.0',
-        peerDependencies: { runtime: '>=2' },
-      });
-      pkg(root, 'runtime2', { name: 'runtime', version: '2.0.0' });
-      const options = {
-        ...baseOptions(root, ['a', 'b']),
-        offline: true,
-        excludeRedirects: { runtime: context === 'override' ? ['a'] : [] },
-      };
-      const resolver = await createResolver(options);
-      if (context === 'host') {
-        expect(resolver.getDiagnostics()).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              code: 'AMBIGUOUS_IMPORTER',
-              severity: 'error',
-              requestedBy: ['renderer1'],
-            }),
-          ]),
-        );
-        expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBeNull();
-        await expect(createResolver({ ...options, strict: true })).rejects.toBeInstanceOf(
-          ResolutionError,
-        );
-      } else {
-        expect(resolver.getDiagnostics()).toEqual([]);
-        expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe(
-          context === 'override' ? null : 'runtime2',
-        );
-      }
-    },
-  );
+  it.each(
+    ['plain', 'workspace-hidden', 'workspace-exported'].flatMap((layout) =>
+      ['host', 'same-alias', 'unspecified', 'override'].map((context) => ({ layout, context })),
+    ),
+  )('checks every consumer of a shared alias: $context, $layout', async ({ context, layout }) => {
+    const root = project({
+      workspaces: layout === 'plain' ? undefined : ['packages/*'],
+      dependencies: {
+        a: '1.0.0',
+        b: '1.0.0',
+        renderer: '2.0.0',
+        runtime: '3.0.0',
+        renderer1: 'npm:renderer@1.0.0',
+        runtime2: 'npm:runtime@2.0.0',
+      },
+    });
+    pkg(root, 'a', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+    pkg(root, 'b', {
+      peerDependencies: {
+        renderer: '^1',
+        ...(context === 'unspecified'
+          ? {}
+          : { runtime: context === 'host' || context === 'override' ? '^3' : '^2' }),
+      },
+    });
+    for (const name of ['a', 'b']) {
+      const directory = join(root, 'node_modules', name);
+      const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+      manifest.exports =
+        layout === 'workspace-exported'
+          ? { '.': './index.js', './package.json': './package.json' }
+          : './index.js';
+      writeFileSync(join(directory, 'package.json'), JSON.stringify(manifest));
+      if (layout === 'plain') continue;
+      const workspace = join(root, 'packages', name);
+      mkdirSync(join(root, 'packages'), { recursive: true });
+      renameSync(directory, workspace);
+      symlinkSync(workspace, directory, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    pkg(root, 'renderer', { version: '2.0.0' });
+    pkg(root, 'runtime', { version: '3.0.0' });
+    const renderer = pkg(root, 'renderer1', {
+      name: 'renderer',
+      version: '1.0.0',
+      peerDependencies: { runtime: '>=2' },
+    });
+    pkg(root, 'runtime2', { name: 'runtime', version: '2.0.0' });
+    const options = {
+      ...baseOptions(root, ['a', 'b']),
+      offline: true,
+      excludeRedirects: { runtime: context === 'override' ? ['a'] : [] },
+    };
+    const resolver = await createResolver(options);
+    if (context === 'host') {
+      expect(resolver.getDiagnostics()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: 'AMBIGUOUS_IMPORTER',
+            severity: 'error',
+            requestedBy: ['renderer1'],
+          }),
+        ]),
+      );
+      expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBeNull();
+      await expect(createResolver({ ...options, strict: true })).rejects.toBeInstanceOf(
+        ResolutionError,
+      );
+    } else {
+      expect(resolver.getDiagnostics()).toEqual([]);
+      expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe(
+        context === 'override' ? null : 'runtime2',
+      );
+    }
+  });
 
   it.each(['valid', 'compatible-version', 'missing', 'wrong-name', 'out-of-range'])(
     'reuses workspace optional aliases offline only when verified: %s',
