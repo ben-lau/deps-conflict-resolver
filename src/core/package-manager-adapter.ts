@@ -5,6 +5,7 @@ import type { PackageManagerType, ResolvedOptions } from '../types';
 import { createLogger } from '../utils/logger';
 import { readPackageJsonCached } from '../utils/fs';
 import { createWorkspaceDetector } from './workspace-detector';
+import { parseNpmAlias } from '../utils/version-spec';
 
 const logger = createLogger('package-manager-adapter');
 
@@ -61,8 +62,6 @@ export function createPackageManagerAdapter(
 ): PackageManagerAdapter {
   return {
     install: async (specs: string[]): Promise<PackageManagerRunResult> => {
-      const env = registryEnvironment(options.packageManager, options.registry);
-
       if (specs.length === 0) {
         return {
           success: true,
@@ -72,6 +71,15 @@ export function createPackageManagerAdapter(
           timedOut: false,
         };
       }
+      const scopes = new Set<string>();
+      if (options.registry) {
+        for (const spec of specs) {
+          const alias = spec.indexOf('@npm:');
+          const name = alias < 0 ? undefined : parseNpmAlias(spec.slice(alias + 1))?.[0];
+          if (name?.startsWith('@')) scopes.add(name.split('/', 1)[0]!);
+        }
+      }
+      const env = registryEnvironment(options.packageManager, options.registry, scopes);
 
       const invocation = resolvePackageManagerInvocation(
         options.packageManager,
@@ -81,17 +89,42 @@ export function createPackageManagerAdapter(
       let rootFlag: '-w' | '-W' | undefined;
       if (options.packageManager !== 'npm') {
         const workspace = createWorkspaceDetector(options.projectRoot).detect();
-        if (workspace.workspaceRoot === options.projectRoot) {
-          if (options.packageManager === 'pnpm' && workspace.workspaceType === 'pnpm') {
-            rootFlag = '-w';
-          } else if (options.packageManager === 'yarn') {
-            const manifest = readPackageJsonCached(options.projectRoot);
-            if (manifest?.workspaces) {
-              const pinnedMajor = manifest.packageManager?.match(/^yarn@(\d+)(?:\.|$)/)?.[1];
-              const classic = pinnedMajor
-                ? pinnedMajor === '1'
-                : await isYarnClassic(invocation, options.projectRoot, env);
-              if (classic) rootFlag = '-W';
+        const atWorkspaceRoot = workspace.workspaceRoot === options.projectRoot;
+        if (
+          options.packageManager === 'pnpm' &&
+          atWorkspaceRoot &&
+          workspace.workspaceType === 'pnpm'
+        ) {
+          rootFlag = '-w';
+        } else if (options.packageManager === 'yarn') {
+          const manifest = readPackageJsonCached(options.projectRoot);
+          const scopedOverride = options.registry && scopes.size > 0;
+          if (scopedOverride || (atWorkspaceRoot && manifest?.workspaces)) {
+            const pinnedManager =
+              manifest?.packageManager ??
+              (workspace.workspaceRoot &&
+                readPackageJsonCached(workspace.workspaceRoot)?.packageManager);
+            const pinnedMajor = pinnedManager?.match(/^yarn@(\d+)(?:\.|$)/)?.[1];
+            const classic = pinnedMajor
+              ? pinnedMajor === '1'
+              : await isYarnClassic(invocation, options.projectRoot, env);
+            if (classic && atWorkspaceRoot && manifest?.workspaces) rootFlag = '-W';
+            if (!classic && scopedOverride) {
+              const problem = await checkYarnRegistry(
+                invocation,
+                options.projectRoot,
+                env,
+                scopes,
+                options.registry!,
+              );
+              if (problem)
+                return {
+                  success: false,
+                  exitCode: null,
+                  stdout: '',
+                  stderr: problem,
+                  timedOut: false,
+                };
             }
           }
         }
@@ -214,6 +247,53 @@ function isYarnClassic(
       (error, stdout) => resolve(!error && stdout.trim().startsWith('1.')),
     );
   });
+}
+
+async function checkYarnRegistry(
+  invocation: PackageManagerInvocation,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  scopes: ReadonlySet<string>,
+  registry: string,
+): Promise<string | undefined> {
+  // Modern Yarn accepts a global registry via the environment, while a scope
+  // configured in npmScopes takes precedence and cannot be overridden that way.
+  for (const scope of scopes) {
+    const key = 'npmScopes[' + JSON.stringify(scope.slice(1)) + '].npmRegistryServer';
+    const output = await new Promise<string | undefined>((resolve) => {
+      execFile(
+        invocation.command,
+        [...invocation.argsPrefix, 'config', 'get', key, '--json'],
+        { cwd, env, timeout: 5_000, windowsHide: true },
+        (error, stdout) => resolve(error ? undefined : stdout.trim()),
+      );
+    });
+    if (output === 'undefined' || output === 'null') continue;
+    try {
+      if (output !== undefined) {
+        const scoped: unknown = JSON.parse(output);
+        if (
+          typeof scoped === 'string' &&
+          new URL(scoped).href.replace(/\/+$/, '') === new URL(registry).href.replace(/\/+$/, '')
+        )
+          continue;
+        if (typeof scoped === 'string')
+          return (
+            'The explicit registry conflicts with Yarn npmScopes for ' +
+            scope +
+            '. Align npmRegistryServer with the requested registry before installing.'
+          );
+      }
+    } catch {
+      // Report the setting by name. Neither command output nor credentials are needed.
+    }
+    return (
+      'Could not verify Yarn npmScopes registry for ' +
+      scope +
+      '. Check yarn config before installing.'
+    );
+  }
+  return undefined;
 }
 
 export function resolvePackageManagerCommand(
@@ -492,15 +572,24 @@ function getEnvironmentValue(environment: NodeJS.ProcessEnv, name: string): stri
 
 function registryEnvironment(
   packageManager: PackageManagerType,
-  registry?: string,
+  registry: string | undefined,
+  scopes: ReadonlySet<string>,
 ): NodeJS.ProcessEnv {
-  if (!registry) return { ...process.env };
-  return {
-    ...process.env,
+  const environment = { ...process.env };
+  if (!registry) return environment;
+  const overrides = {
     npm_config_registry: registry,
+    ...Object.fromEntries(
+      [...scopes].map((scope) => ['npm_config_' + scope + ':registry', registry]),
+    ),
     // Classic Yarn reads npm's registry setting; modern Yarn uses this key.
     ...(packageManager === 'yarn' ? { YARN_NPM_REGISTRY_SERVER: registry } : {}),
   };
+  const overridden = new Set(Object.keys(overrides).map((key) => key.toLowerCase()));
+  for (const key of Object.keys(environment)) {
+    if (overridden.has(key.toLowerCase())) delete environment[key];
+  }
+  return Object.assign(environment, overrides);
 }
 
 function sendTerminationSignal(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {

@@ -42,9 +42,9 @@ describe('NpmRegistryClient', () => {
       writeFileSync(
         join(root, '.npmrc'),
         [
-          '@private:registry=https://registry.test/team/',
+          '@private:REGISTRY="https://registry.test/Team/" ; scoped mirror',
           '@sibling:registry=https://registry.test/teams/',
-          '//registry.test/team/:_authToken=${DCR_TEST_REGISTRY_TOKEN}',
+          '//REGISTRY.TEST/Team/:_authToken=${DCR_TEST_REGISTRY_TOKEN} # credential',
           '_authToken=unscoped-token',
         ].join('\n'),
       );
@@ -62,12 +62,19 @@ describe('NpmRegistryClient', () => {
       await project.fetchPackageManifest('@private/runtime', '1.0.0', DEFAULT_NPM_REGISTRY);
       await project.fetchAllVersions('@sibling/runtime', DEFAULT_NPM_REGISTRY);
       await project.fetchAllVersions('runtime', DEFAULT_NPM_REGISTRY);
+      const override = new NpmRegistryClient(undefined, {
+        projectRoot: root,
+        packageManager: 'npm',
+        registryOverride: 'https://override.test/npm/',
+      });
+      await override.fetchAllVersions('@private/runtime', 'https://override.test/npm/');
       const requests = mockFetch.mock.calls;
       expect(requests.map(([url]) => url)).toEqual([
-        'https://registry.test/team/@private%2Fruntime',
-        'https://registry.test/team/@private%2Fruntime/1.0.0',
+        'https://registry.test/Team/@private%2Fruntime',
+        'https://registry.test/Team/@private%2Fruntime/1.0.0',
         'https://registry.test/teams/@sibling%2Fruntime',
         'https://registry.npmjs.org/runtime',
+        'https://override.test/npm/@private%2Fruntime',
       ]);
       const headers = requests.map(([, options]) => new Headers(options.headers));
       expect(

@@ -3,6 +3,35 @@ import type { PackageManagerType } from '../types';
 import { observedReadTextAsync } from '../utils/dependency-inputs';
 import { fileExists, iterateParentDirs } from '../utils/fs';
 
+function readValue(value: string): string {
+  let quote: string | undefined;
+  let end = value.length;
+  for (let i = 0; i < value.length; i++) {
+    const character = value[i]!;
+    if (character === '\\') {
+      i++;
+    } else if (quote) {
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '#' || character === ';') {
+      end = i;
+      break;
+    }
+  }
+  return value
+    .slice(0, end)
+    .trim()
+    .replace(/^(["'])(.*)\1$/, '$2');
+}
+
+function registryKey(key: string): string | undefined {
+  if (/^(?:@[^\s:]+:)?registry$/i.test(key)) return key.replace(/registry$/i, 'registry');
+  const auth = /^(\/\/[^/\s]+)([^\s]*?):_authToken$/i.exec(key);
+  if (auth) return auth[1]!.toLowerCase() + auth[2] + ':_authToken';
+  return undefined;
+}
+
 export async function readNpmrcSettings(file: string): Promise<ReadonlyMap<string, string>> {
   const entries = new Map<string, string>();
   if (!fileExists(file)) return entries;
@@ -10,16 +39,16 @@ export async function readNpmrcSettings(file: string): Promise<ReadonlyMap<strin
     for (const line of (await observedReadTextAsync(file)).split(/\r?\n/)) {
       const match = /^\s*([^#;=\s][^=]*?)\s*=\s*(.*?)\s*$/.exec(line);
       if (!match) continue;
-      const key = match[1]!;
-      if (!/^(?:registry|@[^\s:]+:registry|\/\/[^\s]+:_authToken)$/i.test(key)) continue;
-      const value = match[2]!.replace(/^(["'])(.*)\1$/, '$2');
+      const key = registryKey(match[1]!);
+      if (!key) continue;
+      const value = readValue(match[2]!);
       let defined = true;
       const expanded = value.replace(/\$\{([^}]+)\}/g, (_expression, variable: string) => {
         const replacement = process.env[variable];
         if (replacement === undefined) defined = false;
         return replacement ?? '';
       });
-      entries.set(key.toLowerCase() === 'registry' ? 'registry' : key, defined ? expanded : '');
+      entries.set(key, defined ? expanded : '');
     }
   } catch {
     // The package manager owns installation and handles its own config errors.

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createPackageManagerAdapter,
@@ -10,6 +10,7 @@ import {
 } from '../../src/core/package-manager-adapter';
 
 vi.mock('child_process', () => ({
+  execFile: vi.fn(),
   spawn: vi.fn(),
 }));
 
@@ -58,6 +59,54 @@ describe('createPackageManagerAdapter', () => {
         stdio: ['ignore', 'pipe', 'pipe'],
         ...(process.platform === 'win32' ? {} : { detached: true }),
       });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    ['"https://scoped.example.test/"', false],
+    ['null', true],
+    ['"https://registry.example.test/"', true],
+  ])('honors a scoped Yarn registry check returning %s', async (registry, success) => {
+    const root = await mkdtemp(join(tmpdir(), 'deps-yarn-scoped-registry-'));
+    try {
+      await writeFile(join(root, 'package.json'), '{"packageManager":"yarn@4.6.0"}');
+      vi.mocked(execFile).mockImplementationOnce((...args) => {
+        const callback = args.at(-1) as (error: null, stdout: string, stderr: string) => void;
+        callback(null, registry, '');
+        return {} as ReturnType<typeof execFile>;
+      });
+      vi.mocked(spawn).mockImplementation(() => createChildProcess(0) as never);
+      const adapter = createPackageManagerAdapter({
+        ...options,
+        projectRoot: root,
+        packageManager: 'yarn',
+      });
+      const result = await adapter.install(['runtime@npm:@upstream/runtime@2.7.16']);
+      expect(result.success).toBe(success);
+      expect(vi.mocked(spawn)).toHaveBeenCalledTimes(success ? 1 : 0);
+      expect(vi.mocked(execFile).mock.calls[0]?.[1]).toEqual([
+        'config',
+        'get',
+        'npmScopes["upstream"].npmRegistryServer',
+        '--json',
+      ]);
+      if (!success) expect(result.stderr).toContain('Yarn npmScopes for @upstream');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32').each(['npm', 'pnpm'] as const)(
+    'passes %s an explicit registry for the original package scope',
+    async (packageManager) => {
+      vi.mocked(spawn).mockReturnValue(createChildProcess(0) as never);
+      const adapter = createPackageManagerAdapter({ ...options, packageManager });
+      await expect(
+        adapter.install(['@local/runtime@npm:@upstream/runtime@2.7.16']),
+      ).resolves.toMatchObject({ success: true });
+      const env = vi.mocked(spawn).mock.lastCall?.[2]?.env;
+      expect(env?.['npm_config_@upstream:registry']).toBe(options.registry);
+      expect(env?.['npm_config_@local:registry']).toBeUndefined();
     },
   );
 

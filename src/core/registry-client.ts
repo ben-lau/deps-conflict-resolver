@@ -146,7 +146,10 @@ export class NpmRegistryClient implements RegistryClient {
 
   constructor(
     private readonly metrics?: PreparationMetrics,
-    private readonly project?: Pick<ResolvedOptions, 'projectRoot' | 'packageManager'>,
+    private readonly project?: Pick<
+      ResolvedOptions,
+      'projectRoot' | 'packageManager' | 'registryOverride'
+    >,
   ) {}
 
   private async endpoint(packageName: string, registry: string, version?: string) {
@@ -155,7 +158,8 @@ export class NpmRegistryClient implements RegistryClient {
     }
     const settings = await this.settings;
     const scope = packageName.startsWith('@') ? packageName.split('/', 1)[0] : undefined;
-    const configured = (scope && settings?.get(scope + ':registry')) ?? registry;
+    const configured =
+      this.project?.registryOverride ?? (scope && settings?.get(scope + ':registry')) ?? registry;
     let base: URL;
     try {
       base = new URL(configured);
