@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AliasManager } from '../../src/core/alias-manager';
@@ -8,7 +16,7 @@ import { clearPackageJsonCache } from '../../src/utils/fs';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, realpathSync: vi.fn(actual.realpathSync) };
+  return { ...actual, realpathSync: vi.fn(actual.realpathSync), statSync: vi.fn(actual.statSync) };
 });
 
 function mapping(aliasName: string, importerPaths: string[]): AliasMapping {
@@ -74,12 +82,14 @@ describe('alias resolution across installation layouts', () => {
     symlinkSync(workspace, linked, process.platform === 'win32' ? 'junction' : 'dir');
     const instance = manager([mapping('vue2', [workspace])]);
 
-    expect(instance.resolveModule({ request: 'vue', importer: join(workspace, 'index.js') })).toBe(
-      'vue2',
-    );
-    expect(instance.resolveModule({ request: 'vue', importer: join(linked, 'index.js') })).toBe(
-      'vue2',
-    );
+    for (const suffix of ['', '?raw#fragment']) {
+      expect(
+        instance.resolveModule({ request: 'vue', importer: join(workspace, 'index.js') + suffix }),
+      ).toBe('vue2');
+      expect(
+        instance.resolveModule({ request: 'vue', importer: join(linked, 'index.js') + suffix }),
+      ).toBe('vue2');
+    }
     expect(
       instance.resolveModule({ request: 'vue', importer: join(root, 'src/index.js') }),
     ).toBeNull();
@@ -118,20 +128,42 @@ describe('alias resolution across installation layouts', () => {
     ).toBeNull();
   });
 
-  it('performs no realpath calls for repeated warm resolutions', () => {
-    const paths = Array.from({ length: 101 }, (_, index) =>
-      writePackage(`node_modules/child-${index}`, `child-${index}`),
-    );
-    const instance = manager([mapping('vue2', paths)]);
-    const importer = join(paths[100]!, 'index.js');
-    expect(instance.resolveModule({ request: 'vue', importer })).toBe('vue2');
-    const calls = vi.mocked(realpathSync).mock.calls.length;
-
-    for (let index = 0; index < 200; index++) {
+  it.each(['', '?raw#fragment'])(
+    'performs no filesystem calls for repeated warm resolutions: %s',
+    (suffix) => {
+      const paths = Array.from({ length: 101 }, (_, index) =>
+        writePackage(`node_modules/child-${index}`, `child-${index}`),
+      );
+      const instance = manager([mapping('vue2', paths)]);
+      const importer = join(paths[100]!, 'index.js') + suffix;
       expect(instance.resolveModule({ request: 'vue', importer })).toBe('vue2');
-    }
-    expect(vi.mocked(realpathSync).mock.calls.length).toBe(calls);
-  });
+      const calls = vi.mocked(realpathSync).mock.calls.length;
+      const statCalls = vi.mocked(statSync).mock.calls.length;
+
+      for (let index = 0; index < 200; index++) {
+        expect(instance.resolveModule({ request: 'vue', importer })).toBe('vue2');
+      }
+      expect(vi.mocked(realpathSync).mock.calls.length).toBe(calls);
+      expect(vi.mocked(statSync).mock.calls.length).toBe(statCalls);
+    },
+  );
+
+  it.each(process.platform === 'win32' ? ['#'] : ['#', '?'])(
+    'keeps literal %s characters in project paths separate from module suffixes',
+    (character) => {
+      const legacy = writePackage(`project${character}demo/node_modules/legacy`, 'legacy');
+      const host = writePackage(`project${character}demo/src`, 'host');
+      const instance = manager([mapping('vue2', [legacy])]);
+      for (const suffix of ['', '?raw', '#fragment', '?vue&type=script#fragment']) {
+        expect(
+          instance.resolveModule({ request: 'vue', importer: join(host, 'index.js') + suffix }),
+        ).toBeNull();
+        expect(
+          instance.resolveModule({ request: 'vue', importer: join(legacy, 'index.js') + suffix }),
+        ).toBe('vue2');
+      }
+    },
+  );
 
   it('drops cached decisions when a generation is replaced or cleared', () => {
     const legacy = writePackage('node_modules/legacy', 'legacy');
