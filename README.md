@@ -315,7 +315,7 @@ import Vue from 'vue'; // → 解析到 vue (3.x)
 - **`peerOverrides`**：覆写指定依赖包声明的 `peerDependencies` 范围（覆盖同名声明、取消其 `optional` 跳过，或补充缺失声明）。键支持 `<包名>` 或 `<包名>@<semver范围>`（如 `'@rili/ui@1.x'`，版本范围匹配包含 prerelease 标签，避免同包多版本共存时误伤已升级到宿主版本的新主版本；多个选择器命中时按 `纯包名 < 版本范围 < 精确版本` 逐 peer 合并）。被覆写的入口包会正常参与冲突检测、别名复用/安装，并按物理路径自动接管其整棵依赖子树（同时仍自动跳过仅兼容宿主版本的子包）。
 - **别名安装与复用**：只为“主工程已声明且版本冲突”的依赖自动安装别名；未声明的 peer 依赖只输出警告，不自动安装。已安装且身份/版本匹配的 local 或 workspace alias 会复用（无需 registry 和安装）；声明但尚未安装的 workspace alias 不算可复用。已有目录身份或版本不匹配时会报告 alias collision，并保持原目录不变，不原地覆盖。
 - **Registry**：`registry` 显式配置同时约束远程版本查询和包管理器安装；未配置时才按项目/用户配置自动检测。
-- **初始化失败策略**：核心 `createResolver()` 与 Vite 插件会把初始化错误交给调用方；Webpack 插件保持 fail-open，初始化或模块解析失败只记录错误并继续编译（该轮不会应用 alias）。Webpack watch 每次 `watchRun` 会先失效旧 generation，再等待新分析；新一轮失败时仍可在后续 watch 周期重试。
+- **初始化失败策略**：核心 `createResolver()` 与 Vite 插件会把初始化错误交给调用方。Webpack 默认记录错误并继续编译，开启 `strict` 时把错误交给编译器。Webpack watch 在准备锁内校验依赖输入，已确认的规则可以继续使用，输入变化时会重新分析。初始化失败后可在下次 watch 周期重试。
 
 ## 高级用法
 
@@ -348,6 +348,8 @@ depsConflictResolverVitePlugin({
 ```
 
 `beforeResolve` 返回字符串时使用其指定的请求，返回 `null` 时交回打包器正常解析，返回 `undefined` 时继续应用自动重定向。
+
+Vite 在配置解析完成时确定 `beforeResolve`，包括在 `onAnalysisComplete` 或 `onInstallComplete` 中注册的回调。需要从 `buildStart` 更新行为时，请预先声明 `beforeResolve`，再通过闭包更新它使用的数据。esbuild 和 Rolldown 预构建都会对依赖内部的模块请求应用已配置的回调。要复用预构建缓存，请用 `beforeResolveCacheKey` 标识回调读取的外部状态，例如环境变量或重定向表。回调源码变化会自动使缓存失效。自定义回调没有缓存键时，Vite 会在每次解析配置后重新预构建。
 
 `onInstallComplete` 在安装尝试结束后触发，参数只包含确认成功安装或复用的映射；完整安装结果通过 `getInstallResult()` 获取，未解决条件通过 `getDiagnostics()` 获取。
 

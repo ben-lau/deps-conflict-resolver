@@ -315,7 +315,7 @@ import Vue from 'vue'; // → resolves to vue (3.x)
 - **`peerOverrides`**: Overrides declared `peerDependencies` ranges for specified packages (replacing existing ranges, promoting optional peers, or supplying omitted peers). Keys support `<name>` or `<name>@<semverRange>` (e.g., `'@rili/ui@1.x'`, matching prerelease versions so multi-version trees can target only the legacy major without affecting host-compatible versions; multiple matches merge per peer with `name-only < range < exact version` precedence). Overridden entry packages participate in conflict detection, alias reuse/installation, and path-scoped subtree collection automatically (while still skipping descendants that only match the host).
 - **Alias Installation and Reuse**: Aliases are only auto-installed for dependencies that are "declared by the host project with a version conflict." Undeclared peer dependencies only emit a warning without auto-installation. A matching installed local or workspace alias is reused without registry access or installation; a declared but uninstalled workspace alias is not reusable. If an existing alias directory has the wrong identity or version, the resolver reports a collision and leaves that directory unchanged rather than replacing it.
 - **Registry**: An explicit `registry` value controls both remote version resolution and package-manager alias installation; automatic detection is used only when it is omitted.
-- **Initialization Failure Policy**: `createResolver()` and the Vite plugin propagate initialization failures to the caller. The Webpack plugin remains fail-open: initialization or module-resolution errors are logged and compilation continues without aliases for that generation. Each Webpack `watchRun` invalidates the previous generation, waits for a fresh analysis, and can retry on the next watch cycle if initialization fails.
+- **Initialization Failure Policy**. `createResolver()` and the Vite plugin propagate initialization failures to the caller. Webpack logs errors by default and propagates them in strict mode. Webpack watch validates dependency inputs under the project preparation lock and reuses confirmed rules until those inputs change. A failed initialization can be retried on the next watch cycle.
 
 ## Advanced Usage
 
@@ -348,6 +348,8 @@ depsConflictResolverVitePlugin({
 ```
 
 `beforeResolve` can return a replacement request. Returning `null` leaves the request to the bundler, and returning `undefined` continues with the automatic redirect rules.
+
+Vite captures `beforeResolve` during configuration resolution, including callbacks registered by `onAnalysisComplete` or `onInstallComplete`. To update behavior from `buildStart`, declare a `beforeResolve` callback up front and update the data it closes over. Both esbuild and Rolldown apply the configured callback to imports within pre-bundled dependencies. To reuse the pre-bundle, use `beforeResolveCacheKey` to identify external state the callback reads, such as environment variables or redirect tables. Changes to the callback source also invalidate the cache. Vite rebuilds the pre-bundle on configuration resolution when a custom callback has no cache key.
 
 `onInstallComplete` runs after an installation attempt and receives only confirmed installed or reused mappings. Use `getInstallResult()` for complete outcomes and `getDiagnostics()` for unresolved conditions.
 
