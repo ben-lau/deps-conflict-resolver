@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -64,6 +72,67 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it.each([false, true])(
+    'refreshes production watch rules and cached imports (strict=%s)',
+    async (strict) => {
+      const root = fixture('2.7.16');
+      const legacy = join(root, 'legacy');
+      const linked = join(root, 'node_modules/legacy');
+      renameSync(linked, legacy);
+      symlinkSync(legacy, linked, 'junction');
+      const peer = (range: string) =>
+        writeFileSync(
+          join(legacy, 'package.json'),
+          JSON.stringify({
+            name: 'legacy',
+            type: 'module',
+            version: '1.0.0',
+            main: 'index.js',
+            peerDependencies: { vue: range },
+          }),
+        );
+      peer('^3');
+      const output = join(root, 'dist/runtime.cjs');
+      const watcher = await build({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [plugin({ dependencies: ['legacy'], offline: true, strict })],
+        build: {
+          lib: { entry: join(root, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
+          watch: { chokidar: { usePolling: true, interval: 30 }, buildDelay: 20 },
+        },
+      });
+      const require = createRequire(import.meta.url);
+      if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
+      let edit: ReturnType<typeof setTimeout> | undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const results = await new Promise<string[]>((resolve, reject) => {
+          const versions: string[] = [];
+          timeout = setTimeout(
+            () => reject(new Error(`Watch produced ${versions.join(', ')}`)),
+            3500,
+          );
+          watcher.on('event', (event) => {
+            if (event.code === 'ERROR') return reject(event.error);
+            if (event.code !== 'END') return undefined;
+            delete require.cache[output];
+            versions.push(require(output).version);
+            if (versions.length === 3) resolve(versions);
+            else edit = setTimeout(() => peer(versions.length === 1 ? '^2' : '^3'), 100);
+            return undefined;
+          });
+        });
+        expect(results).toEqual(['3.0.0', '2.7.16', '3.0.0']);
+      } finally {
+        clearTimeout(timeout);
+        clearTimeout(edit);
+        await watcher.close();
+      }
+    },
+    6000,
+  );
   it('resolves hook-relative replacements from the importer in builds and pre-bundles', async () => {
     const root = fixture('2.7.16');
     const legacy = join(root, 'node_modules/legacy');

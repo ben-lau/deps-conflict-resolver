@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -558,6 +559,83 @@ try {
     assert(mainCode.includes(JSON.stringify(mainVersion)), 'Main instance lost its resolver');
     workers[mode] = { version: messages[0], ...(strict && { mainAnalyses, workerAnalyses }) };
   }
+
+  const watchRoot = join(realpathSync(root), 'watch-app');
+  json(join(watchRoot, 'package.json'), {
+    name: 'watch-app',
+    dependencies: { legacy: 'file:linked', vue: '3.0.0', vue2: 'npm:vue@2.7.16' },
+  });
+  for (const [request, version] of [
+    ['vue', '3.0.0'],
+    ['vue2', '2.7.16'],
+  ]) {
+    const directory = join(watchRoot, 'node_modules', request);
+    json(join(directory, 'package.json'), {
+      name: 'vue',
+      version,
+      type: 'module',
+      main: 'index.js',
+    });
+    writeFileSync(join(directory, 'index.js'), 'export const version = ' + JSON.stringify(version));
+  }
+  const watchManifest = join(watchRoot, 'linked/package.json');
+  const peer = (range) =>
+    json(watchManifest, {
+      name: 'legacy',
+      version: '1.0.0',
+      type: 'module',
+      main: 'index.js',
+      peerDependencies: { vue: range },
+    });
+  peer('^3');
+  link(join(watchRoot, 'linked'), join(watchRoot, 'node_modules/legacy'));
+  writeFileSync(join(watchRoot, 'linked/index.js'), 'export { version } from "vue";');
+  writeFileSync(join(watchRoot, 'entry.mjs'), 'export { version } from "legacy";');
+  const watcher = await vite.build({
+    root: watchRoot,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [depsConflictResolverVitePlugin({ dependencies: ['legacy'], offline: true, strict })],
+    build: {
+      minify: false,
+      outDir: join(watchRoot, 'dist'),
+      lib: { entry: join(watchRoot, 'entry.mjs'), formats: ['cjs'], fileName: () => 'watch.cjs' },
+      rollupOptions: { output: { entryFileNames: 'watch.cjs' } },
+      watch: { chokidar: { usePolling: true, interval: 30 } },
+    },
+  });
+  const watchOutput = join(watchRoot, 'dist/watch.cjs');
+  const watchVersions = [];
+  let timeout;
+  let edit;
+  try {
+    await new Promise((complete, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error('Watch produced ' + watchVersions.join(', '))),
+        5000,
+      );
+      watcher.on('event', (event) => {
+        if (event.code === 'ERROR') return reject(event.error);
+        if (event.code !== 'END') return undefined;
+        try {
+          delete repositoryRequire.cache[watchOutput];
+          const version = repositoryRequire(watchOutput).version;
+          if (version === watchVersions.at(-1)) return undefined;
+          watchVersions.push(version);
+          if (watchVersions.length === 3) complete();
+          else edit = setTimeout(() => peer(watchVersions.length === 1 ? '^2' : '^3'), 100);
+        } catch (error) {
+          reject(error);
+        }
+        return undefined;
+      });
+    });
+    assert.deepEqual(watchVersions, ['3.0.0', '2.7.16', '3.0.0']);
+  } finally {
+    clearTimeout(timeout);
+    clearTimeout(edit);
+    await watcher.close();
+  }
   process.stdout.write(
     JSON.stringify(
       {
@@ -574,6 +652,7 @@ try {
         nestedSsrExternal,
         lateRoot,
         workers,
+        watchVersions,
       },
       null,
       2,

@@ -22,6 +22,38 @@ const VITE_LOG_LEVELS = {
  * Vite 插件名称
  */
 const PLUGIN_NAME = 'deps-conflict-resolver';
+const viteMajor = Number.parseInt(viteVersion, 10);
+
+function withViteLogger<T>(config: ResolvedConfig, debug: boolean, task: () => T): T {
+  const logLevel = config.logLevel ?? 'info';
+  const level = logLevel === 'info' && debug ? LogLevel.ALL : VITE_LOG_LEVELS[logLevel];
+  return withLogLevel(level, task, (method, message) => {
+    config.logger[method === 'debug' ? 'info' : method](message);
+  });
+}
+
+function ssrSettings(config: ResolvedConfig) {
+  const environment = config.environments?.ssr;
+  const resolve: Pick<SSROptions, 'external' | 'noExternal'> = mergeConfig(
+    { resolve: { external: config.ssr?.external, noExternal: config.ssr?.noExternal } },
+    { resolve: environment?.resolve ?? {} },
+  ).resolve;
+  const optimizer: NonNullable<SSROptions['optimizeDeps']> = mergeConfig(
+    config.ssr?.optimizeDeps ?? {},
+    environment?.optimizeDeps ?? {},
+  );
+  return { resolve, optimizer };
+}
+
+interface BuildWatch {
+  first: boolean;
+  fingerprint: string;
+  rulesChanged: boolean;
+  files: Set<string>;
+  modified: Set<string>;
+  removed: Set<string>;
+  verifySsrPolicy?: () => void;
+}
 
 /**
  * Vite 别名配置格式
@@ -111,6 +143,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   let configured: ResolvedConfig | undefined;
   let filterRequests = true;
   let optimizerHookKey: string | undefined;
+  let watch: BuildWatch | undefined;
 
   const {
     enableInDev = true,
@@ -134,6 +167,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     config: ResolvedConfig,
     activeResolver: DepsConflictResolver,
     aliasPathMappings: AliasPathMapping[],
+    ssrInput: ReturnType<typeof ssrSettings>,
   ): UserConfig | undefined {
     const command = config.command;
     // 获取分析结果
@@ -189,17 +223,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       }
     }
 
-    const ssrEnvironment = config.environments?.ssr;
-    // Match Vite's legacy-SSR to environment merge, including array
-    // concatenation and true taking precedence over arrays for these keys.
-    const ssrResolve: Pick<SSROptions, 'external' | 'noExternal'> = mergeConfig(
-      { resolve: { external: config.ssr?.external, noExternal: config.ssr?.noExternal } },
-      { resolve: ssrEnvironment?.resolve ?? {} },
-    ).resolve;
-    const ssrOptimizer: NonNullable<SSROptions['optimizeDeps']> = mergeConfig(
-      config.ssr?.optimizeDeps ?? {},
-      ssrEnvironment?.optimizeDeps ?? {},
-    );
+    const { resolve: ssrResolve, optimizer: ssrOptimizer } = ssrInput;
     const external = ssrResolve.external;
     const ssrExternal = Array.isArray(external) ? external : [];
     const ssrExcluded = [...ssrExternal, ...(ssrOptimizer.exclude ?? [])];
@@ -305,6 +329,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       requestFilter = undefined;
       optimizerHookKey = undefined;
       configured = undefined;
+      watch = undefined;
       ssrExternalEnabled = false;
       resolveSsrExternal = undefined;
       isSsrExternal = undefined;
@@ -320,12 +345,6 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           return hooks.onInstallComplete?.bind(hooks);
         },
       };
-      const logLevel = config.logLevel ?? 'info';
-      const level = logLevel === 'info' && options.debug ? LogLevel.ALL : VITE_LOG_LEVELS[logLevel];
-      const withHostLogger = <T>(task: () => T): T =>
-        withLogLevel(level, task, (method, message) => {
-          config.logger[method === 'debug' ? 'info' : method](message);
-        });
       const active = new DepsConflictResolver(
         {
           ...resolverOptions,
@@ -336,7 +355,21 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         resolverHooks,
       );
       resolver = active;
-      await withHostLogger(() => active.initialize());
+      if (config.command === 'build' && config.build?.watch) {
+        await withViteLogger(config, Boolean(options.debug), () =>
+          getResolverBuild(active).refreshForWatch({}),
+        );
+        watch = {
+          first: true,
+          fingerprint: active.getResolutionFingerprint(),
+          rulesChanged: false,
+          files: new Set(),
+          modified: new Set(),
+          removed: new Set(),
+        };
+      } else {
+        await withViteLogger(config, Boolean(options.debug), () => active.initialize());
+      }
       // Capture the callback after preparation so build and pre-bundling use
       // the same registration. A declared function can delegate at runtime.
       const beforeResolve = hooks?.beforeResolve;
@@ -371,14 +404,32 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           config.configFileDependencies.push(path);
         }
       }
-      const addition = withHostLogger(() => {
+      const ssrInput = ssrSettings(config);
+      const addition = withViteLogger(config, Boolean(options.debug), () => {
         if (config.command === 'serve' && beforeResolve && beforeResolveCacheKey === undefined) {
           logger.info(
             'Vite will rebuild the pre-bundle for the custom beforeResolve hook. Set beforeResolveCacheKey to enable reuse while its inputs are unchanged.',
           );
         }
-        return runtimeConfig(config, active, aliasPathMappings);
+        return runtimeConfig(config, active, aliasPathMappings, ssrInput);
       });
+      if (watch && ssr === 'auto' && ssrInput.resolve.noExternal !== true) {
+        const initial = [...((addition?.ssr?.noExternal as string[] | undefined) ?? [])]
+          .sort()
+          .join('\0');
+        watch.verifySsrPolicy = () => {
+          const current = runtimeConfig(config, active, active.getAliasPathMappings(), ssrInput);
+          const policy = [...((current?.ssr?.noExternal as string[] | undefined) ?? [])]
+            .sort()
+            .join('\0');
+          if (initial !== policy) {
+            // Vite memoizes externalization decisions for the build environment.
+            throw new Error(
+              'Dependency redirects changed the SSR externalization policy. Restart the Vite watch build to use the new policy.',
+            );
+          }
+        };
+      }
       if (!addition) return;
       // Do not reassign resolve.alias here: Vite already created its alias
       // plugin. resolveId and the optimizer resolve through the final resolver.
@@ -419,6 +470,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     applyToEnvironment(environment) {
       if (resolverOwner(environment.getTopLevelConfig()) !== configured) return true;
       if (!resolver) return false;
+      // The target set can change between builds in the same environment.
+      if (watch) return true;
       if (!filterRequests) return true;
       if (!requestFilter) return false;
       // Vite caches compiled filters by plugin identity. Give each environment
@@ -430,6 +483,68 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         enforce: 'pre',
         resolveId: { ...hook, filter: { id: requestFilter } },
       };
+    },
+    watchChange(file, { event }) {
+      if (!watch) return;
+      (event === 'delete' ? watch.removed : watch.modified).add(file);
+    },
+    async buildStart() {
+      if (!watch || !resolver || !configured || !this.meta.watchMode) return;
+      const active = resolver;
+      const build = getResolverBuild(active);
+      const session = watch;
+      const { first, modified, removed } = session;
+      session.first = false;
+      session.modified = new Set();
+      session.removed = new Set();
+      try {
+        if (!first || modified.size || removed.size) {
+          await withViteLogger(configured, Boolean(options.debug), () =>
+            build.refreshForWatch({ modifiedFiles: modified, removedFiles: removed }),
+          );
+        }
+        const fingerprint = active.getResolutionFingerprint();
+        session.rulesChanged = fingerprint !== session.fingerprint;
+        if (session.rulesChanged) {
+          const { packageCache } = configured as ResolvedConfig & {
+            packageCache?: Map<unknown, unknown>;
+          };
+          packageCache?.clear();
+        }
+        if (configured.build.ssr || this.environment?.config.consumer === 'server') {
+          withViteLogger(configured, Boolean(options.debug), () => session.verifySsrPolicy?.());
+        }
+        session.fingerprint = fingerprint;
+        if (filterRequests) requestFilter = aliasRequestFilter(active.getAliasPathMappings());
+      } finally {
+        const { analysis, watchFiles } = build.snapshot();
+        session.files = new Set(watchFiles?.existing ?? analysis?.watchFiles ?? []);
+        for (const file of session.files) this.addWatchFile(file);
+        for (const file of watchFiles?.missing ?? []) this.addWatchFile(file);
+      }
+    },
+    ...(viteMajor < 8
+      ? ({
+          shouldTransformCachedModule() {
+            return watch?.rulesChanged ? true : null;
+          },
+        } satisfies Partial<Plugin>)
+      : {}),
+    transform(_code, id) {
+      // Rolldown rebuilds the graph by default. Incremental builds also need
+      // per-module input dependencies, as they can reuse transformed modules.
+      if (!watch || !this.meta.watchMode || viteMajor < 8 || !/^(?:\/|[A-Za-z]:[\\/])/.test(id))
+        return null;
+      const build = configured?.build as
+        | { rolldownOptions?: { experimental?: { incrementalBuild?: boolean } } }
+        | undefined;
+      if (build?.rolldownOptions?.experimental?.incrementalBuild) {
+        for (const file of watch.files) this.addWatchFile(file);
+      }
+      return null;
+    },
+    closeWatcher() {
+      if (watch && resolver) getResolverBuild(resolver).closeWatch();
     },
     resolveId: {
       // Vite's alias plugin precedes user plugins ordered by enforce.
