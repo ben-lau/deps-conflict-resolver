@@ -400,23 +400,22 @@ pnpm fmt
 
 This project uses [release-please](https://github.com/googleapis/release-please) for automated releases:
 
-1. Merge commits to `main` following [Conventional Commits](https://www.conventionalcommits.org/)
-2. release-please automatically creates/updates a Release PR with changelog
-3. Review and merge the Release PR
-4. A GitHub Release + tag is automatically created
-5. Publish automatically to npm using OIDC
+1. Merge [Conventional Commits](https://www.conventionalcommits.org/) into `main`
+2. Release Please creates or updates a release PR when a new version is due
+3. Review and merge the release PR to create the GitHub Release and tag
+4. The workflow packs and verifies the `.tgz` at the release commit, then publishes that same file to npm via OIDC
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 
 ### Testing preview packages
 
-After all CI checks pass, branch pushes and pull requests produce temporary packages through [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new), without publishing to npm. Ordinary PR comments contain commit-specific install commands; the pending Release PR offers both `@main` and a fixed SHA. When there is no Release PR, find the command in the CI run summary or on the [preview page](https://pkg.pr.new/~/ben-lau/deps-conflict-resolver). To try the latest `main` preview:
+Opening or updating a PR and pushing to `main` trigger CI. Once all checks pass, [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new) publishes a temporary package. Open a draft PR to build a preview for a branch. PR comments contain commit-specific install commands. The pending release PR also offers an `@main` link. Find install commands in the CI run summary or on the [preview page](https://pkg.pr.new/~/ben-lau/deps-conflict-resolver).
 
 ```bash
 pnpm add -D https://pkg.pr.new/ben-lau/deps-conflict-resolver/deps-conflict-resolver@main
 ```
 
-`@main` points to the most recent successful preview: it may still be an older version when CI for a new commit has failed or is running, so check that the commit's CI succeeded. For reproducible testing, use a fixed SHA link and update the lockfile when changing previews; the lockfile can retain an earlier resolution. Each push covers the branch's latest commit; failed or canceled checks do not trigger that run's preview. A push to a branch with an open PR in this repository triggers separate branch and PR CI runs, each deciding whether to publish. A passing branch run can therefore publish a preview for the same SHA even if the PR checks fail. PR CI checks the simulated merge with the target branch, whereas the preview builds the PR head to match the SHA link. Previews expire; restore a regular release after testing.
+`@main` points to the most recent successful preview. After a new commit, check that its preview has been published. For reproducible testing, use a fixed SHA link and update the lockfile when changing previews. PR CI tests the simulated merge with the target branch. The preview builds the PR head so the contents match the SHA link. Previews expire. Restore a regular release after testing.
 
 With npm 12, enable `--allow-remote=root` when installing a preview URL and on subsequent installs.
 

@@ -400,23 +400,22 @@ pnpm fmt
 
 本项目使用 [release-please](https://github.com/googleapis/release-please) 自动化发版：
 
-1. 遵循 [Conventional Commits](https://www.conventionalcommits.org/) 规范提交代码到 `main` 分支
-2. release-please 自动创建/更新 Release PR，包含版本号和 CHANGELOG
-3. 审核并合并 Release PR
-4. 自动创建 GitHub Release + tag
-5. 自动通过 OIDC 发布到 npm
+1. 遵循 [Conventional Commits](https://www.conventionalcommits.org/) 规范将代码合并到 `main`
+2. 有待发版本时，Release Please 自动创建或更新发布 PR
+3. 审核并合并发布 PR，自动创建 GitHub Release 和 tag
+4. 从发布提交打包并验收 `.tgz`，通过后将同一个文件通过 OIDC 发布到 npm
 
 详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ### 测试预览包
 
-分支推送和 PR 的 CI 全部通过后，会通过 [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new) 生成临时预览包，不会发布到 npm。普通 PR 评论会显示固定提交的安装命令；待发版的 Release PR 评论会同时显示 `@main` 和固定 SHA 的安装命令。没有 Release PR 时，也可以从对应 CI 运行的摘要或[预览列表](https://pkg.pr.new/~/ben-lau/deps-conflict-resolver)查找。测试 `main` 的最新预览也可以使用：
+新建或更新 PR，以及 push 到 `main` 时会运行 CI。全部检查通过后，[pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new) 自动发布临时包。普通分支可以开 Draft PR 来触发 CI。PR 评论会显示固定提交的安装命令。待发版的发布 PR 评论还会显示 `@main` 链接。也可以在 CI 运行的摘要或[预览列表](https://pkg.pr.new/~/ben-lau/deps-conflict-resolver)查找安装命令。
 
 ```bash
 pnpm add -D https://pkg.pr.new/ben-lau/deps-conflict-resolver/deps-conflict-resolver@main
 ```
 
-`@main` 指向最近一次成功生成的预览：新提交的 CI 失败或尚未完成时，它可能仍是较早的版本，请先确认该提交的 CI 已成功。需要准确复现时，请使用固定 SHA 的链接，并在切换预览时更新锁文件；锁文件可能继续指向之前解析的包。每次 push 对应分支的最新提交，检查失败或取消不会触发该次预览发布。已有 PR 的同仓分支 push 会分别触发分支和 PR 的 CI；两次检查各自决定是否发布，因此 PR 检查失败时仍可能存在分支检查通过后发布的同 SHA 预览。PR 的 CI 检查与目标分支的模拟合并结果，预览包则构建 PR head，以匹配 SHA 链接。预览包会过期，测试结束后请恢复正式版本。
+`@main` 指向最近一次成功生成的预览。新提交后请先确认对应的预览发布成功。需要准确复现时，请使用固定 SHA 的链接，并在切换预览时更新锁文件。PR CI 检查与目标分支的模拟合并结果，预览包用 PR 源分支的提交构建，使内容与 SHA 链接对应。预览包会过期，测试结束后请恢复正式版本。
 
 使用 npm 12 时，安装此类远程链接需要启用 `--allow-remote=root`；后续重新安装时也需保持相应设置。
 
