@@ -1042,12 +1042,29 @@ export class DependencyAnalyzer {
     const reusedAliasGroups = new Map<string, ReusedAliasGroup>();
     const unresolvedRequests: DependencyPath[] = [];
 
-    for (const request of conflictingRanges) {
-      const existingAlias = this.findExistingAliasForRanges(
-        packageName,
-        [request.requiredRange],
-        new Set(),
+    // All names for one physical importer have to use the same provider.
+    const rangesByPath = new Map<string, Set<string>>();
+    for (const { packagePath, requiredRange } of conflict.requestedBy) {
+      if (!packagePath) continue;
+      const ranges = rangesByPath.get(packagePath) ?? new Set<string>();
+      ranges.add(
+        resolveDependencyRequirement(packageName, requiredRange, this.workspaceDetector).range,
       );
+      rangesByPath.set(packagePath, ranges);
+    }
+    const sharedAliases = new Map<string, ExistingAliasMatch | null>();
+    for (const request of conflictingRanges) {
+      const { packagePath } = request;
+      const ranges = packagePath ? rangesByPath.get(packagePath) : undefined;
+      if (packagePath && ranges && ranges.size > 1 && !sharedAliases.has(packagePath)) {
+        sharedAliases.set(
+          packagePath,
+          this.findExistingAliasForRanges(packageName, [...ranges], new Set()),
+        );
+      }
+      const existingAlias =
+        (packagePath ? sharedAliases.get(packagePath) : undefined) ??
+        this.findExistingAliasForRanges(packageName, [request.requiredRange], new Set());
 
       if (!existingAlias) {
         unresolvedRequests.push(request);

@@ -310,6 +310,89 @@ describe('diagnostics and deterministic offline operation', () => {
     }
   });
 
+  it('reports incompatible peer overrides for two names sharing one importer', async () => {
+    const root = project({
+      dependencies: {
+        a: 'npm:legacy@1.0.0',
+        b: 'npm:legacy@1.0.0',
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.7.16',
+      },
+    });
+    const physical = pkg(root, 'legacy-store', { name: 'legacy', peerDependencies: { vue: '^3' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    for (const alias of ['a', 'b']) {
+      symlinkSync(physical, join(root, 'node_modules', alias), 'junction');
+    }
+    const options = {
+      ...baseOptions(root, ['a', 'b']),
+      peerOverrides: { b: { vue: '^2' } },
+      offline: true,
+    };
+
+    const resolver = await createResolver(options);
+    expect(resolver.getDiagnostics()).toEqual([
+      expect.objectContaining({
+        code: 'AMBIGUOUS_IMPORTER',
+        packageName: 'vue',
+        importerPaths: [physical],
+        requestedBy: ['a', 'b'],
+      }),
+    ]);
+    await expect(createResolver({ ...options, strict: true })).rejects.toThrow(ResolutionError);
+  });
+
+  it.each([
+    { range: '~2.6.0', sharesProvider: false },
+    { range: '^2.6.0', sharesProvider: true },
+  ])(
+    'validates aliased peers sharing one physical importer with $range',
+    async ({ range, sharesProvider }) => {
+      const root = project({
+        dependencies: {
+          a: 'npm:legacy@1.0.0',
+          b: 'npm:legacy@1.0.0',
+          runtime: '3.0.0',
+          runtime26: 'npm:runtime@2.6.14',
+          runtime27: 'npm:runtime@2.7.16',
+        },
+      });
+      const physical = pkg(root, 'legacy-store', { name: 'legacy' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      pkg(root, 'runtime26', { name: 'runtime', version: '2.6.14' });
+      pkg(root, 'runtime27', { name: 'runtime', version: '2.7.16' });
+      for (const name of ['a', 'b']) {
+        symlinkSync(physical, join(root, 'node_modules', name), 'junction');
+      }
+      const options = {
+        ...baseOptions(root, ['a', 'b']),
+        peerOverrides: { a: { runtime: range }, b: { runtime: '~2.7.0' } },
+        offline: true,
+      };
+      if (sharesProvider) {
+        const resolver = await createResolver({ ...options, strict: true });
+        expect(resolver.resolveModule('runtime', join(physical, 'index.js'))).toBe('runtime27');
+        expect(resolver.getDiagnostics()).toEqual([]);
+      } else {
+        const resolver = await createResolver(options);
+        const diagnostics = resolver.getDiagnostics();
+        expect(diagnostics).toEqual([
+          expect.objectContaining({
+            code: 'AMBIGUOUS_IMPORTER',
+            aliases: ['runtime26', 'runtime27'],
+            importerPaths: [physical],
+          }),
+        ]);
+        expect(resolver.explainResolution('runtime', join(physical, 'index.js')).reason).toBe(
+          'ambiguous',
+        );
+        expect(resolver.getDiagnostics()).toEqual(diagnostics);
+        await expect(createResolver({ ...options, strict: true })).rejects.toThrow(ResolutionError);
+      }
+    },
+  );
+
   it('reuses the current hoisted alias target on the first offline refresh', async () => {
     const root = project({
       workspaces: ['packages/*'],

@@ -45,7 +45,7 @@ function matchesPackageName(node: InstalledPackageNode, names: readonly string[]
 /**
  * Validate provider selection for configured entries and pruned descendants.
  * Shared contexts and descendant manifest mismatches are advisory before actual
- * imports are known.
+ * imports are known. Conflicting overrides on one configured importer are errors.
  */
 export function validateSharedPeerContexts(
   graph: InstalledDependencyGraph,
@@ -59,6 +59,7 @@ export function validateSharedPeerContexts(
   if (mappings.length === 0) return;
   if (
     graph.roots.length < 2 &&
+    graph.rootRequests.size < 2 &&
     !inheritedMismatches?.size &&
     !mappings.some((mapping) => mapping.excludedImporterPaths?.length)
   ) {
@@ -145,6 +146,9 @@ export function validateSharedPeerContexts(
         range: resolveDependencyRequirement(peer, effectivePeer.range, detector).range,
       });
     }
+    if (!installationPending && graph.rootRequests.size > 1) {
+      validateConfiguredImporterAliases(validation, peer, candidateRoots);
+    }
     validateSharedContexts(validation, peer, candidateRoots, installedMappings);
   }
 }
@@ -213,6 +217,47 @@ function validateDescendantProviders(
         message: `${node.name} requires ${peer} (${ranges.join(', ')}), but no compatible provider is available in its redirect scope or installed dependencies`,
       });
     }
+  }
+}
+
+function validateConfiguredImporterAliases(
+  validation: PeerValidation,
+  peer: string,
+  candidateRoots: ConfiguredPeerRequest[],
+): void {
+  const { diagnostics, aliases, getResolver } = validation;
+  const requestsByPath = new Map<string, typeof candidateRoots>();
+  for (const request of candidateRoots) {
+    const matching = requestsByPath.get(request.packagePath) ?? [];
+    matching.push(request);
+    requestsByPath.set(request.packagePath, matching);
+  }
+  for (const [path, matching] of requestsByPath) {
+    const names = new Set(matching.map(({ nodeName }) => nodeName));
+    const ranges = new Set(matching.map(({ range }) => range).filter(isValidRange));
+    if (names.size < 2) continue;
+
+    const decision = getResolver().explainResolution(peer, join(path, '__peer_context__.js'));
+    const provider = decision.resolved ? aliases.get(decision.resolved) : undefined;
+    if (
+      decision.reason !== 'ambiguous' &&
+      (!provider ||
+        ranges.size < 2 ||
+        [...ranges].every((range) => satisfies(provider.version, range)))
+    )
+      continue;
+
+    diagnostics.push({
+      code: 'AMBIGUOUS_IMPORTER',
+      severity: 'error',
+      packageName: peer,
+      requestedBy: [...names].sort(),
+      aliases: decision.aliases,
+      importerPaths: [path],
+      message: provider
+        ? `One physical importer is configured under multiple names with ${peer} requirements that the selected ${provider.label} cannot satisfy (${[...ranges].join(', ')})`
+        : `Multiple ${peer} aliases match the same configured importer: ${decision.aliases.join(', ')}`,
+    });
   }
 }
 

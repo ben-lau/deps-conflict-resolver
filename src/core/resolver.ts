@@ -43,6 +43,14 @@ const DEFAULT_OPTIONS = {
   aliasPrefix: 'aliased-',
 } as const;
 
+function importerAmbiguityKey({ packageName, aliases, importerPaths }: ResolverDiagnostic): string {
+  return JSON.stringify([
+    packageName,
+    aliases,
+    importerPaths?.map((path) => path.replace(/\\/g, '/')),
+  ]);
+}
+
 /**
  * 依赖解析器
  * 整合所有核心模块，提供统一的 API
@@ -762,10 +770,22 @@ export class DepsConflictResolver {
   }
 
   private generationDiagnostics(): ResolverDiagnostic[] {
+    const analysis = this.analysisResult?.diagnostics ?? [];
+    const runtime = this.aliasManager?.getDiagnostics?.() ?? [];
+    if (runtime.length === 0) return [...analysis, ...this.installDiagnostics];
+
+    // Keep the initialization diagnostic with its configured requesters when
+    // an actual import encounters the same set of rules at the same path.
+    const knownAmbiguities = new Set(
+      analysis.filter(({ code }) => code === 'AMBIGUOUS_IMPORTER').map(importerAmbiguityKey),
+    );
     return [
-      ...(this.analysisResult?.diagnostics ?? []),
+      ...analysis,
       ...this.installDiagnostics,
-      ...(this.aliasManager?.getDiagnostics?.() ?? []),
+      ...runtime.filter(
+        (entry) =>
+          entry.code !== 'AMBIGUOUS_IMPORTER' || !knownAmbiguities.has(importerAmbiguityKey(entry)),
+      ),
     ];
   }
 
