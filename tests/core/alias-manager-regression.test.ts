@@ -19,7 +19,11 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, realpathSync: vi.fn(actual.realpathSync), statSync: vi.fn(actual.statSync) };
 });
 
-function mapping(aliasName: string, importerPaths: string[]): AliasMapping {
+function mapping(
+  aliasName: string,
+  importerPaths: string[],
+  excludedImporterPaths?: string[],
+): AliasMapping {
   return {
     originalName: 'vue',
     aliasName,
@@ -28,6 +32,7 @@ function mapping(aliasName: string, importerPaths: string[]): AliasMapping {
     usedBy: ['legacy'],
     allDependents: ['legacy', 'shared', 'excluded'],
     importerPaths,
+    ...(excludedImporterPaths ? { excludedImporterPaths } : {}),
   };
 }
 
@@ -204,5 +209,40 @@ describe('alias resolution across installation layouts', () => {
     expect(
       instance.resolveModule({ request: 'vue', importer: join(child, 'index.js') }),
     ).toBeNull();
+  });
+
+  it('keeps only the closest pruned boundary when includeRedirects sits between nested pruned scopes', () => {
+    options.includeRedirects = { vue: ['forced-mid', 'forced-leaf'] };
+    const legacy = writePackage('node_modules/legacy', 'legacy');
+    const prunedOuter = writePackage(
+      'node_modules/legacy/node_modules/pruned-outer',
+      'pruned-outer',
+    );
+    const forcedMid = writePackage(
+      'node_modules/legacy/node_modules/pruned-outer/node_modules/forced-mid',
+      'forced-mid',
+    );
+    const prunedInner = writePackage(
+      'node_modules/legacy/node_modules/pruned-outer/node_modules/forced-mid/node_modules/pruned-inner',
+      'pruned-inner',
+    );
+    const forcedLeaf = writePackage(
+      'node_modules/legacy/node_modules/pruned-outer/node_modules/forced-mid/node_modules/pruned-inner/node_modules/forced-leaf',
+      'forced-leaf',
+    );
+    const instance = manager([mapping('vue2', [legacy], [prunedOuter, prunedInner])]);
+
+    expect(
+      instance.resolveModule({ request: 'vue', importer: join(prunedOuter, 'index.js') }),
+    ).toBeNull();
+    expect(instance.resolveModule({ request: 'vue', importer: join(forcedMid, 'index.js') })).toBe(
+      'vue2',
+    );
+    expect(
+      instance.resolveModule({ request: 'vue', importer: join(prunedInner, 'index.js') }),
+    ).toBeNull();
+    expect(instance.resolveModule({ request: 'vue', importer: join(forcedLeaf, 'index.js') })).toBe(
+      'vue2',
+    );
   });
 });

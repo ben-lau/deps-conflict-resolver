@@ -2,9 +2,11 @@ import { join } from 'node:path';
 import type { AliasMapping, PackageJson, ResolvedOptions, ResolverDiagnostic } from '../types';
 import type { InstalledDependencyGraph } from './dependency-graph';
 import { AliasManager } from './alias-manager';
+import { createWorkspaceDetector, type WorkspaceDetector } from './workspace-detector';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
+import { parseNpmAlias } from '../utils/version-spec';
 
 interface Provider {
   path: string;
@@ -23,8 +25,12 @@ export function validateSharedPeerContexts(
   options: ResolvedOptions,
   diagnostics: ResolverDiagnostic[],
   watchFiles?: Set<string>,
+  workspaceDetector?: Pick<WorkspaceDetector, 'resolveVersionSpec'>,
 ): void {
   if (mappings.length === 0 || graph.roots.length < 2) return;
+  const detector = workspaceDetector ?? createWorkspaceDetector(options.projectRoot);
+  const resolveRange = (peerName: string, rawRange: string): string =>
+    detector.resolveVersionSpec(peerName, rawRange) ?? rawRange;
   const readManifest = (directory: string): PackageJson | null => {
     watchFiles?.add(join(directory, 'package.json'));
     return readPackageJsonCached(directory);
@@ -78,6 +84,7 @@ export function validateSharedPeerContexts(
     const candidateRoots: Array<{
       nodeId: string;
       nodeName: string;
+      manifestName?: string;
       packagePath: string;
       requestPath: string[];
       range: string;
@@ -96,9 +103,10 @@ export function validateSharedPeerContexts(
       candidateRoots.push({
         nodeId,
         nodeName: node.name,
+        manifestName: manifest?.name,
         packagePath: node.packagePath,
         requestPath,
-        range: effectivePeer.range,
+        range: resolveRange(peer, effectivePeer.range),
       });
     }
     if (new Set(candidateRoots.map((entry) => entry.nodeId)).size < 2) continue;
@@ -108,20 +116,28 @@ export function validateSharedPeerContexts(
     // all roots are guaranteed to share the same provider.
     const peerMappings = installedMappings.filter((mapping) => mapping.originalName === peer);
     if (peerMappings.length === 1 && peerMappings[0]!.importerPaths) {
+      const aliasProvider = aliases.get(peerMappings[0]!.aliasName);
       const positivePaths = new Set(peerMappings[0]!.importerPaths);
       const prunedPaths = new Set(peerMappings[0]!.excludedImporterPaths ?? []);
-      const isRootExcluded = (name: string, packagePath: string) =>
+      const isRootExcluded = (
+        name: string,
+        manifestName: string | undefined,
+        packagePath: string,
+      ) =>
         excludedForPeer.some(
           (excluded) =>
             excluded === name ||
+            (manifestName !== undefined && excluded === manifestName) ||
             packagePath.replace(/\\/g, '/').includes('/node_modules/' + excluded + '/'),
         );
       if (
+        aliasProvider &&
         candidateRoots.every(
-          ({ nodeName, packagePath }) =>
+          ({ nodeName, manifestName, packagePath, range }) =>
             positivePaths.has(packagePath) &&
             !prunedPaths.has(packagePath) &&
-            !isRootExcluded(nodeName, packagePath),
+            !isRootExcluded(nodeName, manifestName, packagePath) &&
+            satisfies(aliasProvider.version, range),
         )
       ) {
         continue;
@@ -166,6 +182,7 @@ export function validateSharedPeerContexts(
       if (!node || originals.has(node.name)) continue;
       if (
         hasExclusions &&
+        aliasPaths.has(context.provider.path) &&
         activeResolver.explainResolution(peer, join(node.packagePath, '__peer_context__.js'))
           .reason === 'excluded'
       )
@@ -177,7 +194,18 @@ export function validateSharedPeerContexts(
         options.peerOverrides,
         node.version,
       ).get(peer);
-      const declaredRange = effectivePeer?.range ?? manifest?.dependencies?.[peer];
+      let declaredRange: string | undefined;
+      if (effectivePeer) {
+        declaredRange = resolveRange(peer, effectivePeer.range);
+      } else {
+        const rawDepRange = manifest?.dependencies?.[peer];
+        if (rawDepRange) {
+          const npmAlias = parseNpmAlias(rawDepRange);
+          if (!npmAlias || npmAlias[0] === peer) {
+            declaredRange = resolveRange(peer, rawDepRange);
+          }
+        }
+      }
       if (declaredRange && !satisfies(context.provider.version, declaredRange)) continue;
       if (
         effectivePeer &&

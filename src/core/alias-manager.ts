@@ -255,13 +255,17 @@ export class AliasManager {
       while (true) {
         for (const { rule, scope, pruned } of index.paths.get(path) ?? []) {
           if (pruned) {
+            const specificity = -distance;
             let prunedMatch = prunedMatches.get(rule);
             if (!prunedMatch) {
-              prunedMatch = { specificity: Number.NEGATIVE_INFINITY, scopes: [] };
+              prunedMatch = { specificity, scopes: [scope] };
               prunedMatches.set(rule, prunedMatch);
+            } else if (specificity > prunedMatch.specificity) {
+              prunedMatch.specificity = specificity;
+              prunedMatch.scopes = [scope];
+            } else if (specificity === prunedMatch.specificity) {
+              prunedMatch.scopes.push(scope);
             }
-            prunedMatch.specificity = Math.max(prunedMatch.specificity, -distance);
-            prunedMatch.scopes.push(scope);
             continue;
           }
           let match = matches.get(rule);

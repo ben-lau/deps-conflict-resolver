@@ -213,7 +213,13 @@ export async function linkAliasPeers(
         const peer = candidates[0]!;
         if (peer.importerPaths === undefined) continue;
         const paths = [...importerPaths];
+        const pathSet = new Set(paths);
         peer.importerPaths = [...new Set([...peer.importerPaths, ...paths])];
+        if (peer.excludedImporterPaths?.length) {
+          peer.excludedImporterPaths = peer.excludedImporterPaths.filter(
+            (excludedPath) => !pathSet.has(excludedPath),
+          );
+        }
         peer.peerImporterPaths = {
           ...peer.peerImporterPaths,
           [importer.aliasName]: paths,

@@ -1348,4 +1348,145 @@ describe('resolution correctness with installed packages', () => {
 
     expect(analysis?.aliasMappings.map((mapping) => mapping.aliasName)).toEqual(['vue2']);
   });
+
+  it('resolves catalog: specs during shared-peer context validation and checks manifest name in fast-path exclusions', async () => {
+    const root = project({
+      dependencies: {
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.7.16',
+        legacy: '1.0.0',
+        modern: '1.0.0',
+      },
+    });
+    writeFileSync(
+      join(root, 'pnpm-workspace.yaml'),
+      [
+        'packages:',
+        '  - "packages/*"',
+        'catalog:',
+        '  vue: "^3.0.0"',
+        'catalogs:',
+        '  legacy:',
+        '    vue: "^2.0.0"',
+      ].join('\n'),
+    );
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    pkg(root, 'legacy', {
+      peerDependencies: { vue: 'catalog:legacy' },
+      dependencies: { bridge: '1.0.0' },
+    });
+    pkg(root, 'modern', {
+      peerDependencies: { vue: 'catalog:' },
+      dependencies: { bridge: '1.0.0' },
+    });
+    pkg(root, 'bridge', {
+      dependencies: { shared: '1.0.0', vue: 'workspace:*' },
+    });
+    const shared = pkg(root, 'shared', {
+      peerDependencies: { vue: '^2.0.0 || ^3.0.0' },
+    });
+
+    const resolver = await createResolver(baseOptions(root, ['legacy', 'modern']));
+    expect(resolver.getDiagnostics()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'SHARED_PEER_CONTEXT',
+          severity: 'warning',
+          packageName: 'vue',
+          importerPaths: [shared],
+        }),
+      ]),
+    );
+
+    // Workspace package installed under a local alias whose manifest.name is in
+    // excludeRedirects must not take the single-provider fast path.
+    const aliasRoot = project({
+      workspaces: ['packages/*'],
+      dependencies: {
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.7.16',
+        'legacy-a': '1.0.0',
+        'legacy-b-alias': 'workspace:*',
+      },
+    });
+    pkg(aliasRoot, 'vue', { version: '3.5.0' });
+    pkg(aliasRoot, 'vue2', { name: 'vue', version: '2.7.16' });
+    pkg(aliasRoot, 'legacy-a', {
+      peerDependencies: { vue: '^2.0.0' },
+      dependencies: { shared: '1.0.0' },
+    });
+    const workspacePkg = join(aliasRoot, 'packages/real-legacy-b');
+    mkdirSync(workspacePkg, { recursive: true });
+    writeFileSync(
+      join(workspacePkg, 'package.json'),
+      JSON.stringify({
+        name: 'real-legacy-b',
+        version: '1.0.0',
+        peerDependencies: { vue: '^2.0.0' },
+        dependencies: { shared: '1.0.0' },
+      }),
+    );
+    pkg(workspacePkg, 'vue', { version: '2.6.14' });
+    mkdirSync(join(aliasRoot, 'node_modules'), { recursive: true });
+    symlinkSync(
+      workspacePkg,
+      join(aliasRoot, 'node_modules/legacy-b-alias'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const aliasShared = pkg(aliasRoot, 'shared', {
+      peerDependencies: { vue: '^2.0.0 || ^3.0.0' },
+    });
+
+    const aliasResolver = await createResolver({
+      ...baseOptions(aliasRoot, ['legacy-a', 'legacy-b-alias']),
+      excludeRedirects: { vue: ['real-legacy-b'] },
+    });
+    expect(aliasResolver.getDiagnostics()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'SHARED_PEER_CONTEXT',
+          severity: 'warning',
+          packageName: 'vue',
+          importerPaths: [aliasShared],
+        }),
+      ]),
+    );
+  });
+
+  it('prunes incompatible nested instances of another conflict package so they do not inherit ancestor aliases', async () => {
+    const root = project({
+      dependencies: {
+        legacy: '1.0.0',
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.7.16',
+        'vue-router': '4.5.0',
+        'vue-router3': 'npm:vue-router@3.6.5',
+      },
+    });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    pkg(root, 'vue-router', { version: '4.5.0', peerDependencies: { vue: '^3.2.0' } });
+    pkg(root, 'vue-router3', {
+      name: 'vue-router',
+      version: '3.6.5',
+      peerDependencies: { vue: '^2.0.0' },
+    });
+    const legacy = pkg(root, 'legacy', {
+      peerDependencies: { vue: '^2.0.0', 'vue-router': '^3.0.0' },
+      dependencies: { bridge: '1.0.0' },
+    });
+    const bridge = pkg(legacy, 'bridge', {
+      dependencies: { 'vue-router': '4.5.0' },
+    });
+    const nestedRouter = pkg(bridge, 'vue-router', {
+      version: '4.5.0',
+      peerDependencies: { vue: '^3.2.0' },
+    });
+
+    const resolver = await createResolver({ ...baseOptions(root), offline: true, strict: true });
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+    expect(resolver.resolveModule('vue-router', join(legacy, 'index.js'))).toBe('vue-router3');
+    expect(resolver.resolveModule('vue', join(nestedRouter, 'index.js'))).toBeNull();
+  });
 });

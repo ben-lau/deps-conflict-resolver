@@ -371,6 +371,7 @@ export class DependencyAnalyzer {
         this.options,
         this.diagnostics,
         this.watchFiles,
+        this.workspaceDetector,
       );
 
       // 5. 找出缺失的 peer 依赖（仅记录，不自动安装）
@@ -1628,8 +1629,9 @@ export class DependencyAnalyzer {
       visited.add(nodeId);
 
       const node = this.dependencyGraph.nodes.get(nodeId);
-      if (!node || excludeSet.has(node.name)) continue;
+      if (!node) continue;
 
+      const isExcludedConflictPackage = excludeSet.has(node.name);
       if (!rootSet.has(node.id) && target) {
         const naturalNode = this.findGraphChildNode(node, target.packageName);
         const naturalManifest = naturalNode ? readPackageJsonCached(naturalNode.packagePath) : null;
@@ -1654,6 +1656,8 @@ export class DependencyAnalyzer {
           continue;
         }
       }
+
+      if (isExcludedConflictPackage) continue;
 
       collected.push({ name: node.name, path: node.packagePath });
       for (const dependencyName of [...node.dependencyNames, ...node.peerDependencyNames]) {
