@@ -11,7 +11,12 @@ import type {
 } from '../types/index';
 import { DEFAULT_NPM_REGISTRY } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
-import { clearPackageJsonCache, findProjectRoot, readPackageJsonCached } from '../utils/fs';
+import {
+  clearPackageJsonCache,
+  findProjectRoot,
+  getCachedRealPath,
+  readPackageJsonCached,
+} from '../utils/fs';
 import { realpathSync } from 'node:fs';
 import { createEnvironmentDetector, EnvironmentDetector } from './environment-detector';
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
@@ -126,7 +131,7 @@ export class DepsConflictResolver {
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
       excludeRedirects: userOptions.excludeRedirects ?? {},
       includeRedirects: userOptions.includeRedirects ?? {},
-      peerOverrides: userOptions.peerOverrides ?? {},
+      peerOverrides: userOptions.peerOverrides ? { ...userOptions.peerOverrides } : {},
     };
   }
 
@@ -243,21 +248,25 @@ export class DepsConflictResolver {
     await withProjectPreparation(
       this.preparation,
       async (markChanged) => {
-        this.analysisResult = await this.analyzeCurrent();
-        this.logMissingFirstLevelPeers(this.analysisResult);
-        this.assertResolved();
-        if (this.options.autoInstall) {
-          const installing = this.installGeneration(markChanged);
-          this.installationPromise = installing;
-          try {
-            await installing;
-          } finally {
-            this.installationPromise = null;
+        try {
+          this.analysisResult = await this.analyzeCurrent(this.options.offline, [], false);
+          this.logMissingFirstLevelPeers(this.analysisResult);
+          this.assertResolved();
+          if (this.options.autoInstall) {
+            const installing = this.installGeneration(markChanged);
+            this.installationPromise = installing;
+            try {
+              await installing;
+            } finally {
+              this.installationPromise = null;
+            }
+          } else {
+            this.publishWithoutInstallation();
           }
-        } else {
-          this.publishWithoutInstallation();
+          this.observeSnapshot();
+        } finally {
+          clearPackageJsonCache();
         }
-        this.observeSnapshot();
       },
       this.observer,
     );
@@ -332,12 +341,16 @@ export class DepsConflictResolver {
       await withProjectPreparation(
         this.preparation,
         async (markChanged) => {
-          this.analysisResult = await this.analyzeCurrent();
-          this.installDiagnostics = [];
-          this.assertResolved();
-          if (!this.options.offline) await this.installGeneration(markChanged);
-          else this.publishWithoutInstallation();
-          this.observeSnapshot();
+          try {
+            this.analysisResult = await this.analyzeCurrent(this.options.offline, [], false);
+            this.installDiagnostics = [];
+            this.assertResolved();
+            if (!this.options.offline) await this.installGeneration(markChanged);
+            else this.publishWithoutInstallation();
+            this.observeSnapshot();
+          } finally {
+            clearPackageJsonCache();
+          }
         },
         this.observer,
       );
@@ -353,11 +366,12 @@ export class DepsConflictResolver {
   private async analyzeCurrent(
     offline = this.options.offline,
     preparedAliases: readonly AliasMapping[] = [],
+    clearCache = true,
   ): Promise<AnalysisResult> {
     clearPackageJsonCache();
     this.analyzer = createDependencyAnalyzer({ ...this.options, offline }, preparedAliases);
     try {
-      return await this.analyzer.analyze();
+      return await this.analyzer.analyze({ clearCache });
     } finally {
       this.analyzer = null;
     }
@@ -427,6 +441,7 @@ export class DepsConflictResolver {
       this.analysisResult = await this.analyzeCurrent(
         result.success ? this.options.offline : true,
         this.filterCompletedMappings(planned, result, false),
+        false,
       );
       const fresh = this.analysisResult.aliasMappings;
       const pending = fresh.filter(
@@ -480,34 +495,40 @@ export class DepsConflictResolver {
     const generation = this.snapshotGeneration;
     const previous = this.snapshotSignature;
     try {
-      const analysis = await this.analyzeCurrent(true, this.activeMappings);
-      if (generation !== this.snapshotGeneration) return;
-      this.analysisResult = analysis;
-      this.setActiveAliasMappings(analysis.aliasMappings.filter((mapping) => !mapping.installSpec));
-      const changed = previous !== this.describeSnapshot();
-      if (this.initialized && changed) {
+      try {
+        const analysis = await this.analyzeCurrent(true, this.activeMappings, false);
+        if (generation !== this.snapshotGeneration) return;
+        this.analysisResult = analysis;
+        this.setActiveAliasMappings(
+          analysis.aliasMappings.filter((mapping) => !mapping.installSpec),
+        );
+        const changed = previous !== this.describeSnapshot();
+        if (this.initialized && changed) {
+          this.snapshotInvalidated = true;
+          this.setActiveAliasMappings([]);
+          this.installDiagnostics.push({
+            code: 'PROJECT_STATE_CHANGED',
+            severity: 'error',
+            packageName: this.options.dependencies.join(', '),
+            message:
+              'Another preparation changed active dependency rules. Call invalidate() and initialize() before building again.',
+          });
+        }
+      } catch (error) {
+        if (generation !== this.snapshotGeneration) return;
         this.snapshotInvalidated = true;
         this.setActiveAliasMappings([]);
         this.installDiagnostics.push({
           code: 'PROJECT_STATE_CHANGED',
           severity: 'error',
           packageName: this.options.dependencies.join(', '),
-          message:
-            'Another preparation changed active dependency rules. Call invalidate() and initialize() before building again.',
+          message: 'Cannot refresh dependency rules after another installation: ' + String(error),
         });
       }
-    } catch (error) {
-      if (generation !== this.snapshotGeneration) return;
-      this.snapshotInvalidated = true;
-      this.setActiveAliasMappings([]);
-      this.installDiagnostics.push({
-        code: 'PROJECT_STATE_CHANGED',
-        severity: 'error',
-        packageName: this.options.dependencies.join(', '),
-        message: 'Cannot refresh dependency rules after another installation: ' + String(error),
-      });
+      this.captureSnapshot();
+    } finally {
+      clearPackageJsonCache();
     }
-    this.captureSnapshot();
   }
 
   private describeSnapshot(): string {
@@ -524,11 +545,13 @@ export class DepsConflictResolver {
       .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
     const providers = (this.aliasManager?.getAliasPathMappings() ?? [])
       .map((mapping) => {
-        let path = mapping.path;
-        try {
-          path = realpathSync(path);
-        } catch {
-          /* Missing providers are diagnosed by analysis. */
+        let path = getCachedRealPath(mapping.path) ?? mapping.path;
+        if (path === mapping.path) {
+          try {
+            path = realpathSync(path);
+          } catch {
+            /* Missing providers are diagnosed by analysis. */
+          }
         }
         return [mapping.aliasName, path, readPackageJsonCached(path)] as const;
       })

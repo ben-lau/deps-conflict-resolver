@@ -304,7 +304,7 @@ export class DependencyAnalyzer {
   /**
    * 分析依赖并找出冲突
    */
-  async analyze(): Promise<AnalysisResult> {
+  async analyze(options?: { clearCache?: boolean }): Promise<AnalysisResult> {
     logger.info('Starting dependency analysis...');
     this.watchFiles.clear();
     this.watchFiles.add(join(this.options.projectRoot, 'package.json'));
@@ -393,8 +393,10 @@ export class DependencyAnalyzer {
         missingFirstLevelPeers,
       };
     } finally {
-      // 清理全局 IO 缓存
-      clearPackageJsonCache();
+      // 清理全局 IO 缓存（允许 DepsConflictResolver 在完成 AliasManager 初始化后统一清理，以复用规范化路径缓存）
+      if (options?.clearCache !== false) {
+        clearPackageJsonCache();
+      }
       clearNpmRegistryCache();
 
       // 清理仅在分析期间使用的内部状态，允许 GC 回收

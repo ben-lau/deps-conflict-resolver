@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import semver from 'semver';
 import {
   findInvalidPeerOverrideKeys,
   getEffectivePeerDependencies,
@@ -119,6 +120,27 @@ describe('peer-overrides utils', () => {
       };
 
       expect(resolvePeerOverrides(overrides, '@rili/ui', '2.0.0')).toBeUndefined();
+    });
+
+    it('compiles selectors once per peerOverrides object reference', () => {
+      const overrides = {
+        '@rili/ui@1.x': { vue: '^2.6.0' },
+      };
+      const validRangeSpy = vi.spyOn(semver, 'validRange');
+
+      try {
+        expect(resolvePeerOverrides(overrides, '@rili/ui', '1.2.0')).toEqual({ vue: '^2.6.0' });
+        const afterFirstLookup = validRangeSpy.mock.calls.length;
+        expect(afterFirstLookup).toBeGreaterThan(0);
+
+        for (let index = 0; index < 20; index++) {
+          expect(resolvePeerOverrides(overrides, 'unrelated-pkg', '1.0.0')).toBeUndefined();
+          expect(resolvePeerOverrides(overrides, '@rili/ui', '1.5.0')).toEqual({ vue: '^2.6.0' });
+        }
+        expect(validRangeSpy.mock.calls.length).toBe(afterFirstLookup);
+      } finally {
+        validRangeSpy.mockRestore();
+      }
     });
   });
 

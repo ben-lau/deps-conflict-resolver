@@ -14,10 +14,11 @@ import { join } from 'node:path';
 import { resolveConfig } from 'vite';
 import { createRequire } from 'node:module';
 import { createResolver } from '../../src/core/resolver';
+import { createDependencyAnalyzer } from '../../src/core/dependency-analyzer';
 import { ResolutionError } from '../../src/core/resolution-error';
 import { npmRegistryClient } from '../../src/core/registry-client';
 import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
-import { clearPackageJsonCache } from '../../src/utils/fs';
+import { clearPackageJsonCache, getCachedRealPath } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
 import type { AnalysisResult, PackageJson } from '../../src/types';
 
@@ -1592,4 +1593,34 @@ describe('resolution correctness with installed packages', () => {
       }
     },
   );
+
+  it('reuses canonical path cache during initialization and clears it afterwards', async () => {
+    const root = project({
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+    });
+    const legacy = pkg(root, 'legacy', { peerDependencies: { vue: '^2.0.0' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    const resolver = await createResolver({ ...baseOptions(root), offline: true, strict: true });
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+    // Global IO caches must be cleared once initialization completes.
+    expect(getCachedRealPath(legacy)).toBeUndefined();
+
+    // Direct analyze({ clearCache: false }) retains canonical paths for caller reuse.
+    const analyzer = createDependencyAnalyzer({
+      ...baseOptions(root),
+      packageManager: 'npm',
+      registry: 'https://registry.example.test',
+      debug: false,
+      aliasPrefix: 'aliased-',
+      excludeRedirects: {},
+      includeRedirects: {},
+      peerOverrides: {},
+      offline: true,
+    });
+    await analyzer.analyze({ clearCache: false });
+    expect(getCachedRealPath(legacy)).toBe(legacy);
+    clearPackageJsonCache();
+    expect(getCachedRealPath(legacy)).toBeUndefined();
+  });
 });

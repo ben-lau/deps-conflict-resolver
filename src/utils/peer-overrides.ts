@@ -67,10 +67,60 @@ export function findInvalidPeerOverrideKeys(
   return invalid;
 }
 
-function matchesVersionSelector(version: string | undefined, versionRange: string): boolean {
+interface CompiledPeerOverrideEntry {
+  range: semver.Range | null;
+  exactVersion: boolean;
+  overrides: Record<string, string>;
+}
+
+type CompiledPeerOverrides = Map<string, CompiledPeerOverrideEntry[]>;
+
+const compiledPeerOverridesCache = new WeakMap<
+  Record<string, Record<string, string>>,
+  CompiledPeerOverrides
+>();
+
+function getCompiledPeerOverrides(
+  peerOverrides: Record<string, Record<string, string>>,
+): CompiledPeerOverrides {
+  const cached = compiledPeerOverridesCache.get(peerOverrides);
+  if (cached) return cached;
+
+  const compiled: CompiledPeerOverrides = new Map();
+  for (const [selector, overrides] of Object.entries(peerOverrides)) {
+    if (!overrides) continue;
+    const parsed = parsePeerOverrideKey(selector);
+    if (!parsed) continue;
+
+    let range: semver.Range | null = null;
+    if (parsed.versionRange !== null) {
+      try {
+        range = new semver.Range(parsed.versionRange, { includePrerelease: true });
+      } catch {
+        continue;
+      }
+    }
+
+    let entries = compiled.get(parsed.packageName);
+    if (!entries) {
+      entries = [];
+      compiled.set(parsed.packageName, entries);
+    }
+    entries.push({
+      range,
+      exactVersion: parsed.exactVersion,
+      overrides,
+    });
+  }
+
+  compiledPeerOverridesCache.set(peerOverrides, compiled);
+  return compiled;
+}
+
+function matchesCompiledRange(version: string | undefined, range: semver.Range): boolean {
   if (!version) return false;
   try {
-    return semver.satisfies(version, versionRange, { includePrerelease: true });
+    return range.test(version);
   } catch {
     return false;
   }
@@ -93,35 +143,29 @@ export function resolvePeerOverrides(
 ): Record<string, string> | undefined {
   if (!peerOverrides || !packageName) return undefined;
 
-  let hasAny = false;
-  for (const key in peerOverrides) {
-    if (Object.hasOwn(peerOverrides, key)) {
-      hasAny = true;
-      break;
-    }
-  }
-  if (!hasAny) return undefined;
+  const entries = getCompiledPeerOverrides(peerOverrides).get(packageName);
+  if (!entries) return undefined;
 
   let nameOnly: Record<string, string> | undefined;
   let rangeMatches: Record<string, string> | undefined;
   let exactMatches: Record<string, string> | undefined;
 
-  for (const [selector, overrides] of Object.entries(peerOverrides)) {
-    if (!overrides) continue;
-    const parsed = parsePeerOverrideKey(selector);
-    if (!parsed || parsed.packageName !== packageName) continue;
-
-    if (parsed.versionRange === null) {
-      nameOnly = nameOnly ? { ...nameOnly, ...overrides } : { ...overrides };
+  for (const entry of entries) {
+    if (entry.range === null) {
+      nameOnly = nameOnly ? { ...nameOnly, ...entry.overrides } : { ...entry.overrides };
       continue;
     }
 
-    if (!matchesVersionSelector(version, parsed.versionRange)) continue;
+    if (!matchesCompiledRange(version, entry.range)) continue;
 
-    if (parsed.exactVersion) {
-      exactMatches = exactMatches ? { ...exactMatches, ...overrides } : { ...overrides };
+    if (entry.exactVersion) {
+      exactMatches = exactMatches
+        ? { ...exactMatches, ...entry.overrides }
+        : { ...entry.overrides };
     } else {
-      rangeMatches = rangeMatches ? { ...rangeMatches, ...overrides } : { ...overrides };
+      rangeMatches = rangeMatches
+        ? { ...rangeMatches, ...entry.overrides }
+        : { ...entry.overrides };
     }
   }
 
