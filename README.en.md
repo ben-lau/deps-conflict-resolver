@@ -235,6 +235,8 @@ Vite applies scoped redirects before global aliases for matching importers. Othe
 
 `vite build --watch` refreshes redirects when dependency inputs change and checks resolved installation locations when a build starts, including transitive dependencies and previously used aliases. The first build also checks lookup misses recorded during preparation to detect newly installed packages closer to the importer. Vite 4–7 refreshes redirects and its resolution cache when these lookups change or an observed symlink changes targets. Vite 8 requests a restart before writing and keeps the previous output when a configuration-time lookup changes before the build or a watched symlink changes targets. On Vite 4–7, restart the watcher to subscribe to aliases declared and installed after it started. A regular strict build also requests a restart if these lookups change after configuration. A generated `ssr: 'auto'` externalization change requires a restart. Custom `beforeResolve` targets resolve from the original importer. Plugin-generated aliases resolve from the host project.
 
+Additional installation-link monitoring uses directory events by default. When build Chokidar polling is explicitly enabled, it follows the configured interval and groups checks by installation directory.
+
 `PEER_PROVIDER_MISMATCH` reports a nested provider that shadows a compatible host version. An entry can use its installed provider when the affected peer requests already share that compatible instance. `TRANSITIVE_PEER_CONFLICT` points out incompatible peers of direct children when the selected entry omits the declaration.
 
 ### Explain a Resolution

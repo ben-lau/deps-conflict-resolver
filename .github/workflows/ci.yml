@@ -111,6 +111,9 @@ jobs:
         run: node tests/compat/vite.mjs "$RUNNER_TEMP/deps-vite"
       - name: Verify request filtering in default mode
         run: node tests/compat/vite.mjs "$RUNNER_TEMP/deps-vite" --non-strict
+      - name: Verify native file events for installed package links
+        if: matrix.vite-version != '8'
+        run: node tests/compat/vite.mjs "$RUNNER_TEMP/deps-vite" --native-watch
 
   quality:
     needs: build

@@ -11,6 +11,7 @@ import { createLogger, LogLevel, withLogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
 import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
 import { createSsrExternalPolicy } from './ssr-external';
+import { InstalledProviderWatch } from './installed-provider-watch';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
 import { dirname, join } from 'node:path';
@@ -58,6 +59,7 @@ interface BuildWatch {
   files: Set<string>;
   modified: Set<string>;
   removed: Set<string>;
+  providers: Map<object, InstalledProviderWatch>;
   verifySsrPolicy?: () => void;
 }
 
@@ -411,6 +413,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       requestFilter = undefined;
       optimizerHookKey = undefined;
       configured = undefined;
+      for (const providers of watch?.providers.values() ?? []) providers.close();
       watch = undefined;
       configuredLookups = undefined;
       ssrExternalEnabled = false;
@@ -456,6 +459,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           files: new Set(),
           modified: new Set(),
           removed: new Set(),
+          providers: new Map(),
         };
       } else {
         await withViteLogger(config, Boolean(options.debug), () => active.initialize());
@@ -674,6 +678,21 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         }
         for (const directory of new Set(watchFiles?.missingProviderDirectories.values()))
           this.addWatchFile(directory);
+        if (viteMajor < 8) {
+          let providers = session.providers.get(environment);
+          if (!providers) {
+            const buildOptions = this.environment?.config.build ?? configured.build;
+            const rollupWatch = buildOptions.rollupOptions?.watch;
+            const buildWatch = buildOptions.watch;
+            providers = new InstalledProviderWatch({
+              ...(rollupWatch === false ? undefined : rollupWatch?.chokidar),
+              ...buildWatch?.chokidar,
+            });
+            session.providers.set(environment, providers);
+          }
+          const marker = providers.update([...session.files, ...(watchFiles?.missing ?? [])]);
+          if (marker) this.addWatchFile(marker);
+        }
       }
     },
     generateBundle: {
@@ -713,8 +732,13 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     },
     closeWatcher() {
       if (!watch || !resolver || !configured) return;
-      watch.environments.delete(this.environment ?? configured);
-      if (watch.environments.size === 0) getResolverBuild(resolver).closeWatch();
+      const environment = this.environment ?? configured;
+      watch.environments.delete(environment);
+      watch.providers.get(environment)?.close();
+      watch.providers.delete(environment);
+      if (watch.environments.size === 0 && watch.providers.size === 0) {
+        getResolverBuild(resolver).closeWatch();
+      }
     },
     resolveId: {
       // Vite's alias plugin precedes user plugins ordered by enforce.

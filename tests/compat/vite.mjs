@@ -11,6 +11,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,7 +22,10 @@ import { runInNewContext } from 'node:vm';
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
 const strict = !args.includes('--non-strict');
-const engineRoot = resolve(args.find((arg) => arg !== '--non-strict') ?? repository);
+const nativeFileEvents = args.includes('--native-watch');
+const engineRoot = resolve(
+  args.find((arg) => arg !== '--non-strict' && arg !== '--native-watch') ?? repository,
+);
 const root = mkdtempSync(join(tmpdir(), 'deps-vite-compat-'));
 const originalInfo = console.info;
 console.info = () => {};
@@ -622,7 +626,11 @@ try {
       outDir: join(watchRoot, 'dist'),
       lib: { entry: join(watchRoot, 'entry.mjs'), formats: ['cjs'], fileName: () => 'watch.cjs' },
       rollupOptions: { output: { entryFileNames: 'watch.cjs' } },
-      watch: { chokidar: { usePolling: true, interval: 30 } },
+      watch: {
+        chokidar: nativeFileEvents
+          ? { usePolling: false, useFsEvents: false }
+          : { usePolling: true, interval: 30 },
+      },
     },
   });
   const watcher = await vite.build(watchConfig());
@@ -674,11 +682,25 @@ try {
   };
   const verifyRelink = async (settings, previous, output, change) => {
     const replacing = await vite.build(settings);
+    const observed = [];
     let pendingEdit;
     let deadline;
     try {
       const result = await new Promise((complete, reject) => {
-        deadline = setTimeout(() => reject(new Error('Link replacement did not rebuild')), 5000);
+        deadline = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'Link replacement did not rebuild: ' +
+                  previous +
+                  ' -> ' +
+                  output +
+                  '; observed: ' +
+                  observed.join(', '),
+              ),
+            ),
+          5000,
+        );
         replacing.on('event', (event) => {
           try {
             if (event.code === 'ERROR') {
@@ -689,6 +711,7 @@ try {
             }
             if (event.code !== 'END') return;
             const version = readWatchOutput();
+            observed.push(version);
             if (version === output) return complete(version);
             assert.equal(version, previous);
             pendingEdit ??= scheduleEdit(change, reject);
@@ -721,6 +744,11 @@ try {
         ? 'import {version as peer} from "vue"; export const version = "new-entry:" + peer;'
         : 'export const version = "retargeted";',
     );
+    const timestamp = new Date('2020-01-01T00:00:00Z');
+    for (const directory of [original, newProvider]) {
+      utimesSync(join(directory, 'package.json'), timestamp, timestamp);
+      utimesSync(directory, timestamp, timestamp);
+    }
     try {
       retargetedProviders[name] = await verifyRelink(watchConfig(), previous, output, () =>
         replaceLink(name, newProvider),

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -8,6 +9,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -412,12 +414,21 @@ describe('Vite final configuration', () => {
   );
   it.each([
     'retargeted alias',
+    'retargeted alias with unchanged metadata',
+    'retargeted alias with native events',
+    'retargeted alias after replacing node_modules',
     'nearer peer',
     'linked workspace peer',
     'newly active alias',
   ] as const)(
     'wakes production watch for a %s without editing source',
     async (change) => {
+      const nativeEvents =
+        change === 'retargeted alias with native events' ||
+        change === 'retargeted alias after replacing node_modules';
+      const unchangedMetadata =
+        change === 'retargeted alias with unchanged metadata' || nativeEvents;
+      const replaceModules = change === 'retargeted alias after replacing node_modules';
       const root = fixture('2.7.16');
       let app = root;
       let consumer = join(root, 'node_modules/legacy');
@@ -453,6 +464,20 @@ describe('Vite final configuration', () => {
       writeFileSync(join(second, 'package.json'), readFileSync(join(first, 'package.json')));
       writeFileSync(join(second, 'index.js'), 'export const version = "new-provider";');
       symlinkSync(first, alias, 'junction');
+      if (unchangedMetadata) {
+        const timestamp = new Date('2020-01-01T00:00:00Z');
+        for (const directory of [first, second]) {
+          utimesSync(join(directory, 'package.json'), timestamp, timestamp);
+          utimesSync(directory, timestamp, timestamp);
+        }
+      }
+      const modules = join(root, 'node_modules');
+      const replacementModules = join(root, 'replacement-node-modules');
+      if (replaceModules) {
+        cpSync(modules, replacementModules, { recursive: true, verbatimSymlinks: true });
+        rmSync(join(replacementModules, 'vue2'));
+        symlinkSync(second, join(replacementModules, 'vue2'), 'junction');
+      }
       const unrelated = join(change === 'linked workspace peer' ? consumer : app, 'unrelated.txt');
       const changes: string[] = [];
       const watcher = await build({
@@ -470,7 +495,12 @@ describe('Vite final configuration', () => {
         ],
         build: {
           lib: { entry: join(app, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
-          watch: { chokidar: { usePolling: true, interval: 30 }, buildDelay: 30 },
+          watch: {
+            chokidar: nativeEvents
+              ? { usePolling: false, useFsEvents: false }
+              : { usePolling: true, interval: 30 },
+            buildDelay: 30,
+          },
         },
       });
       if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
@@ -492,7 +522,41 @@ describe('Vite final configuration', () => {
             delete require.cache[output];
             const { version } = require(output) as { version: string };
             observed.push(version);
-            if (version === 'new-provider') return resolve();
+            if (replaceModules && version === 'new-provider') {
+              if (stage === 4) return resolve();
+              if (stage < 3) {
+                stage = 3;
+                edit = setTimeout(() => {
+                  rmSync(alias);
+                  symlinkSync(first, alias, 'junction');
+                }, 200);
+              }
+              return undefined;
+            }
+            if (version === 'new-provider') {
+              if (!unchangedMetadata) return resolve();
+              if (stage < 3) {
+                stage = 3;
+                edit = setTimeout(
+                  () =>
+                    writeFileSync(
+                      join(second, 'index.js'),
+                      'export const version = "edited-provider";',
+                    ),
+                  200,
+                );
+              }
+              return undefined;
+            }
+            if (version === 'edited-provider') return resolve();
+            if (replaceModules && stage === 3 && version === '2.7.16') {
+              stage = 4;
+              edit = setTimeout(() => {
+                rmSync(alias);
+                symlinkSync(second, alias, 'junction');
+              }, 200);
+              return undefined;
+            }
             if (change === 'newly active alias' && version === '3.0.0' && stage < 2) {
               if (stage === 0) {
                 stage = 1;
@@ -507,7 +571,15 @@ describe('Vite final configuration', () => {
             if (version !== '2.7.16') return reject(new Error('Unexpected provider: ' + version));
             stage = 2;
             edit = setTimeout(() => {
-              if (change === 'retargeted alias' || change === 'newly active alias') {
+              if (replaceModules) {
+                renameSync(modules, join(root, 'original-node-modules'));
+                renameSync(replacementModules, modules);
+              } else if (unchangedMetadata) {
+                const replacement = join(root, 'node_modules/replacement');
+                symlinkSync(second, replacement, 'junction');
+                if (process.platform === 'win32') rmSync(alias);
+                renameSync(replacement, alias);
+              } else if (change === 'retargeted alias' || change === 'newly active alias') {
                 rmSync(alias);
                 symlinkSync(second, alias, 'junction');
               } else {
