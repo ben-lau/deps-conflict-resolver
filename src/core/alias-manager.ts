@@ -6,10 +6,19 @@ import type {
   ResolutionExplanation,
   ResolverDiagnostic,
 } from '../types/index';
-import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix } from 'path';
 import { createLogger } from '../utils/logger';
-import { findPackagePath, getCachedRealPath, readPackageJsonCached } from '../utils/fs';
+import {
+  findPackagePath,
+  getCachedRealPath,
+  readPackageJsonCached,
+  type FileSystemCache,
+} from '../utils/fs';
+import {
+  observedIsFile,
+  observedIsRegularFile,
+  observedRealpath,
+} from '../utils/dependency-inputs';
 import { LruCache } from '../utils/lru-cache';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../utils/module-request';
 import { ResolutionError } from './resolution-error';
@@ -141,7 +150,10 @@ export class AliasManager {
   private directoryDecisions = new LruCache<string, Decision>({ maxEntries: 5000 });
   private diagnostics = new Map<string, ResolverDiagnostic>();
 
-  constructor(private options: ResolvedOptions) {}
+  constructor(
+    private options: ResolvedOptions,
+    private fileSystemCache?: FileSystemCache,
+  ) {}
 
   initFromAnalysisResult(result: AnalysisResult): void {
     this.clear();
@@ -167,7 +179,7 @@ export class AliasManager {
         const { paths: candidates } = this.pathCandidates(packagePath);
         const name =
           packageInstances(normalizePath(packagePath)).at(-1)?.name ??
-          readPackageJsonCached(packagePath)?.name;
+          readPackageJsonCached(packagePath, this.fileSystemCache)?.name;
         for (const candidate of candidates) {
           const entries = index.paths.get(candidate) ?? [];
           entries.push({ rule, scope: { path: candidate, name } });
@@ -178,7 +190,7 @@ export class AliasManager {
         const { paths: candidates } = this.pathCandidates(packagePath);
         const name =
           packageInstances(normalizePath(packagePath)).at(-1)?.name ??
-          readPackageJsonCached(packagePath)?.name;
+          readPackageJsonCached(packagePath, this.fileSystemCache)?.name;
         for (const candidate of candidates) {
           const entries = index.paths.get(candidate) ?? [];
           entries.push({ rule, scope: { path: candidate, name }, pruned: true });
@@ -192,6 +204,10 @@ export class AliasManager {
   clear(): void {
     this.aliasMappings = [];
     this.rulesMap.clear();
+    this.clearImporterCache();
+  }
+
+  clearImporterCache(): void {
     this.importerCache.clear();
     this.pathCache.clear();
     this.exactPathCache.clear();
@@ -210,10 +226,10 @@ export class AliasManager {
     const cached = cache.get(path);
     if (cached) return cached;
     let literalPath = path;
-    let realPath = !moduleId ? getCachedRealPath(path) : undefined;
+    let realPath = !moduleId ? getCachedRealPath(path, this.fileSystemCache) : undefined;
     if (realPath === undefined) {
       try {
-        realPath = realpathSync(path);
+        realPath = observedRealpath(path);
       } catch {
         // Physical directory paths are literal. For module IDs, recognize a
         // suffix only after a real file, preserving '#' and '?' in directories
@@ -223,7 +239,7 @@ export class AliasManager {
           for (let index = markers.length - 1; index >= 0; index--) {
             const candidate = path.slice(0, markers[index]!.index);
             try {
-              if (!statSync(candidate).isFile()) continue;
+              if (!observedIsFile(candidate)) continue;
               realPath = this.pathCandidates(candidate).realPath;
               if (realPath === undefined) continue;
               literalPath = candidate;
@@ -258,7 +274,7 @@ export class AliasManager {
       for (const path of paths) {
         let directory = path;
         while (true) {
-          const manifest = readPackageJsonCached(directory);
+          const manifest = readPackageJsonCached(directory, this.fileSystemCache);
           if (manifest?.name) {
             instances.push({ name: manifest.name, path: directory });
             break;
@@ -307,7 +323,7 @@ export class AliasManager {
 
     // Check only the requested file. A symlink can belong to a different scope.
     try {
-      if (!lstatSync(join(cached.realPath, file), { throwIfNoEntry: false })?.isFile()) {
+      if (!observedIsRegularFile(join(cached.realPath, file))) {
         return undefined;
       }
     } catch {
@@ -520,12 +536,15 @@ export class AliasManager {
       aliasName: mapping.aliasName,
       originalName: mapping.originalName,
       path:
-        findPackagePath(mapping.aliasName, this.options.projectRoot) ??
+        findPackagePath(mapping.aliasName, this.options.projectRoot, this.fileSystemCache) ??
         join(this.options.projectRoot, 'node_modules', mapping.aliasName),
     }));
   }
 }
 
-export function createAliasManager(options: ResolvedOptions): AliasManager {
-  return new AliasManager(options);
+export function createAliasManager(
+  options: ResolvedOptions,
+  fileSystemCache?: FileSystemCache,
+): AliasManager {
+  return new AliasManager(options, fileSystemCache);
 }

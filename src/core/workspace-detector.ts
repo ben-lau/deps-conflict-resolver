@@ -1,8 +1,8 @@
-import { readFileSync } from 'fs';
 import { join, relative } from 'path';
 import { parse as parseYaml } from 'yaml';
 import { createLogger } from '../utils/logger';
 import { fileExists, iterateParentDirs, readPackageJsonCached } from '../utils/fs';
+import { observedReadText } from '../utils/dependency-inputs';
 import { parseNpmAlias } from '../utils/version-spec';
 import type {
   PnpmWorkspaceConfig,
@@ -330,7 +330,7 @@ export class WorkspaceDetector {
    */
   private parsePnpmWorkspaceYaml(filePath: string): PnpmWorkspaceConfig {
     try {
-      const content = readFileSync(filePath, 'utf-8');
+      const content = observedReadText(filePath);
       const parsed = parseYaml(content) as PnpmWorkspaceConfig | null;
       return parsed ?? {};
     } catch (error) {

@@ -9,15 +9,27 @@ import type {
   ResolutionExplanation,
   InstallReport,
 } from '../types/index';
-import { DEFAULT_NPM_REGISTRY } from '../constants';
+import { DEFAULT_NPM_REGISTRY, LOCK_FILE_MAP } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
 import {
+  canonicalPath,
   clearPackageJsonCache,
+  createFileSystemCache,
+  fileExists,
   findProjectRoot,
   getCachedRealPath,
+  iterateParentDirs,
   readPackageJsonCached,
+  withFileSystemCache,
 } from '../utils/fs';
-import { realpathSync } from 'node:fs';
+import {
+  currentDependencyInputs,
+  DependencyInputs,
+  observedRealpath,
+  observeLockfile,
+  withoutDependencyInputs,
+} from '../utils/dependency-inputs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { createEnvironmentDetector, EnvironmentDetector } from './environment-detector';
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
@@ -32,7 +44,7 @@ import {
   type ProjectPreparation,
   type PreparationObserver,
 } from './project-preparation';
-import { resolve as resolvePath } from 'node:path';
+import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 const logger = createLogger('resolver');
 
@@ -45,12 +57,79 @@ const DEFAULT_OPTIONS = {
   aliasPrefix: 'aliased-',
 } as const;
 
+interface WatchChanges {
+  modifiedFiles?: ReadonlySet<string>;
+  removedFiles?: ReadonlySet<string>;
+}
+
+interface WatchedFiles {
+  existing: Set<string>;
+  missing: Set<string>;
+}
+
+interface WatchCapture {
+  key?: string;
+  inputs?: DependencyInputs;
+  recoveryFiles?: readonly string[];
+}
+
+interface AnalysisSnapshot {
+  result: AnalysisResult;
+  revision: number;
+  key: string;
+  inputs: DependencyInputs;
+}
+
+interface ResolverBuild {
+  assertWatchCanWait(): void;
+  refreshForWatch(changes: WatchChanges): Promise<boolean>;
+  closeWatch(): void;
+  snapshot(): {
+    providers: ReadonlyMap<string, string>;
+    watchFiles: WatchedFiles | undefined;
+  };
+}
+
+const builds = new WeakMap<DepsConflictResolver, ResolverBuild>();
+
+/** Internal interface for bundler adapters. */
+export function getResolverBuild(resolver: DepsConflictResolver): ResolverBuild {
+  return builds.get(resolver)!;
+}
+
 function importerAmbiguityKey({ packageName, aliases, importerPaths }: ResolverDiagnostic): string {
   return JSON.stringify([
     packageName,
     aliases,
     importerPaths?.map((path) => path.replace(/\\/g, '/')),
   ]);
+}
+
+function inputKey(options: DepsConflictResolverOptions): string | undefined {
+  if (process.versions.pnp) return undefined;
+  const {
+    HOME,
+    USERPROFILE,
+    NODE_PATH,
+    NPM_CONFIG_REGISTRY,
+    npm_config_registry,
+    YARN_NPM_REGISTRY_SERVER,
+  } = process.env;
+  try {
+    const data = JSON.stringify([
+      options,
+      process.cwd(),
+      HOME,
+      USERPROFILE,
+      NODE_PATH,
+      NPM_CONFIG_REGISTRY,
+      npm_config_registry,
+      YARN_NPM_REGISTRY_SERVER,
+    ]);
+    return createHash('sha256').update(data).digest('hex');
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -63,6 +142,7 @@ export class DepsConflictResolver {
   private hooks: PluginHooks;
 
   private environmentDetector: EnvironmentDetector | null = null;
+  private readonly fileSystemCache = createFileSystemCache();
   private analyzer: DependencyAnalyzer | null = null;
   private aliasManager: AliasManager | null = null;
   private installer: PackageInstaller | null = null;
@@ -75,18 +155,34 @@ export class DepsConflictResolver {
   private installResult: InstallReport | null = null;
   private installDiagnostics: ResolverDiagnostic[] = [];
   private preparation: ProjectPreparation | null = null;
+  private notificationScope?: AsyncLocalStorage<{ running: boolean }>;
   private snapshotRevision = 0;
   private snapshotError: ResolutionError | null = null;
   private snapshotGeneration = 0;
   private snapshotSignature = '';
   private snapshotInvalidated = false;
+  private initialReplanNeeded = false;
+  private providerVersions = new Map<string, string>();
+  private watchSnapshot?: AnalysisSnapshot;
+  private watchedFiles?: WatchedFiles;
   private activeMappings: AliasMapping[] = [];
   private snapshotObserver: WeakRef<PreparationObserver> | null = null;
-  private readonly observer: PreparationObserver = { refresh: () => this.refreshSnapshot() };
+  private readonly observer: PreparationObserver = {
+    refresh: () => this.withPreparationCache(() => this.refreshSnapshot()),
+  };
 
   constructor(userOptions: DepsConflictResolverOptions, hooks: PluginHooks = {}) {
     this.userOptions = userOptions;
     this.hooks = hooks;
+    builds.set(this, {
+      assertWatchCanWait: () => this.assertWatchCanWait(),
+      refreshForWatch: (changes) => this.refreshForWatch(changes),
+      closeWatch: () => {
+        this.watchSnapshot = undefined;
+        this.watchedFiles = undefined;
+      },
+      snapshot: () => ({ providers: this.providerVersions, watchFiles: this.watchedFiles }),
+    });
 
     // 设置日志级别（如果用户已指定）
     if (userOptions.debug) {
@@ -153,25 +249,118 @@ export class DepsConflictResolver {
   /**
    * 初始化解析器
    */
-  async initialize(): Promise<void> {
+  initialize(): Promise<void> {
+    return this.initializePreparation();
+  }
+
+  private async initializePreparation(watch?: WatchCapture): Promise<void> {
     if (this.initialized) {
       if (this.preparation) await waitForProjectPreparation(this.preparation);
       this.snapshotCurrent();
       return;
     }
 
-    const initialization = (this.initializationPromise ??= this.initializeGeneration());
+    const initialization = (this.initializationPromise ??= this.withPreparationCache(() =>
+      watch?.inputs
+        ? watch.inputs.record(() => this.initializeGeneration(watch))
+        : this.initializeGeneration(watch),
+    ));
     try {
       await initialization;
     } catch (error) {
       // Only clear the promise that failed. A caller may have started a retry
       // after another concurrent caller observed the rejection.
       if (this.initializationPromise === initialization) {
+        if (watch) watch.recoveryFiles = this.analysisResult?.watchFiles;
         this.initializationPromise = null;
         this.rollbackGeneration();
       }
       throw error;
     }
+  }
+
+  private watchKey(): string | undefined {
+    if (this.hooks.onAnalysisComplete || this.hooks.onInstallComplete) return undefined;
+    return inputKey(this.userOptions);
+  }
+
+  private assertWatchCanWait(): void {
+    if (this.notificationScope?.getStore()?.running) {
+      throw new Error(
+        'Cannot refresh watch rules from an active preparation hook on the same resolver',
+      );
+    }
+  }
+
+  private async refreshForWatch({ modifiedFiles, removedFiles }: WatchChanges): Promise<boolean> {
+    const previous = this.watchSnapshot;
+    if (
+      previous?.inputs.reusable &&
+      previous.key === this.watchKey() &&
+      [...(modifiedFiles ?? []), ...(removedFiles ?? [])].every(
+        (file) => isAbsolute(file) && !previous.inputs.includes(file),
+      )
+    ) {
+      try {
+        if (await this.reuseWatchSnapshot(previous)) return true;
+      } catch {
+        // A fresh preparation handles errors with the normal resolver policy.
+      }
+    }
+
+    // Let an earlier caller finish its preparation, including notifications.
+    // That caller receives its own error; this watch cycle gets a fresh attempt.
+    while (true) {
+      const pending =
+        (this.initialized ? null : this.initializationPromise) ?? this.installationPromise;
+      if (!pending) break;
+      this.assertWatchCanWait();
+      await pending.catch(() => undefined);
+    }
+    const previousFiles = this.watchedFiles;
+    const key = this.watchKey();
+    const capture: WatchCapture = {
+      key,
+      inputs: key === undefined ? undefined : new DependencyInputs(),
+    };
+    try {
+      if (this.initialized) this.invalidate();
+      await this.initializePreparation(capture);
+    } catch (error) {
+      this.withPreparationCache(() => this.recoverWatchFiles(previousFiles, capture.recoveryFiles));
+      throw error;
+    }
+    return false;
+  }
+
+  private async reuseWatchSnapshot(snapshot: AnalysisSnapshot): Promise<boolean> {
+    const preparation = this.preparation;
+    if (!preparation || !this.initialized) return false;
+    const isCurrent = () =>
+      this.initialized &&
+      !this.installationPromise &&
+      this.watchSnapshot === snapshot &&
+      this.analysisResult === snapshot.result &&
+      snapshot.key === this.watchKey() &&
+      preparation.revision === snapshot.revision &&
+      !this.snapshotInvalidated &&
+      this.snapshotCurrent();
+    const reused = await withProjectPreparation(
+      preparation,
+      async () => {
+        if (!isCurrent() || !snapshot.inputs.matches()) return false;
+        // Build inputs can change an importer's path or owning manifest even
+        // when the dependency analysis and its rules are still current.
+        clearPackageJsonCache(this.fileSystemCache);
+        this.aliasManager?.clearImporterCache();
+        return true;
+      },
+      undefined,
+      'read',
+    );
+    if (!reused) return false;
+    await waitForProjectPreparation(preparation);
+    return isCurrent();
   }
 
   /**
@@ -203,6 +392,10 @@ export class DepsConflictResolver {
     this.snapshotError = null;
     this.snapshotSignature = '';
     this.snapshotInvalidated = false;
+    this.initialReplanNeeded = false;
+    this.providerVersions = new Map();
+    this.watchSnapshot = undefined;
+    clearPackageJsonCache(this.fileSystemCache);
     this.snapshotGeneration++;
     this.activeMappings = [];
     this.analysisResult = null;
@@ -214,7 +407,11 @@ export class DepsConflictResolver {
     this.installDiagnostics = [];
   }
 
-  private async initializeGeneration(): Promise<void> {
+  private withPreparationCache<T>(task: () => T): T {
+    return withoutDependencyInputs(() => withFileSystemCache(this.fileSystemCache, task));
+  }
+
+  private async initializeGeneration(watch?: WatchCapture): Promise<void> {
     // A previous generation may repopulate IO caches during peer linkage or
     // adapter setup. Refresh before environment detection and the first read.
     clearPackageJsonCache();
@@ -234,7 +431,7 @@ export class DepsConflictResolver {
     // 解析配置（包含自动检测）
     let physicalRoot = validRoot;
     try {
-      physicalRoot = realpathSync(validRoot);
+      physicalRoot = observedRealpath(validRoot);
     } catch {
       /* Retain the validated root. */
     }
@@ -246,33 +443,34 @@ export class DepsConflictResolver {
     }
 
     // 初始化子模块
-    this.aliasManager = createAliasManager(this.options);
+    this.aliasManager = createAliasManager(this.options, this.fileSystemCache);
     this.installer = createPackageInstaller(this.options);
 
     this.preparation = getProjectPreparation(this.options.projectRoot);
 
-    // Notifications may initialize another resolver. Never await user code
-    // while owning the project lock; read its inputs again afterwards.
-    if (this.hooks.onAnalysisComplete) {
-      this.analysisResult = await withProjectPreparation(
-        this.preparation,
-        () => this.analyzeCurrent(),
-        undefined,
-        'read',
+    const onAnalysisComplete = this.hooks.onAnalysisComplete;
+    const candidate = onAnalysisComplete
+      ? await this.notifyAnalysisComplete(this.preparation, onAnalysisComplete)
+      : undefined;
+
+    const preparation = this.preparation;
+    const prepare = async (analysis?: AnalysisSnapshot) => {
+      // Keep the lock through installation and publication.
+      await withProjectPreparation(
+        preparation,
+        (markChanged) => this.prepareInitialSnapshot(markChanged, watch, analysis),
+        this.observer,
+        this.options.autoInstall ? 'write' : 'read',
       );
-      await this.hooks.onAnalysisComplete(this.analysisResult);
-    }
-
-    // Keep the queue position and lock through installation and publication.
-    await withProjectPreparation(
-      this.preparation,
-      (markChanged) => this.prepareInitialSnapshot(markChanged),
-      this.observer,
-      this.options.autoInstall ? 'write' : 'read',
-    );
-
-    await waitForProjectPreparation(this.preparation);
+      await waitForProjectPreparation(preparation);
+    };
+    await prepare(candidate);
+    // A writer can introduce an alias that the observer cannot install under
+    // the writer's lock. Give the initial preparation one chance to catch up.
+    const replanned = this.initialReplanNeeded;
+    if (replanned) await prepare();
     await this.notifyInstallComplete();
+    if (!replanned && this.initialReplanNeeded) await prepare();
     this.assertResolved();
 
     const unresolved = this.getDiagnostics().filter(
@@ -296,10 +494,51 @@ export class DepsConflictResolver {
     logger.info('Dependencies resolver initialized');
   }
 
-  private async prepareInitialSnapshot(markChanged: () => void): Promise<void> {
+  private async notifyAnalysisComplete(
+    preparation: ProjectPreparation,
+    hook: NonNullable<PluginHooks['onAnalysisComplete']>,
+  ): Promise<AnalysisSnapshot | undefined> {
+    const { result, candidate } = await withProjectPreparation(
+      preparation,
+      async () => {
+        const key = inputKey(this.options);
+        if (key === undefined) return { result: await this.analyzeCurrent() };
+        const inputs = new DependencyInputs();
+        const analysis = await inputs.record(() => this.analyzeCurrent());
+        const reusable =
+          inputs.reusable && analysis.aliasMappings.every(({ installSpec }) => !installSpec);
+        return {
+          result: analysis,
+          candidate: reusable
+            ? { result: analysis, inputs, key, revision: preparation.revision }
+            : undefined,
+        };
+      },
+      undefined,
+      'read',
+    );
+    // Keep the reusable candidate separate from user code. Hooks can also
+    // prepare the same workspace, so the notification runs outside the lock.
+    const observed = candidate ? structuredClone(result) : result;
+    this.analysisResult = observed;
+    await this.runPreparationHook(() => hook.call(this.hooks, observed));
+    return candidate;
+  }
+
+  private async prepareInitialSnapshot(
+    markChanged: () => void,
+    watch?: WatchCapture,
+    candidate?: AnalysisSnapshot,
+  ): Promise<void> {
     try {
       const registryClient = new NpmRegistryClient();
-      this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
+      this.analysisResult =
+        candidate &&
+        candidate.revision === this.preparation?.revision &&
+        candidate.key === inputKey(this.options) &&
+        candidate.inputs.matches()
+          ? candidate.result
+          : await this.analyzeCurrent({ clearCache: false, registryClient });
       this.assertResolved();
       if (!this.options.autoInstall) {
         this.publishWithoutInstallation();
@@ -314,8 +553,79 @@ export class DepsConflictResolver {
       }
       this.logMissingFirstLevelPeers(this.analysisResult);
       this.observeSnapshot();
+      if (watch) {
+        this.recordWatchFiles();
+        if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
+          this.watchSnapshot = {
+            result: this.analysisResult,
+            revision: this.snapshotRevision,
+            key: watch.key,
+            inputs: watch.inputs,
+          };
+        }
+      }
     } finally {
       clearPackageJsonCache();
+    }
+  }
+
+  private collectLockfiles(projectRoot: string, owner: string): WatchedFiles {
+    const existing = new Set<string>();
+    const missing = new Set<string>();
+    let inPreparationOwner = true;
+    for (const directory of iterateParentDirs(projectRoot)) {
+      for (const name of Object.keys(LOCK_FILE_MAP)) {
+        const file = join(directory, name);
+        if (observeLockfile(file)) existing.add(file);
+        else if (inPreparationOwner) missing.add(file);
+      }
+      if (directory === owner) inPreparationOwner = false;
+    }
+    return { existing, missing };
+  }
+
+  private recordWatchFiles(): void {
+    const watched = this.collectLockfiles(this.options.projectRoot, this.preparation!.owner);
+    const analyzed = this.analysisResult?.watchFiles ?? [];
+    if (this.snapshotError) {
+      this.addRecoveryWatchFiles(watched, this.watchedFiles, analyzed);
+    } else {
+      for (const file of analyzed) watched.existing.add(file);
+    }
+    this.watchedFiles = watched;
+  }
+
+  private recoverWatchFiles(
+    previous: WatchedFiles | undefined,
+    partial: readonly string[] = [],
+  ): void {
+    const requestedRoot = resolvePath(this.userOptions.projectRoot ?? process.cwd());
+    const root = canonicalPath(findProjectRoot(requestedRoot) ?? requestedRoot);
+    const owner = getProjectPreparation(root).owner;
+    const watched = this.collectLockfiles(root, owner);
+    // These paths only wake up a later compilation. The failed generation
+    // cannot supply a reusable analysis snapshot.
+    this.addRecoveryWatchFiles(watched, previous, [
+      join(requestedRoot, 'package.json'),
+      join(root, 'package.json'),
+      join(owner, 'package.json'),
+      ...partial,
+    ]);
+    this.watchedFiles = watched;
+  }
+
+  private addRecoveryWatchFiles(
+    watched: WatchedFiles,
+    previous: WatchedFiles | undefined,
+    files: readonly string[],
+  ): void {
+    for (const file of new Set([
+      ...(previous?.existing ?? []),
+      ...(previous?.missing ?? []),
+      ...files,
+    ])) {
+      if (watched.existing.has(file) || watched.missing.has(file)) continue;
+      (fileExists(file) ? watched.existing : watched.missing).add(file);
     }
   }
 
@@ -350,7 +660,9 @@ export class DepsConflictResolver {
    * 这样可以避免"什么依赖都自动安装"的问题，用户可以根据警告自行决定是否安装缺失的依赖
    */
   installDependencies(): Promise<void> {
-    return (this.installationPromise ??= this.prepareInstallation().finally(() => {
+    return (this.installationPromise ??= this.withPreparationCache(() =>
+      this.prepareInstallation(),
+    ).finally(() => {
       this.installationPromise = null;
     }));
   }
@@ -366,12 +678,14 @@ export class DepsConflictResolver {
         async (markChanged) => {
           try {
             const registryClient = new NpmRegistryClient();
+            this.watchSnapshot = undefined;
             this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
             this.installDiagnostics = [];
             this.assertResolved();
             if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
             this.observeSnapshot();
+            if (this.watchedFiles) this.recordWatchFiles();
           } finally {
             clearPackageJsonCache();
           }
@@ -443,7 +757,10 @@ export class DepsConflictResolver {
     const blocked = new Set<string>();
     for (let attempt = 0; attempt < 2; attempt++) {
       const planned = this.analysisResult!.aliasMappings;
-      if (planned.some((mapping) => mapping.installSpec)) markChanged();
+      if (planned.some((mapping) => mapping.installSpec)) {
+        currentDependencyInputs()?.invalidate();
+        markChanged();
+      }
       let result: InstallReport;
       try {
         result = await this.installer!.installAliases(planned);
@@ -521,6 +838,7 @@ export class DepsConflictResolver {
 
   private observeSnapshot(): void {
     this.snapshotInvalidated = false;
+    this.initialReplanNeeded = false;
     if (!this.snapshotObserver) {
       this.snapshotObserver = new WeakRef(this.observer);
       this.preparation!.observers.add(this.snapshotObserver);
@@ -530,6 +848,7 @@ export class DepsConflictResolver {
 
   private async refreshSnapshot(): Promise<void> {
     if (!this.analysisResult || !this.aliasManager) return;
+    this.watchSnapshot = undefined;
     if (this.snapshotInvalidated) {
       this.snapshotRevision = this.preparation!.revision;
       return;
@@ -544,6 +863,18 @@ export class DepsConflictResolver {
           clearCache: false,
         });
         if (generation !== this.snapshotGeneration) return;
+        this.initialReplanNeeded = false;
+        if (!this.options.offline) {
+          for (const diagnostic of analysis.diagnostics ?? []) {
+            if (diagnostic.code !== 'OFFLINE_ALIAS_MISSING') continue;
+            this.initialReplanNeeded = !this.initialized && this.options.autoInstall;
+            diagnostic.code = 'PROJECT_STATE_CHANGED';
+            diagnostic.message =
+              'Another preparation changed the project and no verified alias for ' +
+              diagnostic.packageName +
+              ' is installed';
+          }
+        }
         this.analysisResult = analysis;
         this.setActiveAliasMappings(
           analysis.aliasMappings.filter((mapping) => !mapping.installSpec),
@@ -562,6 +893,7 @@ export class DepsConflictResolver {
         }
       } catch (error) {
         if (generation !== this.snapshotGeneration) return;
+        this.initialReplanNeeded = false;
         this.snapshotInvalidated = true;
         this.setActiveAliasMappings([]);
         this.installDiagnostics.push({
@@ -572,12 +904,13 @@ export class DepsConflictResolver {
         });
       }
       this.captureSnapshot();
+      if (this.watchedFiles) this.recordWatchFiles();
     } finally {
       clearPackageJsonCache();
     }
   }
 
-  private describeSnapshot(): string {
+  private describeSnapshot(providers = this.describeProviders()): string {
     const mappings = this.activeMappings
       .map((mapping) => [
         mapping.originalName,
@@ -592,13 +925,19 @@ export class DepsConflictResolver {
         [...new Set(this.options.excludeRedirects[mapping.originalName])].sort(),
       ])
       .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
-    const providers = (this.aliasManager?.getAliasPathMappings() ?? [])
+    return createHash('sha256')
+      .update(JSON.stringify([mappings, providers]))
+      .digest('hex');
+  }
+
+  private describeProviders() {
+    return (this.aliasManager?.getAliasPathMappings() ?? [])
       .map((mapping) => {
         const cachedPath = getCachedRealPath(mapping.path);
         let path = cachedPath ?? mapping.path;
         if (cachedPath === undefined) {
           try {
-            path = realpathSync(path);
+            path = observedRealpath(path);
           } catch {
             /* Missing providers are diagnosed by analysis. */
           }
@@ -606,14 +945,20 @@ export class DepsConflictResolver {
         return [mapping.aliasName, path, readPackageJsonCached(path)] as const;
       })
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    return createHash('sha256')
-      .update(JSON.stringify([mappings, providers]))
-      .digest('hex');
   }
 
   private captureSnapshot(): void {
     this.snapshotRevision = this.preparation!.revision;
-    this.snapshotSignature = this.describeSnapshot();
+    const providers = this.describeProviders();
+    this.snapshotSignature = this.describeSnapshot(providers);
+    this.providerVersions = new Map(
+      providers.map(([name, path, manifest]) => [
+        name,
+        createHash('sha256')
+          .update(JSON.stringify([path, manifest]))
+          .digest('hex'),
+      ]),
+    );
     const errors = this.generationDiagnostics().filter(
       (diagnostic) => diagnostic.severity === 'error',
     );
@@ -621,10 +966,26 @@ export class DepsConflictResolver {
   }
 
   private async notifyInstallComplete(): Promise<void> {
-    if (!this.installResult || !this.hooks.onInstallComplete) return;
-    await this.hooks.onInstallComplete(
-      this.filterCompletedMappings(this.analysisResult!.aliasMappings, this.installResult, true),
+    const hook = this.hooks.onInstallComplete;
+    if (!this.installResult || !hook) return;
+    const completed = this.filterCompletedMappings(
+      this.analysisResult!.aliasMappings,
+      this.installResult,
+      true,
     );
+    await this.runPreparationHook(() => hook.call(this.hooks, completed));
+    // A hook can queue more preparation work while the lock is released.
+    await waitForProjectPreparation(this.preparation!);
+  }
+
+  private async runPreparationHook(hook: () => void | Promise<void>): Promise<void> {
+    const scope = (this.notificationScope ??= new AsyncLocalStorage());
+    const notification = { running: true };
+    try {
+      await scope.run(notification, hook);
+    } finally {
+      notification.running = false;
+    }
   }
 
   private snapshotCurrent(): boolean {

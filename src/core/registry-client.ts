@@ -1,6 +1,7 @@
 import type { NpmPackageInfo, PackageJson } from '../types/index';
 import { createLogger } from '../utils/logger';
 import { DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../constants';
+import { currentDependencyInputs } from '../utils/dependency-inputs';
 import { LruCache } from '../utils/lru-cache';
 
 const logger = createLogger('npm-registry');
@@ -31,6 +32,8 @@ async function fetchWithTimeout<T>(
   consumeResponse: (response: Response) => Promise<T>,
   timeout = DEFAULT_NPM_REGISTRY_TIMEOUT_MS,
 ): Promise<T> {
+  // Registry responses can change without a corresponding filesystem change.
+  currentDependencyInputs()?.invalidate();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 

@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createResolver } from '../../src/core/resolver';
+import { getProjectPreparation, withProjectPreparation } from '../../src/core/project-preparation';
 import { mockRegistry } from '../support/registry';
 import * as packageManager from '../../src/core/package-manager-adapter';
 import { clearPackageJsonCache } from '../../src/utils/fs';
@@ -81,6 +82,37 @@ afterEach(() => {
 });
 
 describe('project preparation and published rules', () => {
+  it.each(process.platform === 'win32' ? [false] : [false, true])(
+    'uses hoisted metadata past a leftover directory: symlink=%s',
+    async (symlink) => {
+      const { root, options } = fixture();
+      const app = join(root, 'apps', 'client');
+      manifest(root, {
+        name: 'workspace',
+        workspaces: ['apps/*'],
+        dependencies: { a: '1', vue: '3', vue2: 'npm:vue@2.6.14' },
+      });
+      manifest(app, { name: 'client', dependencies: { a: '1' } });
+      manifest(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.6.14' });
+      const leftover = join(app, 'node_modules/a');
+      mkdirSync(join(leftover, '.cache'), { recursive: true });
+
+      const resolver = await createResolver({ ...options, projectRoot: app, offline: true });
+      expect(resolver.resolveModule('vue', join(root, 'node_modules/a/index.js'))).toBe('vue2');
+
+      // A present but invalid manifest still belongs to the nearest package.
+      const nearestManifest = join(leftover, 'package.json');
+      if (symlink) symlinkSync('package.json', nearestManifest, 'file');
+      else writeFileSync(nearestManifest, '{');
+      resolver.invalidate();
+      await expect(resolver.initialize()).rejects.toMatchObject({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'DEPENDENCY_NOT_FOUND' }),
+        ]),
+      });
+    },
+  );
+
   it('waits for an earlier online preparation before checking aliases offline', async () => {
     const { root, options, install, fetch } = fixture();
     let started!: () => void;
@@ -260,6 +292,97 @@ describe('project preparation and published rules', () => {
     expect(resolver.getAnalysisResult()?.aliasMappings[0]?.resolvedVersion).toBe('2.7.16');
   });
 
+  it('waits for a writer started by an installation notification before returning', async () => {
+    const { root, options, install } = fixture();
+    manifest(root, {
+      name: 'host',
+      dependencies: { a: '1', b: '1', vue: '3', vue2: 'npm:vue@2.6.14' },
+    });
+    manifest(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.6.14' });
+    let started!: () => void;
+    let resume!: () => void;
+    const startedWriting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const finishWriting = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const perform = install.getMockImplementation()!;
+    install.mockImplementation(async (specs) => {
+      started();
+      await finishWriting;
+      return perform(specs);
+    });
+    let writer: ReturnType<typeof createResolver> | undefined;
+    const reader = createResolver(options, {
+      async onInstallComplete() {
+        writer = createResolver({ ...options, dependencies: ['b'] });
+        await startedWriting;
+      },
+    });
+
+    await startedWriting;
+    const completedBeforeWrite = await Promise.race([
+      reader.then(() => true),
+      new Promise<boolean>((resolve) => setImmediate(() => resolve(false))),
+    ]);
+    resume();
+    const [resolver] = await Promise.all([reader, writer]);
+
+    expect(completedBeforeWrite).toBe(false);
+    expect(resolver.resolveModule('vue', join(root, 'node_modules/a/index.js'))).toBe('vue2');
+  });
+
+  it.each([false, true])(
+    'replans a new alias once when the initial graph changes: repeated=%s',
+    async (repeated) => {
+      const { root, options, install, fetch } = fixture();
+      manifest(root, { name: 'host', dependencies: { a: '1', vue: '3', vue2: 'npm:vue@2.6.14' } });
+      manifest(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.6.14' });
+      const consumer = join(root, 'node_modules/a');
+      const onAnalysisComplete = vi.fn();
+      const preparation = getProjectPreparation(root);
+      const changePeer = (vue: string) =>
+        withProjectPreparation(preparation, async (markChanged) => {
+          markChanged();
+          manifest(consumer, {
+            name: 'a',
+            version: '1.0.0',
+            peerDependencies: { vue },
+          });
+        });
+      const onInstallComplete = vi.fn(() => changePeer('2.7.16'));
+      let nextChange: Promise<void> | undefined;
+      if (repeated) {
+        const perform = install.getMockImplementation()!;
+        install.mockImplementationOnce(async (specs) => {
+          const result = await perform(specs);
+          nextChange = changePeer('4.0.0');
+          return result;
+        });
+      }
+
+      const pending = createResolver(options, { onAnalysisComplete, onInstallComplete });
+      if (repeated) {
+        await expect(pending).rejects.toMatchObject({
+          diagnostics: [expect.objectContaining({ code: 'PROJECT_STATE_CHANGED' })],
+        });
+        await nextChange;
+      } else {
+        const resolver = await pending;
+        expect(resolver.getDiagnostics()).toEqual([]);
+        expect(resolver.getAnalysisResult()?.aliasMappings[0]?.resolvedVersion).toBe('2.7.16');
+        expect(resolver.resolveModule('vue', join(consumer, 'index.js'))).toBe(
+          resolver.getInstallResult()?.installed[0],
+        );
+      }
+      expect(install).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(onAnalysisComplete).toHaveBeenCalledTimes(1);
+      expect(onInstallComplete).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('does not deadlock an analysis hook that initializes another resolver', async () => {
     const { options } = fixture();
     const onAnalysisComplete = vi.fn(async () => {
@@ -268,6 +391,36 @@ describe('project preparation and published rules', () => {
     await createResolver(options, { onAnalysisComplete });
     expect(onAnalysisComplete).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'keeps the candidate private and honors hook config changes=%s',
+    async (changeConfig) => {
+      const { root, options } = fixture();
+      manifest(root, {
+        name: 'host',
+        dependencies: { a: '1', b: '1', vue: '3', vue2: 'npm:vue@2.6.14' },
+      });
+      manifest(join(root, 'node_modules/vue2'), { name: 'vue', version: '2.6.14' });
+      manifest(join(root, 'node_modules/b'), {
+        name: 'b',
+        version: '1.0.0',
+        peerDependencies: { vue: '2.6.14' },
+      });
+      const resolver = await createResolver(
+        { ...options, offline: true },
+        {
+          onAnalysisComplete(result) {
+            result.aliasMappings.length = 0;
+            if (changeConfig) options.dependencies.push('b');
+          },
+        },
+      );
+      expect(resolver.resolveModule('vue', join(root, 'node_modules/a/index.js'))).toBe('vue2');
+      expect(resolver.resolveModule('vue', join(root, 'node_modules/b/index.js'))).toBe(
+        changeConfig ? 'vue2' : null,
+      );
+    },
+  );
 
   it('bounds corrective installations when peer inputs keep changing', async () => {
     const { root, options, install } = fixture();

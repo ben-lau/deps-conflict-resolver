@@ -155,8 +155,8 @@ describe('DepsConflictResolver', () => {
 
       await Promise.all([first, second]);
 
-      expect(createDependencyAnalyzer).toHaveBeenCalledTimes(2);
-      expect(analyze).toHaveBeenCalledTimes(2);
+      expect(createDependencyAnalyzer).toHaveBeenCalledTimes(1);
+      expect(analyze).toHaveBeenCalledTimes(1);
       expect(initFromAnalysisResult).toHaveBeenCalledTimes(1);
       expect(onAnalysisComplete).toHaveBeenCalledTimes(1);
       expect(installAliases).toHaveBeenCalledTimes(1);

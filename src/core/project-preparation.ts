@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { promises as fs, realpathSync, existsSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { hostname, tmpdir, userInfo } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join, resolve } from 'node:path';
 import { createWorkspaceDetector } from './workspace-detector';
 import { iterateParentDirs } from '../utils/fs';
+import { observedExists, observedRealpath } from '../utils/dependency-inputs';
 import { LOCK_FILE_MAP } from '../constants';
 
 export interface PreparationObserver {
@@ -36,21 +37,21 @@ export function getProjectPreparation(projectRoot: string): ProjectPreparation {
   // A link outside the workspace must still identify its physical workspace.
   // Normalize before walking ancestors, not after choosing an owner.
   try {
-    projectRoot = realpathSync(projectRoot);
+    projectRoot = observedRealpath(projectRoot);
   } catch {
     projectRoot = resolve(projectRoot);
   }
   let owner = createWorkspaceDetector(projectRoot).getWorkspaceRoot() ?? projectRoot;
   if (owner === projectRoot) {
     for (const directory of iterateParentDirs(projectRoot)) {
-      if (Object.keys(LOCK_FILE_MAP).some((file) => existsSync(join(directory, file)))) {
+      if (Object.keys(LOCK_FILE_MAP).some((file) => observedExists(join(directory, file)))) {
         owner = directory;
         break;
       }
     }
   }
   try {
-    owner = realpathSync(owner);
+    owner = observedRealpath(owner);
   } catch {
     owner = resolve(owner);
   }

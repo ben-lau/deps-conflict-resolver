@@ -1,7 +1,7 @@
-import { promises as fs } from 'fs';
 import { join } from 'path';
 import { createLogger } from '../utils/logger';
 import { fileExists, iterateParentDirs, readPackageJsonCached } from '../utils/fs';
+import { observedReadTextAsync } from '../utils/dependency-inputs';
 import { DEFAULT_NPM_REGISTRY, LOCK_FILE_MAP } from '../constants';
 import type { PackageManagerType, PackageManagerDetectionResult } from '../types/index';
 import { parse as parseYaml } from 'yaml';
@@ -216,7 +216,7 @@ export class EnvironmentDetector {
    */
   private async parseRegistryFromNpmrc(filePath: string): Promise<string | null> {
     try {
-      const content = await fs.readFile(filePath, 'utf-8');
+      const content = await observedReadTextAsync(filePath);
       const lines = content.split('\n');
 
       for (const line of lines) {
@@ -244,7 +244,7 @@ export class EnvironmentDetector {
    */
   private async parseRegistryFromYarnrc(filePath: string): Promise<string | null> {
     try {
-      const content = await fs.readFile(filePath, 'utf-8');
+      const content = await observedReadTextAsync(filePath);
       const config = parseYaml(content) as { npmRegistryServer?: unknown } | null;
       const registry = config?.npmRegistryServer;
       if (typeof registry === 'string') return registry.trim() || null;
