@@ -191,9 +191,8 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       return;
     }
 
-    // resolveModule 返回别名包名（如 "aliased-vue2"），可能带子路径（如 "aliased-vue2/dist/vue.esm.js"）
-    // 直接作为新的模块请求使用，让 webpack 的正常解析机制来处理
-    const resolvedModule = this.resolver.resolveModule(request, importer);
+    const redirect = getResolverBuild(this.resolver).redirect(request, importer);
+    const resolvedModule = redirect?.target;
 
     if (!resolvedModule) {
       return;
@@ -205,6 +204,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     // 直接使用解析后的模块名（别名包名），而不是转换为文件系统路径
     resolveData.request = resolvedModule;
+    if (redirect.source === 'hook') return;
     // Resolve the verified alias from the host, preserving Webpack's exports
     // and dependency-type conditions even for linked packages outside it.
     resolveData.context = this.resolver.getOptions().projectRoot;

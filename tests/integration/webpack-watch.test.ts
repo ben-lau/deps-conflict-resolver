@@ -106,6 +106,40 @@ it('attempts permissive preparation once per ordinary run and recovers on the ne
   }
 });
 
+it('resolves a hook-relative request from the original importer', async () => {
+  const { root, consumer, entry, dist } = linkedConsumerFixture();
+  writeFileSync(entry, 'module.exports = require("legacy");');
+  writeFileSync(join(consumer, 'shim.cjs'), 'module.exports = "from-importer";');
+  writeFileSync(join(root, 'shim.cjs'), 'module.exports = "from-host";');
+  const compiler = webpack({
+    context: root,
+    mode: 'development',
+    target: 'node',
+    entry,
+    output: { path: dist, filename: 'entry.cjs', library: { type: 'commonjs2' } },
+    plugins: [
+      new DepsConflictResolverWebpackPlugin({
+        dependencies: ['legacy'],
+        offline: true,
+        strict: true,
+        hooks: { beforeResolve: (request) => (request === 'vue' ? './shim.cjs' : undefined) },
+      }),
+    ],
+  });
+  try {
+    const stats = await new Promise<webpack.Stats>((resolve, reject) => {
+      compiler.run((error, value) => (error || !value ? reject(error) : resolve(value)));
+    });
+    expect(stats.hasErrors(), stats.toString({ all: false, errors: true })).toBe(false);
+    expect(require(join(dist, 'entry.cjs'))).toBe('from-importer');
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      compiler.close((error) => (error ? reject(error) : resolve())),
+    );
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it.each([false, true])(
   'updates watch output and retains unrelated caches: legacy hooks=%s',
   async (legacyHooks) => {

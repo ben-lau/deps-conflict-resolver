@@ -3,8 +3,9 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { build, createLogger, resolveConfig, type Plugin } from 'vite';
+import { build, createLogger, optimizeDeps, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
 import type { PackageJson, PluginHooks } from '../../../src/types';
@@ -63,6 +64,47 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it('resolves hook-relative replacements from the importer in builds and pre-bundles', async () => {
+    const root = fixture('2.7.16');
+    const legacy = join(root, 'node_modules/legacy');
+    writeFileSync(join(legacy, 'shim.js'), 'export const version = "from-importer";');
+    writeFileSync(join(root, 'shim.js'), 'export const version = "from-host";');
+    const options = {
+      root,
+      configFile: false as const,
+      logLevel: 'silent' as const,
+      plugins: [
+        plugin({
+          dependencies: ['legacy'],
+          offline: true,
+          strict: true,
+          hooks: {
+            beforeResolve: (request, importer) =>
+              request === 'vue' && importer?.startsWith(legacy) ? './shim.js' : undefined,
+          },
+        }),
+      ],
+    };
+    await build({
+      ...options,
+      build: {
+        lib: { entry: join(root, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
+      },
+    });
+    expect(createRequire(import.meta.url)(join(root, 'dist/runtime.cjs')).version).toBe(
+      'from-importer',
+    );
+
+    const config = await resolveConfig(
+      { ...options, optimizeDeps: { include: ['legacy'], noDiscovery: true } },
+      'serve',
+    );
+    const metadata = await optimizeDeps(config, true);
+    const optimized = await import(
+      /* @vite-ignore */ pathToFileURL(metadata.optimized.legacy!.file).href
+    );
+    expect(optimized.version).toBe('from-importer');
+  });
   it('honors the host log level during plugin preparation', async () => {
     const root = fixture('2.7.16');
     const logs = (['log', 'info', 'warn', 'debug'] as const).map((method) =>

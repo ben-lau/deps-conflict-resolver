@@ -2,14 +2,18 @@ import type { Plugin } from 'vite';
 import type { Plugin as EsbuildPlugin } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
-import type { DepsConflictResolver } from '../../core/resolver';
+import { dirname, join } from 'node:path';
+import {
+  getResolverBuild,
+  type DepsConflictResolver,
+  type ModuleRedirect,
+} from '../../core/resolver';
 import type { AliasPathMapping } from '../../types';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
 import { escapeRegex } from '../../utils/regex';
 
 // Bump when the optimizer's redirect policy changes.
-const OPTIMIZER_CACHE_VERSION = 1;
+const OPTIMIZER_CACHE_VERSION = 2;
 const bareRequestFilter = /^[^./]/;
 
 export interface OptimizerOptions {
@@ -99,21 +103,27 @@ function esbuildPlugin(
       build.onResolve({ filter }, (args) => {
         if (args.pluginData === resolvingRedirect) return null;
         const redirected = resolveOptimizerRequest(resolver, args.path, args.importer);
-        if (!redirected) return null;
+        if (!redirected?.target) return null;
+        const resolveDir =
+          redirected.source === 'alias' ? projectRoot : args.resolveDir || dirname(args.importer);
         if (typeof build.resolve === 'function') {
           // Preserve external/namespace/sideEffects/suffix and diagnostics.
-          return build.resolve(redirected, {
+          return build.resolve(redirected.target, {
             kind: args.kind,
-            resolveDir: projectRoot,
+            resolveDir,
             importer: args.importer,
             pluginData: resolvingRedirect,
           });
         }
         try {
-          return { path: createRequire(join(projectRoot, 'package.json')).resolve(redirected) };
+          return {
+            path: createRequire(join(resolveDir, 'package.json')).resolve(redirected.target),
+          };
         } catch (error) {
           return {
-            errors: [{ text: 'Cannot resolve alias ' + redirected + ': ' + String(error) }],
+            errors: [
+              { text: 'Cannot resolve redirect ' + redirected.target + ': ' + String(error) },
+            ],
           };
         }
       });
@@ -135,12 +145,13 @@ function rolldownPlugin(
       handler(source, importer, resolveOptions) {
         if (!filter.test(source)) return null;
         const redirected = resolveOptimizerRequest(resolver, source, importer);
-        if (!redirected) return null;
-        return this.resolve(redirected, join(projectRoot, 'package.json'), {
+        if (!redirected?.target) return null;
+        const origin = redirected.source === 'alias' ? join(projectRoot, 'package.json') : importer;
+        return this.resolve(redirected.target, origin, {
           ...resolveOptions,
           skipSelf: true,
         }).then((resolved) => {
-          if (!resolved) throw new Error('Cannot resolve active alias: ' + redirected);
+          if (!resolved) throw new Error('Cannot resolve active redirect: ' + redirected.target);
           return resolved;
         });
       },
@@ -152,9 +163,9 @@ function resolveOptimizerRequest(
   resolver: DepsConflictResolver,
   request: string,
   importer?: string,
-): string | null {
+): ModuleRedirect | null {
   if (!importer || isPathLikeRequest(request) || isVirtualModuleRequest(request)) return null;
-  return resolver.resolveModule(request, importer);
+  return getResolverBuild(resolver).redirect(request, importer);
 }
 
 export function createOptimizerOptions(

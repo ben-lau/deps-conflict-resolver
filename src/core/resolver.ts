@@ -80,7 +80,13 @@ interface AnalysisSnapshot {
   inputs: DependencyInputs;
 }
 
+export interface ModuleRedirect {
+  target: string;
+  source: 'alias' | 'hook';
+}
+
 interface ResolverBuild {
+  redirect(request: string, importer?: string): ModuleRedirect | null;
   assertWatchCanWait(): void;
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
@@ -176,6 +182,7 @@ export class DepsConflictResolver {
     this.userOptions = userOptions;
     this.hooks = hooks;
     builds.set(this, {
+      redirect: (request, importer) => this.redirect(request, importer),
       assertWatchCanWait: () => this.assertWatchCanWait(),
       refreshForWatch: (changes) => this.refreshForWatch(changes),
       closeWatch: () => {
@@ -1142,6 +1149,10 @@ export class DepsConflictResolver {
    * @returns 解析后的模块名，如果不需要重定向则返回 null
    */
   resolveModule(request: string, importer?: string): string | null {
+    return this.redirect(request, importer)?.target ?? null;
+  }
+
+  private redirect(request: string, importer?: string): ModuleRedirect | null {
     if (!this.initialized || !this.aliasManager) {
       return null;
     }
@@ -1152,11 +1163,12 @@ export class DepsConflictResolver {
     if (this.hooks.beforeResolve) {
       const hookResult = this.hooks.beforeResolve(request, importer);
       if (hookResult !== undefined) {
-        return hookResult;
+        return hookResult === null ? null : { target: hookResult, source: 'hook' };
       }
     }
 
-    return this.aliasManager.resolveModule({ request, importer });
+    const target = this.aliasManager.resolveModule({ request, importer });
+    return target === null ? null : { target, source: 'alias' };
   }
 
   /**

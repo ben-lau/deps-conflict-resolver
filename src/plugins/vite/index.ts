@@ -443,7 +443,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           isVirtualModuleRequest(source)
         )
           return null;
-        const resolved = resolver.resolveModule(source, importer);
+        const redirect = getResolverBuild(resolver).redirect(source, importer);
+        const resolved = redirect?.target;
         if (!resolved) return null;
         if (options.debug && (configured?.logLevel ?? 'info') === 'info') {
           configured?.logger.info(
@@ -453,7 +454,11 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
 
         // Active aliases were verified from the host. A linked importer may
         // live outside that host's node_modules resolution ancestry.
-        return this.resolve(resolved, join(resolver.getOptions().projectRoot, 'package.json'), {
+        const origin =
+          redirect.source === 'alias'
+            ? join(resolver.getOptions().projectRoot, 'package.json')
+            : importer;
+        return this.resolve(resolved, origin, {
           ...resolveOptions,
           skipSelf: true,
         }).then((result) => {

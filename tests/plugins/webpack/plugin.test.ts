@@ -17,6 +17,10 @@ const mockResolverInstance = {
 
 vi.mock('../../../src/core/resolver', () => ({
   getResolverBuild: () => ({
+    redirect(request: string, importer?: string) {
+      const target = mockResolverInstance.resolveModule(request, importer);
+      return target ? { target, source: 'alias' } : null;
+    },
     assertWatchCanWait: vi.fn(),
     async refreshForWatch() {
       if (mockResolverInstance.initialize.mock.calls.length > 0) mockResolverInstance.invalidate();
