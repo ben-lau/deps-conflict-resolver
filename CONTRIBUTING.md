@@ -34,21 +34,24 @@ pnpm test:coverage
 
 ## Common Commands
 
-| Command              | Description                                                     |
-| -------------------- | --------------------------------------------------------------- |
-| `pnpm build`         | Build with tsup (CJS + ESM + types)                             |
-| `pnpm dev`           | Build in watch mode                                             |
-| `pnpm test`          | Run tests in watch mode                                         |
-| `pnpm test:run`      | Run tests once                                                  |
-| `pnpm test:coverage` | Run tests with coverage report                                  |
-| `pnpm lint`          | Lint with oxlint                                                |
-| `pnpm lint:fix`      | Lint and auto-fix with oxlint                                   |
-| `pnpm fmt`           | Format with oxfmt                                               |
-| `pnpm fmt:check`     | Check formatting                                                |
-| `pnpm typecheck`     | TypeScript type checking                                        |
-| `pnpm publint`       | Check package publish quality                                   |
-| `pnpm attw`          | Check type resolution (arethetypeswrong)                        |
-| `pnpm validate`      | Run all checks (lint + fmt + typecheck + test + publint + attw) |
+| Command               | Description                                                             |
+| --------------------- | ----------------------------------------------------------------------- |
+| pnpm test:compat:vite | Check cold optimization and SSR with actual Vue runtimes after building |
+| pnpm bench:resolve    | Build and benchmark a resident working set; assert zero realpath calls  |
+| pnpm bench:scale      | Compare grouping work, importer working sets, I/O counts and heap use   |
+| `pnpm build`          | Build with tsup (CJS + ESM + types)                                     |
+| `pnpm dev`            | Build in watch mode                                                     |
+| `pnpm test`           | Run tests in watch mode                                                 |
+| `pnpm test:run`       | Run tests once                                                          |
+| `pnpm test:coverage`  | Run tests with coverage report                                          |
+| `pnpm lint`           | Lint with oxlint                                                        |
+| `pnpm lint:fix`       | Lint and auto-fix with oxlint                                           |
+| `pnpm fmt`            | Format with oxfmt                                                       |
+| `pnpm fmt:check`      | Check formatting                                                        |
+| `pnpm typecheck`      | TypeScript type checking                                                |
+| `pnpm publint`        | Check package publish quality                                           |
+| `pnpm attw`           | Check type resolution (arethetypeswrong)                                |
+| `pnpm validate`       | Run all checks (lint + fmt + typecheck + test + publint + attw)         |
 
 ## Git Hooks
 
@@ -118,10 +121,13 @@ src/
   index.ts              # Main entry point (re-exports core + types)
   constants.ts          # Constants
   core/                 # Core logic
-    alias-manager.ts        # Alias name generation
+    alias-manager.ts        # Indexed, generation-scoped runtime resolution
+    alias-peer-resolver.ts  # Selected-version peer linkage
+    cli-runner.ts           # doctor / prepare command implementation
     dependency-analyzer.ts  # Recursive dependency tree analysis
     environment-detector.ts # Package manager & registry detection
-    npm-registry.ts         # npm registry version fetching
+    registry-client.ts      # npm registry versions and selected manifests
+    npm-registry.ts         # Legacy internal helper
     package-installer.ts    # Alias installation
     resolver.ts             # Main DepsConflictResolver class
     workspace-detector.ts   # pnpm workspace detection
