@@ -108,6 +108,23 @@ describe('project preparation and published rules', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('omits the previous install from an error raised before installation', async () => {
+    const { root, options, install } = fixture();
+    const resolver = await createResolver(options);
+    const previous = resolver.getInstallResult();
+    expect(previous).toMatchObject({ success: true, installed: [expect.any(String)] });
+
+    rmSync(join(root, 'node_modules/a'), { recursive: true });
+    await expect(resolver.installDependencies()).rejects.toMatchObject({
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ code: 'DEPENDENCY_NOT_FOUND' }),
+      ]),
+      preparation: { installation: null },
+    });
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(resolver.getInstallResult()).toEqual(previous);
+  });
+
   it('drops resolved installation diagnostics after another resolver repairs the project', async () => {
     const { root, options, install } = fixture();
     const reader = await createResolver({ ...options, autoInstall: false, strict: false });

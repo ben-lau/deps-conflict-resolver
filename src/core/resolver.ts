@@ -574,7 +574,7 @@ export class DepsConflictResolver {
         candidate.inputs.matches()
           ? candidate.result
           : await this.analyzeCurrent({ clearCache: false, registryClient }));
-      this.assertResolved();
+      this.assertResolved(null);
       if (!this.options.autoInstall) {
         this.publishWithoutInstallation();
       } else {
@@ -776,7 +776,7 @@ export class DepsConflictResolver {
             this.watch.snapshot = undefined;
             this.draft = { ...emptyDraft(), installation: this.draft.installation };
             this.draft.analysis = await this.analyzeCurrent({ clearCache: false, registryClient });
-            this.assertResolved();
+            this.assertResolved(null);
             if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
             this.observeSnapshot();
@@ -1377,14 +1377,14 @@ export class DepsConflictResolver {
     );
   }
 
-  private assertResolved(): void {
+  private assertResolved(installation: InstallReport | null = this.draft.installation): void {
     if (!this.options.strict) return;
     const diagnostics = this.generationDiagnostics();
     if (!diagnostics.some(({ severity }) => severity === 'error')) return;
     const preparation = structuredClone({
       aliases: this.draft.analysis?.aliasMappings ?? [],
       diagnostics,
-      installation: this.draft.installation,
+      installation,
     });
     throw new ResolutionError(
       preparation.diagnostics.filter(({ severity }) => severity === 'error'),
