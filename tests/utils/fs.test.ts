@@ -7,7 +7,7 @@ import {
   findProjectRoot,
   findPackagePath,
 } from '../../src/utils/fs';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync, type Stats } from 'fs';
 import { createRequire } from 'module';
 
 // Mock fs 模块
@@ -17,6 +17,7 @@ vi.mock('fs', async () => {
     ...actual,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
+    statSync: vi.fn(actual.statSync),
   };
 });
 
@@ -154,6 +155,8 @@ describe('fs utils', () => {
   });
 
   describe('findPackagePath', () => {
+    const present = { isFile: () => true } as Stats;
+
     it.each([false, true])(
       'checks current Node lookup directories without accepting a stale resolved path: exists=%s',
       (exists) => {
@@ -169,8 +172,10 @@ describe('fs utils', () => {
         vi.mocked(readFileSync).mockImplementation(() => {
           throw new Error('No package scope');
         });
-        vi.mocked(existsSync).mockImplementation(
-          (path) => exists && path === join('/global', '@scope/provider'),
+        vi.mocked(statSync).mockImplementation((path) =>
+          exists && path === join('/global', '@scope/provider', 'package.json')
+            ? present
+            : undefined,
         );
         expect(findPackagePath('@scope/provider', '/project')).toBe(
           exists ? '/global/@scope/provider' : null,
@@ -197,9 +202,11 @@ describe('fs utils', () => {
       } as unknown as NodeRequire);
 
       // 模拟 node_modules 中存在包
-      vi.mocked(existsSync).mockImplementation((path) => {
-        return path === join('/project', 'node_modules', 'some-package');
-      });
+      vi.mocked(statSync).mockImplementation((path) =>
+        path === join('/project', 'node_modules', 'some-package', 'package.json')
+          ? present
+          : undefined,
+      );
 
       const result = findPackagePath('some-package', '/project');
 
@@ -214,10 +221,12 @@ describe('fs utils', () => {
       } as unknown as NodeRequire);
 
       // 假设包在父目录的 node_modules 目录中
-      vi.mocked(existsSync).mockImplementation((path) => {
+      vi.mocked(statSync).mockImplementation((path) => {
         // Windows 路径兼容
         const normalizedPath = path.toString().replace(/\\/g, '/');
-        return normalizedPath.includes('/parent/node_modules/hoisted-pkg');
+        return normalizedPath.endsWith('/parent/node_modules/hoisted-pkg/package.json')
+          ? present
+          : undefined;
       });
 
       const result = findPackagePath('hoisted-pkg', '/parent/child');
@@ -232,7 +241,7 @@ describe('fs utils', () => {
         }),
       } as unknown as NodeRequire);
 
-      vi.mocked(existsSync).mockReturnValue(false);
+      vi.mocked(statSync).mockReturnValue(undefined);
 
       const result = findPackagePath('nonexistent-package', '/project');
 

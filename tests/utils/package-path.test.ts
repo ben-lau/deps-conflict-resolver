@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -11,6 +12,7 @@ import {
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DependencyInputs } from '../../src/utils/dependency-inputs';
 import { clearPackageJsonCache, findPackagePath } from '../../src/utils/fs';
 
 const roots: string[] = [];
@@ -66,3 +68,83 @@ it('refreshes a scoped alias after relinking even when Node has resolved its old
   clearPackageJsonCache();
   expect(findPackagePath('@compat/provider', directory)).toBe(fresh);
 });
+
+it('checks a newly created lookup directory for a different package outside preparation', () => {
+  const directory = root();
+  pkg(directory, { name: 'host' });
+  expect(findPackagePath('first', directory)).toBeNull();
+
+  const provider = join(directory, 'node_modules', 'second');
+  pkg(provider, { name: 'second', version: '1.0.0' });
+  expect(findPackagePath('second', directory)).toBe(provider);
+});
+
+it.runIf(process.platform !== 'win32')(
+  'skips a looping package directory when looking for metadata',
+  () => {
+    const workspace = root();
+    const app = join(workspace, 'app');
+    const hoisted = join(workspace, 'node_modules/provider');
+    pkg(app, { name: 'app' });
+    pkg(hoisted, { name: 'provider' });
+    mkdirSync(join(app, 'node_modules'));
+    symlinkSync('provider', join(app, 'node_modules/provider'), 'dir');
+
+    const inputs = new DependencyInputs();
+    expect(inputs.record(() => findPackagePath('provider', app))).toBe(hoisted);
+    expect(inputs.reusable).toBe(false);
+  },
+);
+
+it.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
+  'does not claim a manifest in an inaccessible lookup directory',
+  () => {
+    const workspace = root();
+    const app = join(workspace, 'app');
+    const modules = join(app, 'node_modules');
+    const hoisted = join(workspace, 'node_modules/provider');
+    pkg(app, { name: 'app' });
+    pkg(hoisted, { name: 'provider' });
+    pkg(join(modules, 'provider'), { name: 'provider' });
+
+    chmodSync(modules, 0o600);
+    try {
+      expect(findPackagePath('provider', app)).toBe(hoisted);
+      expect(findPackagePath('missing-provider', app)).toBeNull();
+    } finally {
+      chmodSync(modules, 0o700);
+    }
+  },
+);
+
+it('skips a directory named package.json even if it belongs to a nearer package directory', () => {
+  const workspace = root();
+  const app = join(workspace, 'app');
+  const hoisted = join(workspace, 'node_modules/provider');
+  pkg(app, { name: 'app' });
+  pkg(hoisted, { name: 'provider' });
+  mkdirSync(join(app, 'node_modules/provider/package.json'), { recursive: true });
+
+  expect(findPackagePath('provider', app)).toBe(hoisted);
+});
+
+it.runIf(process.platform !== 'win32')(
+  'revalidates a previously absent manifest that now has a broken link',
+  () => {
+    const workspace = root();
+    const app = join(workspace, 'app');
+    const hoisted = join(workspace, 'node_modules/provider');
+    const nearer = join(app, 'node_modules/provider');
+    pkg(app, { name: 'app' });
+    pkg(hoisted, { name: 'provider' });
+    mkdirSync(nearer, { recursive: true });
+
+    const inputs = new DependencyInputs();
+    expect(inputs.record(() => findPackagePath('provider', app))).toBe(hoisted);
+    expect(inputs.matches()).toBe(true);
+
+    symlinkSync('package.json', join(nearer, 'package.json'), 'file');
+    expect(inputs.matches()).toBe(false);
+    expect(findPackagePath('provider', app)).toBe(nearer);
+  },
+);
