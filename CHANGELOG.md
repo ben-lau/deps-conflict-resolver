@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.3.0...v1.4.0) (2026-12-26)
+
+
+### Features
+
+* **vite:** support SSR optimization and native Rolldown ([20b7cce](https://github.com/ben-lau/deps-conflict-resolver/commit/20b7cce93b4ac4f0a665cb8928cafc468aed93b5))
+
 ## [1.3.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.2.0...v1.3.0) (2026-12-16)
 
 
