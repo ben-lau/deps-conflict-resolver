@@ -54,13 +54,13 @@ export function validateSharedPeerContexts(
   diagnostics: ResolverDiagnostic[],
   watchFiles?: Set<string>,
   workspaceDetector?: Pick<WorkspaceDetector, 'resolveVersionSpec'>,
-  inheritedMismatches?: ReadonlyMap<string, ReadonlySet<string>>,
+  inheritedMismatchesByAlias?: ReadonlyMap<string, readonly string[]>,
 ): void {
   if (mappings.length === 0) return;
   if (
     graph.roots.length < 2 &&
     graph.rootRequests.size < 2 &&
-    !inheritedMismatches?.size &&
+    !inheritedMismatchesByAlias?.size &&
     !mappings.some((mapping) => mapping.excludedImporterPaths?.length)
   ) {
     return;
@@ -72,6 +72,7 @@ export function validateSharedPeerContexts(
   };
   const aliases = new Map<string, Provider>();
   const installedMappings = mappings.filter((mapping) => {
+    if (mapping.installSpec) return false;
     const path = findPackagePath(mapping.aliasName, options.projectRoot);
     if (!path) return false;
     const physical = canonicalPath(path);
@@ -127,7 +128,7 @@ export function validateSharedPeerContexts(
     getResolver,
   };
   if (!installationPending)
-    validateDescendantProviders(validation, installedMappings, inheritedMismatches);
+    validateDescendantProviders(validation, installedMappings, inheritedMismatchesByAlias);
 
   for (const peer of originals) {
     const candidateRoots: ConfiguredPeerRequest[] = [];
@@ -156,25 +157,29 @@ export function validateSharedPeerContexts(
 function validateDescendantProviders(
   validation: PeerValidation,
   installedMappings: readonly AliasMapping[],
-  inheritedMismatches: ReadonlyMap<string, ReadonlySet<string>> | undefined,
+  inheritedMismatchesByAlias: ReadonlyMap<string, readonly string[]> | undefined,
 ): void {
   const { graph, options, diagnostics, detector, aliases, getResolver } = validation;
-  const pathsToCheck = new Map<string, Set<string>>();
-  for (const [peer, paths] of inheritedMismatches ?? []) pathsToCheck.set(peer, new Set(paths));
+  const pathsByPeer = new Map<string, Map<string, 'pruned' | 'inherited'>>();
   for (const mapping of installedMappings) {
-    if (!mapping.excludedImporterPaths?.length) continue;
-    const paths = pathsToCheck.get(mapping.originalName) ?? new Set<string>();
-    for (const path of mapping.excludedImporterPaths) paths.add(path);
-    pathsToCheck.set(mapping.originalName, paths);
+    const inherited = inheritedMismatchesByAlias?.get(mapping.aliasName) ?? [];
+    const pruned = mapping.excludedImporterPaths ?? [];
+    if (!inherited.length && !pruned.length) continue;
+    let paths = pathsByPeer.get(mapping.originalName);
+    if (!paths) pathsByPeer.set(mapping.originalName, (paths = new Map()));
+    for (const path of pruned) {
+      if (!paths.has(path)) paths.set(path, 'pruned');
+    }
+    for (const path of inherited) paths.set(path, 'inherited');
   }
-  for (const [peer, paths] of pathsToCheck) {
+  for (const [peer, paths] of pathsByPeer) {
     const singleAlias =
       installedMappings.filter((mapping) => mapping.originalName === peer).length === 1;
     const explicit = [
       ...(options.includeRedirects[peer] ?? []),
       ...(options.excludeRedirects[peer] ?? []),
     ];
-    for (const path of paths) {
+    for (const [path, kind] of paths) {
       const node = graph.nodes.get(path);
       if (!node || matchesPackageName(node, explicit)) {
         continue;
@@ -193,7 +198,7 @@ function validateDescendantProviders(
         naturalVersion &&
         (!natural?.name || natural.name === peer) &&
         requirements.every(({ range }) => satisfies(naturalVersion, range));
-      if (naturalMatches && singleAlias && !inheritedMismatches?.get(peer)?.has(path)) continue;
+      if (naturalMatches && singleAlias && kind === 'pruned') continue;
 
       const decision = getResolver().explainResolution(peer, join(path, '__peer_context__.js'));
       if (decision.reason === 'excluded' || decision.reason === 'ambiguous') continue;

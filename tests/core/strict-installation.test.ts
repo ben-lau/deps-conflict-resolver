@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createResolver } from '../../src/core/resolver';
@@ -17,9 +17,14 @@ function writePackage(directory: string, manifest: PackageJson): void {
   writeFileSync(join(directory, 'package.json'), JSON.stringify(manifest));
 }
 
-function fixture(withNestedProvider: boolean, peerRange = '^1') {
+function makeProjectRoot(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'deps-strict-install-')));
   roots.push(root);
+  return root;
+}
+
+function fixture(withNestedProvider: boolean, peerRange = '^1') {
+  const root = makeProjectRoot();
   writePackage(root, {
     name: 'host',
     dependencies: { consumer: '1.0.0', renderer: '2.0.0', runtime: '2.0.0' },
@@ -131,43 +136,142 @@ describe('strict peer validation across installation', () => {
     },
   );
 
-  it('checks shared contexts after installation has supplied a new alias', async () => {
-    const { root, install } = fixture(true);
-    writePackage(root, {
-      name: 'host',
-      dependencies: { consumer: '1.0.0', modern: '1.0.0', renderer: '2.0.0', runtime: '2.0.0' },
-    });
-    writePackage(join(root, 'node_modules/consumer'), {
-      name: 'consumer',
-      version: '1.0.0',
-      peerDependencies: { renderer: '^1' },
-      dependencies: { shared: '1.0.0' },
-    });
-    writePackage(join(root, 'node_modules/modern'), {
-      name: 'modern',
-      version: '1.0.0',
-      peerDependencies: { renderer: '^2' },
-      dependencies: { shared: '1.0.0' },
-    });
-    writePackage(join(root, 'node_modules/shared'), {
-      name: 'shared',
-      version: '1.0.0',
-      peerDependencies: { renderer: '>=1' },
-    });
-    const resolver = await createResolver({
-      projectRoot: root,
-      dependencies: ['consumer', 'modern'],
-      packageManager: 'npm',
-      autoInstall: true,
-      strict: true,
-    });
-    expect(install).toHaveBeenCalledTimes(1);
-    expect(resolver.getDiagnostics()).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'SHARED_PEER_CONTEXT', severity: 'warning' }),
-      ]),
-    );
-  });
+  it.each([
+    { reuse: false, autoInstall: true },
+    { reuse: true, autoInstall: true },
+    { reuse: true, autoInstall: false },
+  ])(
+    'checks shared contexts after preparing a planned alias (reuse=$reuse, autoInstall=$autoInstall)',
+    async ({ reuse, autoInstall }) => {
+      const { root, install } = fixture(true);
+      writePackage(root, {
+        name: 'host',
+        dependencies: { consumer: '1.0.0', modern: '1.0.0', renderer: '2.0.0', runtime: '2.0.0' },
+      });
+      writePackage(join(root, 'node_modules/consumer'), {
+        name: 'consumer',
+        version: '1.0.0',
+        peerDependencies: { renderer: '^1' },
+        dependencies: { shared: '1.0.0' },
+      });
+      writePackage(join(root, 'node_modules/modern'), {
+        name: 'modern',
+        version: '1.0.0',
+        peerDependencies: { renderer: '^2' },
+        dependencies: { shared: '1.0.0' },
+      });
+      const shared = join(root, 'node_modules/shared');
+      writePackage(shared, {
+        name: 'shared',
+        version: '1.0.0',
+        peerDependencies: { renderer: '>=1' },
+      });
+      const alias = 'aliased-renderer1';
+      if (reuse) await install.getMockImplementation()!([alias + '@npm:renderer@1.0.0']);
+
+      const resolver = await createResolver({
+        projectRoot: root,
+        dependencies: ['consumer', 'modern'],
+        packageManager: 'npm',
+        autoInstall,
+        strict: autoInstall,
+      });
+      if (!autoInstall) {
+        expect(resolver.getDiagnostics().map(({ code }) => code)).toEqual(['ALIAS_NOT_INSTALLED']);
+        await resolver.installDependencies();
+      }
+      expect(install).toHaveBeenCalledTimes(reuse ? 0 : 1);
+      expect(resolver.getInstallResult()).toMatchObject({
+        success: true,
+        installed: reuse ? [] : [alias],
+        reused: reuse ? [alias] : [],
+      });
+      expect(resolver.getDiagnostics()).toEqual([
+        expect.objectContaining({
+          code: 'SHARED_PEER_CONTEXT',
+          severity: 'warning',
+          importerPaths: [shared],
+        }),
+      ]);
+      expect(resolver.resolveModule('renderer', join(shared, 'index.js'))).toBe(alias);
+    },
+  );
+
+  it.each([false, true])(
+    'rechecks peer resolution after reusing a planned alias (same importer=%s)',
+    async (sameImporter) => {
+      const root = makeProjectRoot();
+      const older = join(root, 'node_modules/older');
+      const recent = join(root, 'node_modules/recent');
+      const shared = join(root, 'node_modules/shared');
+      const recentAlias = 'aliased-runtime2';
+      writePackage(root, {
+        name: 'host',
+        dependencies: {
+          older: '1.0.0',
+          recent: '1.0.0',
+          runtime: '3.0.0',
+          runtime26: 'npm:runtime@2.6.14',
+        },
+      });
+      writePackage(older, {
+        name: 'older',
+        version: '1.0.0',
+        dependencies: { shared: '1.0.0' },
+        peerDependencies: { runtime: '~2.6.0' },
+      });
+      if (sameImporter) symlinkSync(older, recent, 'junction');
+      else {
+        writePackage(recent, {
+          name: 'recent',
+          version: '1.0.0',
+          dependencies: { shared: '1.0.0' },
+          peerDependencies: { runtime: '~2.7.0' },
+        });
+      }
+      writePackage(shared, {
+        name: 'shared',
+        version: '1.0.0',
+        peerDependencies: { runtime: '~2.7.0' },
+      });
+      writePackage(join(root, 'node_modules/runtime'), { name: 'runtime', version: '3.0.0' });
+      writePackage(join(root, 'node_modules/runtime26'), { name: 'runtime', version: '2.6.14' });
+      const candidate = { name: 'runtime', version: '2.7.16' };
+      writePackage(join(root, 'node_modules', recentAlias), candidate);
+      vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue([candidate.version]);
+      vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue(candidate);
+      const install = vi.fn(() => {
+        throw new Error('An existing alias should be reused');
+      });
+      vi.spyOn(packageManager, 'createPackageManagerAdapter').mockReturnValue({ install });
+
+      const initializing = createResolver({
+        projectRoot: root,
+        dependencies: ['older', 'recent'],
+        packageManager: 'npm',
+        autoInstall: true,
+        strict: true,
+        ...(sameImporter && { peerOverrides: { recent: { runtime: '~2.7.0' } } }),
+      });
+      if (sameImporter) {
+        await expect(initializing).rejects.toMatchObject({
+          diagnostics: [
+            expect.objectContaining({
+              code: 'AMBIGUOUS_IMPORTER',
+              aliases: [recentAlias, 'runtime26'],
+              importerPaths: [older],
+            }),
+          ],
+        });
+      } else {
+        const resolver = await initializing;
+        expect(resolver.resolveModule('runtime', join(shared, 'index.js'))).toBe(recentAlias);
+        expect(resolver.resolveModule('runtime', join(older, 'index.js'))).toBe('runtime26');
+        expect(resolver.getDiagnostics()).toEqual([]);
+      }
+      expect(install).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not allow invalidation while a manual installation is pending', async () => {
     const { root, install } = fixture(true);

@@ -126,7 +126,7 @@ export class DependencyAnalyzer {
   private collectCache = new Map<string, string[]>();
   /** 当前 analyze 使用的按安装路径区分的依赖图 */
   private dependencyGraph: InstalledDependencyGraph | null = null;
-  private readonly inheritedMismatches = new Map<string, Set<string>>();
+  private readonly inheritedMismatchesByAlias = new Map<string, readonly string[]>();
   /** 注册表访问适配器（可注入以支持离线分析和确定性测试） */
   private registryClient: RegistryClient;
   private graphPopulated = false;
@@ -398,7 +398,7 @@ export class DependencyAnalyzer {
         this.diagnostics,
         this.watchFiles,
         this.workspaceDetector,
-        this.inheritedMismatches,
+        this.inheritedMismatchesByAlias,
       );
 
       const conflictsNeedingAlias = peerConflicts.filter((c) => c.needsAlias).length;
@@ -433,7 +433,7 @@ export class DependencyAnalyzer {
       this.rawDeclaredDeps = {};
       this.declaredDeps = {};
       this.collectCache.clear();
-      this.inheritedMismatches.clear();
+      this.inheritedMismatchesByAlias.clear();
       this.dependencyGraph = null;
     }
   }
@@ -1402,9 +1402,7 @@ export class DependencyAnalyzer {
       pruneIncompatibleBranch,
     );
     if (graphResult?.inheritedMismatches.length) {
-      const paths = this.inheritedMismatches.get(packageName) ?? new Set<string>();
-      for (const path of graphResult.inheritedMismatches) paths.add(path);
-      this.inheritedMismatches.set(packageName, paths);
+      this.inheritedMismatchesByAlias.set(aliasName, graphResult.inheritedMismatches);
     }
     const graphInstances = graphResult?.collected ?? null;
     const allDependents = graphInstances

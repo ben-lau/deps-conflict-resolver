@@ -116,6 +116,70 @@ describe('diagnostics and deterministic offline operation', () => {
   });
 
   it.each([
+    { installedPeer: 'renderer', offline: false, plannedAliasExists: false },
+    { installedPeer: 'runtime', offline: false, plannedAliasExists: false },
+    { installedPeer: 'runtime', offline: false, plannedAliasExists: true },
+    { installedPeer: 'runtime', offline: true, plannedAliasExists: false },
+  ])(
+    'warns about descendants of active aliases only ($installedPeer, offline=$offline, planned alias on disk=$plannedAliasExists)',
+    async ({ installedPeer, offline, plannedAliasExists }) => {
+      const root = project({
+        dependencies: {
+          legacy: '1.0.0',
+          stable: '1.0.0',
+          runtime: '4.0.0',
+          [installedPeer]: '4.0.0',
+          compat: `npm:${installedPeer}@1.0.0`,
+        },
+      });
+      pkg(root, 'runtime', { version: '4.0.0' });
+      if (installedPeer !== 'runtime') pkg(root, installedPeer, { version: '4.0.0' });
+      pkg(root, 'compat', { name: installedPeer, version: '1.0.0' });
+      if (plannedAliasExists) pkg(root, 'aliased-runtime2', { name: 'runtime', version: '2.0.0' });
+      pkg(root, 'legacy', {
+        dependencies: { 'uncovered-child': '1.0.0' },
+        peerDependencies: { runtime: '^2.0.0' },
+      });
+      pkg(root, 'stable', {
+        dependencies: { 'covered-child': '1.0.0' },
+        peerDependencies: { [installedPeer]: '^1.0.0' },
+      });
+      const uncovered = pkg(root, 'uncovered-child', { peerDependencies: { runtime: '^3.0.0' } });
+      const covered = pkg(root, 'covered-child', {
+        peerDependencies: { [installedPeer]: '^3.0.0' },
+      });
+      const versions = vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['2.0.0']);
+      vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockResolvedValue({
+        name: 'runtime',
+        version: '2.0.0',
+      });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, ['legacy', 'stable']),
+        offline,
+      });
+      const diagnostics = resolver.getDiagnostics();
+      expect(diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: offline ? 'OFFLINE_ALIAS_MISSING' : 'ALIAS_NOT_INSTALLED',
+          packageName: 'runtime',
+          severity: 'error',
+        }),
+      );
+      expect(diagnostics.filter(({ code }) => code === 'ALIAS_PEER_UNSATISFIED')).toEqual([
+        expect.objectContaining({
+          packageName: installedPeer,
+          severity: 'warning',
+          importerPaths: [covered],
+        }),
+      ]);
+      expect(resolver.resolveModule('runtime', join(uncovered, 'index.js'))).toBeNull();
+      expect(resolver.resolveModule(installedPeer, join(covered, 'index.js'))).toBe('compat');
+      if (offline) expect(versions).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
     { workspace: false, sameResolver: true },
     { workspace: false, sameResolver: false },
     { workspace: true, sameResolver: true },

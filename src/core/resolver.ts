@@ -437,18 +437,21 @@ export class DepsConflictResolver {
         });
       }
 
-      const changed = (result.installed?.length ?? 0) > 0 || (result.failed?.length ?? 0) > 0;
-      if (!changed) {
-        this.setActiveAliasMappings(this.filterCompletedMappings(planned, result, false), blocked);
+      const verified = this.filterCompletedMappings(planned, result, false);
+      const requiresReanalysis =
+        (result.installed?.length ?? 0) > 0 ||
+        (result.failed?.length ?? 0) > 0 ||
+        verified.some(({ installSpec }) => installSpec);
+      if (!requiresReanalysis) {
+        this.setActiveAliasMappings(verified, blocked);
         return;
       }
 
-      // A package manager reifies the whole tree, including file: consumers,
-      // host packages and aliases that were reused before this install.
-      // Rebuild every derived scope from current inputs, not the old mappings.
+      // Installation can reconcile the whole tree. Reusing a planned alias
+      // also changes the set of verified providers for scopes and diagnostics.
       this.analysisResult = await this.analyzeCurrent(
         result.success ? this.options.offline : true,
-        this.filterCompletedMappings(planned, result, false),
+        verified,
         false,
       );
       const fresh = this.analysisResult.aliasMappings;
