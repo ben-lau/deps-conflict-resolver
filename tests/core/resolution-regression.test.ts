@@ -1623,4 +1623,83 @@ describe('resolution correctness with installed packages', () => {
     clearPackageJsonCache();
     expect(getCachedRealPath(legacy)).toBeUndefined();
   });
+
+  it('rejects a hoisted root peer when an outer workspace declares a different physical instance', async () => {
+    const root = project({
+      workspaces: ['apps/*', 'packages/*'],
+      dependencies: { vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+    });
+    const app = join(root, 'apps/host');
+    const wsOuter = join(root, 'packages/ws-outer');
+    const wsInner = join(root, 'packages/ws-inner');
+    mkdirSync(app, { recursive: true });
+    mkdirSync(wsOuter, { recursive: true });
+    mkdirSync(wsInner, { recursive: true });
+    writeFileSync(
+      join(app, 'package.json'),
+      JSON.stringify({
+        name: 'host',
+        version: '1.0.0',
+        dependencies: { 'ws-outer': 'workspace:*' },
+      }),
+    );
+    writeFileSync(
+      join(wsOuter, 'package.json'),
+      JSON.stringify({
+        name: 'ws-outer',
+        version: '1.0.0',
+        dependencies: { 'ws-inner': 'workspace:*', 'element-ui': '^1.4.0' },
+      }),
+    );
+    writeFileSync(
+      join(wsInner, 'package.json'),
+      JSON.stringify({
+        name: 'ws-inner',
+        version: '1.0.0',
+        dependencies: { legacy: '1.0.0' },
+      }),
+    );
+    mkdirSync(join(app, 'node_modules'), { recursive: true });
+    symlinkSync(
+      wsOuter,
+      join(app, 'node_modules/ws-outer'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    mkdirSync(join(wsOuter, 'node_modules'), { recursive: true });
+    symlinkSync(
+      wsInner,
+      join(wsOuter, 'node_modules/ws-inner'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    // Unrelated hoisted package at repo root (not declared by host or ws-inner)
+    pkg(root, 'element-ui', { version: '2.15.14', peerDependencies: { vue: '^2.0.0' } });
+    // ws-outer has its own distinct physical element-ui@1.4.0
+    pkg(wsOuter, 'element-ui', { version: '1.4.0', peerDependencies: { vue: '^2.0.0' } });
+    pkg(wsInner, 'legacy', { peerDependencies: { vue: '^2.0.0', 'element-ui': '^2.15.0' } });
+
+    const options = { ...baseOptions(app, ['legacy']), offline: true };
+    const resolver = await createResolver(options);
+    expect(
+      resolver.getDiagnostics().filter((diagnostic) => diagnostic.code === 'PEER_NOT_DECLARED'),
+    ).toEqual([
+      expect.objectContaining({
+        code: 'PEER_NOT_DECLARED',
+        packageName: 'element-ui',
+        requestedBy: ['ws-outer>ws-inner>legacy'],
+      }),
+    ]);
+    expect(resolver.getAnalysisResult()?.missingFirstLevelPeers).toEqual([
+      {
+        packageName: 'element-ui',
+        requiredRange: '^2.15.0',
+        requestedBy: 'ws-outer>ws-inner>legacy',
+      },
+    ]);
+    await expect(createResolver({ ...options, strict: true })).rejects.toBeInstanceOf(
+      ResolutionError,
+    );
+  });
 });

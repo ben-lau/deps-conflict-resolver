@@ -359,8 +359,13 @@ export class DependencyAnalyzer {
       //    不分析子依赖的 peerDeps，只有第一层的冲突才需要别名安装
       const peerDepsMap = this.collectFirstLevelPeerDependencies();
 
-      // 3. 分析冲突（只检测与主工程已声明依赖的版本冲突）
-      const peerConflicts = this.analyzePeerConflicts(peerDepsMap);
+      // 3. 分析冲突（只检测与主工程已声明依赖的版本冲突），同时记录缺失的 peer 依赖
+      const missingFirstLevelPeers: Array<{
+        packageName: string;
+        requiredRange: string;
+        requestedBy: string;
+      }> = [];
+      const peerConflicts = this.analyzePeerConflicts(peerDepsMap, missingFirstLevelPeers);
 
       // 4. 生成别名映射（只为需要安装别名的冲突生成）
       //    会收集完整依赖树用于重定向判断
@@ -373,9 +378,6 @@ export class DependencyAnalyzer {
         this.watchFiles,
         this.workspaceDetector,
       );
-
-      // 5. 找出缺失的 peer 依赖（仅记录，不自动安装）
-      const missingFirstLevelPeers = this.findMissingFirstLevelPeers(peerDepsMap);
 
       const conflictsNeedingAlias = peerConflicts.filter((c) => c.needsAlias).length;
       logger.info(
@@ -681,7 +683,8 @@ export class DependencyAnalyzer {
   /**
    * 检查某个宿主未声明的 peer 请求是否已由其所属的中间 workspace 包自洽封装并满足。
    * 仅当请求链路上的祖先 workspace 包在 dependencies/optionalDependencies 中显式声明了该包，
-   * 且从请求包物理路径可解析到满足范围的真实安装包时返回 true（避免把 pnpm hoist 幽灵依赖误判为已声明）。
+   * 且从请求包物理路径解析到的满足范围的真实安装包与该声明祖先实际解析到的物理目录一致时返回 true
+   * （避免把 pnpm/npm hoist 幽灵依赖误判为祖先 workspace 已提供）。
    */
   private isSatisfiedByOwningWorkspace(
     packageName: string,
@@ -693,7 +696,7 @@ export class DependencyAnalyzer {
     }
 
     let currentDir = this.options.projectRoot;
-    let declaredByWorkspaceAncestor = false;
+    const declaringAncestors: string[] = [];
     for (let index = 0; index < request.path.length - 1; index++) {
       const segment = request.path[index]!;
       const ancestorPath = findPackagePath(segment, currentDir);
@@ -710,14 +713,14 @@ export class DependencyAnalyzer {
         if (typeof declaredSpec === 'string') {
           const npmAlias = parseNpmAlias(declaredSpec);
           if (!npmAlias || npmAlias[0] === packageName) {
-            declaredByWorkspaceAncestor = true;
+            declaringAncestors.push(canonicalAncestor);
           }
         }
       }
       currentDir = canonicalAncestor;
     }
 
-    if (!declaredByWorkspaceAncestor) {
+    if (declaringAncestors.length === 0) {
       return false;
     }
 
@@ -731,14 +734,29 @@ export class DependencyAnalyzer {
     if (installedManifest.name && installedManifest.name !== packageName) {
       return false;
     }
-    return satisfies(installedManifest.version, resolvedRange);
+    if (!satisfies(installedManifest.version, resolvedRange)) {
+      return false;
+    }
+
+    const canonicalInstalled = canonicalPath(installedPath);
+    return declaringAncestors.some((ancestorDir) => {
+      const ancestorResolved = findPackagePath(packageName, ancestorDir);
+      return ancestorResolved !== null && canonicalPath(ancestorResolved) === canonicalInstalled;
+    });
   }
 
   /**
    * 分析 peer 依赖冲突
    * 只有当主工程已安装某个依赖，且 peerDeps 要求的版本不兼容时，才需要别名
    */
-  private analyzePeerConflicts(peerDepsMap: Map<string, DependencyPath[]>): PeerConflict[] {
+  private analyzePeerConflicts(
+    peerDepsMap: Map<string, DependencyPath[]>,
+    missingFirstLevelPeers?: Array<{
+      packageName: string;
+      requiredRange: string;
+      requestedBy: string;
+    }>,
+  ): PeerConflict[] {
     const conflicts: PeerConflict[] = [];
 
     for (const [packageName, requestedBy] of peerDepsMap) {
@@ -786,6 +804,17 @@ export class DependencyAnalyzer {
           requestedBy: undeclaredRequests.map((request) => request.path.join('>')),
           message: packageName + ' is not declared by the host',
         });
+        if (missingFirstLevelPeers) {
+          for (const request of undeclaredRequests) {
+            const requestedByPath = request.path.join('>');
+            if (!requestedByPath) continue;
+            missingFirstLevelPeers.push({
+              packageName,
+              requiredRange: request.requiredRange,
+              requestedBy: requestedByPath,
+            });
+          }
+        }
       } else if (isDeclared && !isInstalled) {
         this.diagnostics.push({
           code: 'PEER_NOT_INSTALLED',
@@ -1909,51 +1938,6 @@ export class DependencyAnalyzer {
     const result = Array.from(collected);
     this.collectCache.set(cacheKey, result);
     return result;
-  }
-
-  /**
-   * 找出第一层依赖中缺失的 peer 依赖（无冲突）
-   * 复用 collectFirstLevelPeerDependencies 已收集的 peerDepsMap，避免重复遍历
-   */
-  private findMissingFirstLevelPeers(peerDepsMap: Map<string, DependencyPath[]>): Array<{
-    packageName: string;
-    requiredRange: string;
-    requestedBy: string;
-  }> {
-    const missing: Array<{
-      packageName: string;
-      requiredRange: string;
-      requestedBy: string;
-    }> = [];
-
-    for (const [peerName, requests] of peerDepsMap) {
-      // missing 的定义：主工程未声明该 peer 依赖
-      // 注意：node_modules 可 resolve 到 ≠ 已声明（pnpm 的 peer/hoist 场景会误导）
-      if (this.isDeclaredInMainProject(peerName)) {
-        continue;
-      }
-
-      for (const request of requests) {
-        const requestedBy = request.path.join('>');
-        if (!requestedBy) continue;
-
-        const resolvedRange =
-          this.workspaceDetector.resolveVersionSpec(peerName, request.requiredRange) ??
-          request.requiredRange;
-        if (this.isSatisfiedByOwningWorkspace(peerName, request, resolvedRange)) {
-          continue;
-        }
-
-        // 未声明：缺失（不自动安装，只提示）
-        missing.push({
-          packageName: peerName,
-          requiredRange: request.requiredRange,
-          requestedBy,
-        });
-      }
-    }
-
-    return missing;
   }
 }
 

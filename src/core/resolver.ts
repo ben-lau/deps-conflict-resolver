@@ -545,8 +545,9 @@ export class DepsConflictResolver {
       .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
     const providers = (this.aliasManager?.getAliasPathMappings() ?? [])
       .map((mapping) => {
-        let path = getCachedRealPath(mapping.path) ?? mapping.path;
-        if (path === mapping.path) {
+        const cachedPath = getCachedRealPath(mapping.path);
+        let path = cachedPath ?? mapping.path;
+        if (cachedPath === undefined) {
           try {
             path = realpathSync(path);
           } catch {
