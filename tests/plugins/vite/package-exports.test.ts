@@ -1,4 +1,4 @@
-import { cp, mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -47,5 +47,58 @@ describe('Vite package exports', () => {
 
     expect(resolved).toBe(join(resolvedAliasPackagePath, 'exports/feature.js'));
     expect(resolved).not.toBe(join(resolvedAliasPackagePath, 'feature.js'));
+  });
+
+  it('honors root conditional exports ahead of module and main fields', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'deps-conflict-vite-'));
+    temporaryRoots.push(projectRoot);
+    const aliasPackagePath = join(projectRoot, 'node_modules', 'aliased-package');
+    await mkdir(aliasPackagePath, { recursive: true });
+    await writeFile(
+      join(projectRoot, 'package.json'),
+      JSON.stringify({ name: 'host', type: 'module' }),
+    );
+    await writeFile(
+      join(aliasPackagePath, 'package.json'),
+      JSON.stringify({
+        name: 'original-package',
+        version: '1.0.0',
+        type: 'module',
+        main: './fallback.cjs',
+        module: './fallback.js',
+        exports: { '.': { import: './entry.js', require: './entry.cjs' } },
+      }),
+    );
+    await Promise.all(
+      ['fallback.cjs', 'fallback.js', 'entry.js', 'entry.cjs'].map((file) =>
+        writeFile(join(aliasPackagePath, file), ''),
+      ),
+    );
+    const config = await resolveConfig(
+      {
+        root: projectRoot,
+        configFile: false,
+        resolve: {
+          alias: createViteAliases(
+            [
+              {
+                aliasName: 'aliased-package',
+                originalName: 'original-package',
+                path: aliasPackagePath,
+              },
+            ],
+            projectRoot,
+          ),
+        },
+      },
+      'build',
+    );
+    const importEntry = await config.createResolver()('aliased-package', undefined);
+    const requireEntry = await config.createResolver({ isRequire: true })(
+      'aliased-package',
+      undefined,
+    );
+    expect(importEntry).toBe(join(await realpath(aliasPackagePath), 'entry.js'));
+    expect(requireEntry).toBe(join(await realpath(aliasPackagePath), 'entry.cjs'));
   });
 });

@@ -65,12 +65,12 @@ try {
   });
   writeFileSync(
     join(legacyDirectory, 'index.js'),
-    'import Vue from "vue"; export const runtimeVersion = Vue.version;',
+    'import Vue from "vue"; export const runtime = Vue; export const runtimeVersion = Vue.version;',
   );
   const entry = join(app, 'entry.js');
   writeFileSync(
     entry,
-    'export { runtimeVersion } from "legacy"; export { version as hostVersion } from "vue";',
+    'import { runtime } from "legacy"; import Vue from "vue2"; export { runtimeVersion } from "legacy"; export { version as hostVersion } from "vue"; export const shared = runtime === Vue;',
   );
   const plugin = () =>
     depsConflictResolverVitePlugin({
@@ -113,6 +113,79 @@ try {
   const ssr = await import(pathToFileURL(join(app, 'dist/entry.js')).href);
   assert.equal(ssr.runtimeVersion, legacyVersion);
   assert.equal(ssr.hostVersion, hostVersion);
+  assert.equal(ssr.shared, true);
+
+  const ssrDev = {};
+  for (const commonjs of [false, true]) {
+    // Exercise Node-style packages as well as ESM; noExternal alone does not
+    // transform CommonJS in the SSR development module runner.
+    json(join(legacyDirectory, 'package.json'), {
+      name: 'legacy',
+      version: '1.0.0',
+      type: commonjs ? 'commonjs' : 'module',
+      exports: './index.js',
+      peerDependencies: { vue: '^2.0.0' },
+    });
+    writeFileSync(
+      join(legacyDirectory, 'index.js'),
+      commonjs
+        ? 'const Vue = require("vue"); exports.runtime = Vue; exports.runtimeVersion = Vue.version;'
+        : 'import Vue from "vue"; export const runtime = Vue; export const runtimeVersion = Vue.version;',
+    );
+    const server = await vite.createServer({
+      root: app,
+      configFile: false,
+      logLevel: 'silent',
+      server: { middlewareMode: true, hmr: false },
+      plugins: [plugin()],
+      optimizeDeps: { force: true },
+      ssr: { optimizeDeps: { force: true } },
+    });
+    try {
+      const result = await server.ssrLoadModule('/entry.js');
+      const context = `Vite ${vite.version}, CommonJS=${commonjs}`;
+      assert.equal(result.runtimeVersion, legacyVersion, context + ': alias version');
+      assert.equal(result.hostVersion, hostVersion, context + ': host version');
+      if (Number.parseInt(vite.version, 10) >= 5 || !commonjs) {
+        assert.equal(result.shared, true, context + ': shared alias instance');
+      } else {
+        // Vite 4.0 resolves Vue 2's import/require branches to separate
+        // implementations even without this plugin. Compare with native Vite
+        // rather than asserting a stronger guarantee than that engine offers.
+        writeFileSync(
+          join(legacyDirectory, 'index.js'),
+          'const Vue = require("vue2"); exports.runtime = Vue; exports.runtimeVersion = Vue.version;',
+        );
+        const native = await vite.createServer({
+          root: app,
+          configFile: false,
+          logLevel: 'silent',
+          server: { middlewareMode: true, hmr: false },
+          ssr: {
+            noExternal: ['legacy', 'vue2'],
+            optimizeDeps: {
+              include: ['legacy', 'vue2'],
+              disabled: false,
+              force: true,
+            },
+          },
+        });
+        try {
+          const baseline = await native.ssrLoadModule('/entry.js');
+          assert.equal(result.shared, baseline.shared, context + ': native instance behavior');
+        } finally {
+          await native.close();
+        }
+      }
+      ssrDev[commonjs ? 'commonjs' : 'esm'] = {
+        host: result.hostVersion,
+        legacy: result.runtimeVersion,
+        shared: result.shared,
+      };
+    } finally {
+      await server.close();
+    }
+  }
   process.stdout.write(
     JSON.stringify(
       {
@@ -120,6 +193,7 @@ try {
         optimizer,
         dev: { host: host.version, legacy: legacy.runtimeVersion },
         ssr: { host: ssr.hostVersion, legacy: ssr.runtimeVersion },
+        ssrDev,
       },
       null,
       2,

@@ -108,7 +108,7 @@ jobs:
           path: dist/
       - name: Install isolated Vite version
         run: npm install --prefix "$RUNNER_TEMP/deps-vite" "vite@${{ matrix.vite-version }}" --ignore-scripts --no-audit --no-fund --package-lock=false
-      - name: Verify cold optimizer and SSR runtime identities
+      - name: Verify cold optimizer, SSR build and ESM/CommonJS SSR dev identities
         run: node tests/compat/vite.mjs "$RUNNER_TEMP/deps-vite"
 
   quality:

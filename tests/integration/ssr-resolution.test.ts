@@ -3,12 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { build, resolveConfig } from 'vite';
+import { build, createServer, resolveConfig } from 'vite';
 import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
 
 const roots: string[] = [];
 
-function fixture() {
+function fixture(commonjs = false) {
   const root = mkdtempSync(join(tmpdir(), 'deps-ssr-'));
   roots.push(root);
   writeFileSync(
@@ -20,13 +20,13 @@ function fixture() {
     }),
   );
   for (const [alias, name, version, code, peers] of [
-    ['vue', 'vue', '3.0.0', 'export const version = "3.0.0";', {}],
-    ['vue2', 'vue', '2.7.16', 'export const version = "2.7.16";', {}],
+    ['vue', 'vue', '3.0.0', 'export const version = "3.0.0"; export const token = {};', {}],
+    ['vue2', 'vue', '2.7.16', 'export const version = "2.7.16"; export const token = {};', {}],
     [
       'legacy',
       'legacy',
       '1.0.0',
-      'import { version } from "vue"; export const runtimeVersion = version;',
+      'import { version, token } from "vue"; export { token }; export const runtimeVersion = version;',
       { vue: '^2.0.0' },
     ],
   ] as const) {
@@ -37,15 +37,24 @@ function fixture() {
       JSON.stringify({
         name,
         version,
-        type: 'module',
+        type: commonjs ? 'commonjs' : 'module',
         exports: './index.js',
         peerDependencies: peers,
       }),
     );
-    writeFileSync(join(directory, 'index.js'), code);
+    const cjs =
+      alias === 'legacy'
+        ? 'const runtime = require("vue"); exports.runtimeVersion = runtime.version; exports.token = runtime.token;'
+        : `exports.version = ${JSON.stringify(version)}; exports.token = {};`;
+    writeFileSync(join(directory, 'index.js'), commonjs ? cjs : code);
   }
   const entry = join(root, 'entry.js');
-  writeFileSync(entry, 'export { runtimeVersion } from "legacy";');
+  writeFileSync(
+    entry,
+    commonjs
+      ? 'import legacy from "legacy"; import host from "vue"; import alias from "vue2"; export const runtimeVersion = legacy.runtimeVersion; export const hostVersion = host.version; export const shared = legacy.token === alias.token; export const isolated = legacy.token !== host.token;'
+      : 'import { token } from "legacy"; import { token as aliasToken } from "vue2"; import { token as hostToken } from "vue"; export { runtimeVersion } from "legacy"; export { version as hostVersion } from "vue"; export const shared = token === aliasToken; export const isolated = token !== hostToken;',
+  );
   return { root, entry };
 }
 
@@ -54,6 +63,36 @@ afterEach(() => {
 });
 
 describe('SSR alias resolution', () => {
+  it.each([false, true])(
+    'loads the correct runtime in SSR dev with CommonJS=%s',
+    async (commonjs) => {
+      const { root } = fixture(commonjs);
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        server: { middlewareMode: true, hmr: false },
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            offline: true,
+            strict: true,
+            ssr: 'auto',
+          }),
+        ],
+      });
+      try {
+        const result = await server.ssrLoadModule('/entry.js');
+        expect(result.runtimeVersion).toBe('2.7.16');
+        expect(result.hostVersion).toBe('3.0.0');
+        expect(result.shared).toBe(true);
+        expect(result.isolated).toBe(true);
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
   it('bundles the affected dependencies when SSR auto mode is enabled', async () => {
     const { root, entry } = fixture();
     await build({
@@ -97,5 +136,41 @@ describe('SSR alias resolution', () => {
       'build',
     );
     expect(config.ssr.noExternal).toBe(true);
+  });
+
+  it('merges existing SSR optimizer settings and plugins', async () => {
+    const { root } = fixture();
+    const config = await resolveConfig(
+      {
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        ssr: {
+          optimizeDeps: {
+            include: ['custom'],
+            esbuildOptions: {
+              define: { CUSTOM_FLAG: 'true' },
+              plugins: [{ name: 'custom-ssr-plugin', setup() {} }],
+            },
+          },
+        },
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            offline: true,
+            ssr: 'auto',
+          }),
+        ],
+      },
+      'serve',
+    );
+    expect(config.ssr.optimizeDeps.include).toEqual(
+      expect.arrayContaining(['custom', 'legacy', 'vue2']),
+    );
+    expect(config.ssr.optimizeDeps.esbuildOptions?.define).toEqual({ CUSTOM_FLAG: 'true' });
+    expect(config.ssr.optimizeDeps.esbuildOptions?.plugins?.map((plugin) => plugin.name)).toEqual([
+      'custom-ssr-plugin',
+      'deps-conflict-resolver-esbuild',
+    ]);
   });
 });
