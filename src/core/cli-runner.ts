@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { DepsConflictResolver } from './resolver';
+import { DepsConflictResolver, getResolverBuild } from './resolver';
 import { findPackagePath, findProjectRoot, readPackageJsonCached } from '../utils/fs';
 import { LogLevel, withLogLevel } from '../utils/logger';
 import { ResolutionError } from './resolution-error';
@@ -26,6 +26,7 @@ const HELP = [
   '  --strict                      Return exit code 1 for unresolved conditions',
   '  --json                        Emit a machine-readable report',
   '  --timings                     Include preparation durations and filesystem counts',
+  '  --write-plan                  Save a verified offline plan (prepare only)',
   '  --help                        Show this help',
   '',
 ].join('\n');
@@ -43,6 +44,7 @@ export async function runCli(
 ): Promise<number> {
   const json = argv.includes('--json');
   const timings = argv.includes('--timings');
+  const writePlan = argv.includes('--write-plan');
   try {
     if (argv.length === 0 || argv.includes('--help')) {
       output.stdout(HELP);
@@ -52,12 +54,13 @@ export async function runCli(
     if (command !== 'doctor' && command !== 'prepare') {
       throw new Error('Unknown command: ' + command + '\n' + HELP);
     }
+    if (writePlan && command !== 'prepare') throw new Error('--write-plan requires prepare');
     const overrides: Partial<DepsConflictResolverOptions> = {};
     let configFile: string | undefined;
     const packages: string[] = [];
     for (let index = 0; index < args.length; index++) {
       const arg = args[index]!;
-      if (arg === '--json' || arg === '--timings') continue;
+      if (arg === '--json' || arg === '--timings' || arg === '--write-plan') continue;
       if (arg === '--offline') {
         overrides.offline = true;
         continue;
@@ -122,6 +125,7 @@ export async function runCli(
       debug: false,
       strict: command === 'prepare' && strictMode,
       autoInstall: command === 'prepare',
+      preparedPlan: false,
     });
     let failure: ResolutionError['preparation'];
     try {
@@ -132,6 +136,18 @@ export async function runCli(
       failure = error.preparation;
     }
     const diagnostics = failure?.diagnostics ?? resolver.getDiagnostics();
+    let preparedPlan: string | undefined;
+    if (writePlan && !diagnostics.some(({ severity }) => severity === 'error')) {
+      try {
+        preparedPlan = await withLogLevel(LogLevel.SILENT, () =>
+          getResolverBuild(resolver).savePreparedPlan(),
+        );
+      } catch (error) {
+        throw new Error('Cannot save an offline dependency plan: ' + String(error), {
+          cause: error,
+        });
+      }
+    }
     const report = {
       schemaVersion: 1,
       command,
@@ -143,6 +159,7 @@ export async function runCli(
       diagnostics,
       installation: failure ? failure.installation : resolver.getInstallResult(),
       ...(timings && { timings: resolver.getTimings() }),
+      ...(preparedPlan && { preparedPlan }),
     };
     if (json) {
       output.stdout(JSON.stringify(report, null, 2) + '\n');
@@ -173,6 +190,7 @@ export async function runCli(
         output.stdout('  [' + diagnostic.code + '] ' + diagnostic.message + '\n');
       }
       if (report.timings) output.stdout(JSON.stringify(report.timings, null, 2) + '\n');
+      if (preparedPlan) output.stdout('Saved dependency plan to ' + preparedPlan + '\n');
     }
     return diagnostics.some((diagnostic) => diagnostic.severity === 'error') &&
       (strictMode || command === 'prepare')

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, promises, readFileSync, realpathSync, statSync } from 'node:fs';
 import { directPathMatches } from './dependency-input-paths';
+import { isAbsolute } from 'node:path';
 
 type Value = string | boolean | undefined;
 type Probe = (path: string) => Value;
@@ -37,6 +38,48 @@ export class DependencyInputs {
 
   get reusable(): boolean {
     return this.stable;
+  }
+
+  merge(other: DependencyInputs): void {
+    for (const [probe, values] of other.values) {
+      for (const [path, value] of values) this.add(probe, path, value);
+    }
+  }
+
+  serialize(): unknown {
+    if (!this.stable) return undefined;
+    return Object.entries(probes).flatMap(([name, probe]) => {
+      const values = this.values.get(probe);
+      return values ? [[name, [...values].map(([path, value]) => [path, value ?? null])]] : [];
+    });
+  }
+
+  static deserialize(data: unknown): DependencyInputs | undefined {
+    if (!Array.isArray(data) || data.length === 0) return undefined;
+    const inputs = new DependencyInputs();
+    const seen = new Set<string>();
+    let count = 0;
+    for (const group of data) {
+      if (!Array.isArray(group) || group.length !== 2) return undefined;
+      const [name, values] = group;
+      if (typeof name !== 'string' || !Object.hasOwn(probes, name) || seen.has(name))
+        return undefined;
+      if (!Array.isArray(values)) return undefined;
+      seen.add(name);
+      const probe = probes[name as keyof typeof probes];
+      for (const entry of values) {
+        if (!Array.isArray(entry) || entry.length !== 2 || ++count > MAX_INPUTS) return undefined;
+        const [path, value] = entry;
+        if (
+          typeof path !== 'string' ||
+          !isAbsolute(path) ||
+          !(value === null || typeof value === 'string' || typeof value === 'boolean')
+        )
+          return undefined;
+        inputs.add(probe, path, value ?? undefined);
+      }
+    }
+    return count > 0 && inputs.reusable ? inputs : undefined;
   }
 
   includes(path: string): boolean {
@@ -215,3 +258,15 @@ export function observeLockfile(path: string): boolean {
     return false;
   }
 }
+
+const probes = {
+  exists: existsSync,
+  lookupDirectory: isLookupDirectory,
+  lookupManifest: isLookupManifest,
+  realpath: realPath,
+  textHash: hashFile,
+  regularFileHash: hashRegularFile,
+  file: isFile,
+  regularFile: isRegularFile,
+  metadata: fileMetadata,
+};

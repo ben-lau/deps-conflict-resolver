@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { runCli } from '../../src/core/cli-runner';
@@ -118,6 +118,84 @@ describe('doctor and prepare commands', () => {
     });
     expect(JSON.parse(stdout).timings.counts.lookupProbes).toBeGreaterThan(0);
     expect(JSON.parse(stdout).timings.counts.manifestReads).toBeGreaterThan(0);
+  });
+
+  async function writePlan(dependency = 'legacy'): Promise<string> {
+    const code = await runCli(
+      ['prepare', dependency, '--root', root, '--strict', '--offline', '--write-plan', '--json'],
+      output,
+    );
+    expect(code, stdout).toBe(0);
+    return (JSON.parse(stdout) as { preparedPlan: string }).preparedPlan;
+  }
+
+  it('uses the persisted plan without analysis, network, or installation and verifies provider links', async () => {
+    const first = join(root, 'first-vue2');
+    const second = join(root, 'second-vue2');
+    const providerLink = join(root, 'node_modules/vue2');
+    for (const directory of [first, second]) {
+      mkdirSync(directory);
+      writeFileSync(
+        join(directory, 'package.json'),
+        JSON.stringify({ name: 'vue', version: '2.7.16' }),
+      );
+    }
+    symlinkSync(first, providerLink, 'junction');
+    await writePlan();
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const start = () =>
+      createResolver({
+        projectRoot: root,
+        dependencies: ['legacy'],
+        strict: true,
+        preparedPlan: true,
+      });
+    const hit = await start();
+    expect(hit.getAliasPathMappings()[0]?.path).toMatch(/[/\\]first-vue2$/);
+    expect(hit.getTimings().counts).toMatchObject({
+      analysisPasses: 0,
+      planHits: 1,
+      registryRequests: 0,
+    });
+    expect(hit.getInstallResult()).toBeNull();
+
+    rmSync(providerLink);
+    symlinkSync(second, providerLink, 'junction');
+    const changed = await start();
+    expect(changed.getAliasPathMappings()[0]?.path).toMatch(/[/\\]second-vue2$/);
+    expect(changed.getTimings().counts).toMatchObject({
+      analysisPasses: 1,
+      planMisses: 1,
+      registryRequests: 0,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('invalidates an empty plan when a previously absent dependency appears', async () => {
+    writeFileSync(
+      join(root, 'node_modules/legacy/package.json'),
+      JSON.stringify({ name: 'legacy', version: '1.0.0', dependencies: { child: '1.0.0' } }),
+    );
+    const file = await writePlan();
+    const start = () =>
+      createResolver({ projectRoot: root, dependencies: ['legacy'], preparedPlan: true });
+    const hit = await start();
+    expect(hit.getAliasPathMappings()).toEqual([]);
+    expect(hit.getTimings().counts.analysisPasses).toBe(0);
+
+    const child = join(root, 'node_modules/child');
+    mkdirSync(child);
+    writeFileSync(
+      join(child, 'package.json'),
+      JSON.stringify({ name: 'child', version: '1.0.0', peerDependencies: { vue: '^2' } }),
+    );
+    const changed = await start();
+    expect(changed.getTimings().counts.planMisses).toBe(1);
+    expect(changed.getDiagnostics()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'TRANSITIVE_PEER_CONFLICT' })]),
+    );
+    writeFileSync(file, '{"payload":"corrupt"}');
+    expect((await start()).getTimings().counts.analysisPasses).toBe(1);
   });
 
   it.each([

@@ -45,6 +45,9 @@ export interface DepsConflictResolverOptions {
   /** Never query a registry or run installation; only verified installed aliases are usable. */
   offline?: boolean;
 
+  /** Try the local plan from `prepare --write-plan`. Always prepare offline in this mode. */
+  preparedPlan?: boolean;
+
   /** Fail when required peers, aliases, or resolution contexts remain unresolved. */
   strict?: boolean;
 
@@ -87,9 +90,10 @@ export interface DepsConflictResolverOptions {
  * 注意：packageManager 和 registry 在解析后会是具体的值，不会是 'auto'
  */
 export interface ResolvedOptions extends Required<
-  Omit<DepsConflictResolverOptions, 'offline' | 'strict' | 'peerOverrides'>
+  Omit<DepsConflictResolverOptions, 'offline' | 'preparedPlan' | 'strict' | 'peerOverrides'>
 > {
   offline?: boolean;
+  preparedPlan?: boolean;
   strict?: boolean;
   peerOverrides?: Record<string, Record<string, string>>;
   /** Explicit registry to pass to installation. Auto-detection is for metadata lookup. */

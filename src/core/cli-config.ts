@@ -28,6 +28,7 @@ const validators = {
     typeof value === 'string' && ['auto', 'npm', 'pnpm', 'yarn'].includes(value),
   autoInstall: (value) => typeof value === 'boolean',
   offline: (value) => typeof value === 'boolean',
+  preparedPlan: (value) => typeof value === 'boolean',
   strict: (value) => typeof value === 'boolean',
   debug: (value) => typeof value === 'boolean',
 } satisfies Record<keyof DepsConflictResolverOptions, (value: unknown) => boolean>;

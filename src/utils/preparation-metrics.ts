@@ -8,6 +8,7 @@ export interface PreparationTimings {
     registry: number;
     install: number;
     verify: number;
+    planValidation: number;
   };
   counts: {
     analysisPasses: number;
@@ -15,6 +16,8 @@ export interface PreparationTimings {
     manifestReads: number;
     lookupProbes: number;
     realpaths: number;
+    planHits: number;
+    planMisses: number;
   };
 }
 
@@ -29,6 +32,7 @@ export class PreparationMetrics {
     registry: 0,
     install: 0,
     verify: 0,
+    planValidation: 0,
   };
   readonly counts: PreparationTimings['counts'] = {
     analysisPasses: 0,
@@ -36,6 +40,8 @@ export class PreparationMetrics {
     manifestReads: 0,
     lookupProbes: 0,
     realpaths: 0,
+    planHits: 0,
+    planMisses: 0,
   };
 
   measure<T>(phase: Phase, task: () => T): T {
@@ -58,5 +64,12 @@ export class PreparationMetrics {
 
   snapshot(): PreparationTimings {
     return { milliseconds: { ...this.milliseconds }, counts: { ...this.counts } };
+  }
+
+  add(other: PreparationMetrics): void {
+    for (const phase of Object.keys(other.milliseconds) as Phase[])
+      this.milliseconds[phase] += other.milliseconds[phase];
+    for (const count of Object.keys(other.counts) as Array<keyof PreparationTimings['counts']>)
+      this.counts[count] += other.counts[count];
   }
 }

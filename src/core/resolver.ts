@@ -46,6 +46,7 @@ import {
 } from './project-preparation';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { PreparationMetrics, type PreparationTimings } from '../utils/preparation-metrics';
+import { preparedPlanLocation, readPreparedPlan, writePreparedPlan } from './prepared-plan';
 
 const logger = createLogger('resolver');
 
@@ -72,6 +73,8 @@ interface WatchCapture {
   key?: string;
   inputs?: DependencyInputs;
   recoveryFiles?: readonly string[];
+  savePlan?: boolean;
+  planFile?: string;
 }
 
 interface AnalysisSnapshot {
@@ -89,6 +92,7 @@ export interface ModuleRedirect {
 interface ResolverBuild {
   redirect(request: string, importer?: string): ModuleRedirect | null;
   guardGeneration(): () => void;
+  savePreparedPlan(): Promise<string>;
   assertWatchCanWait(): void;
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
@@ -190,6 +194,7 @@ export class DepsConflictResolver {
     builds.set(this, {
       redirect: (request, importer) => this.redirect(request, importer),
       guardGeneration: () => this.guardGeneration(),
+      savePreparedPlan: () => this.savePreparedPlan(),
       assertWatchCanWait: () => this.assertWatchCanWait(),
       refreshForWatch: (changes) => this.refreshForWatch(changes),
       closeWatch: () => {
@@ -221,7 +226,7 @@ export class DepsConflictResolver {
       registry: configuredRegistry,
       peerOverrides,
     } = userOptions;
-    const offline = userOptions.offline ?? false;
+    const offline = userOptions.offline === true || userOptions.preparedPlan === true;
     // 创建环境检测器
     this.environmentDetector = createEnvironmentDetector(projectRoot);
 
@@ -256,6 +261,7 @@ export class DepsConflictResolver {
       ...(configuredRegistry && { registryOverride: configuredRegistry }),
       autoInstall: offline ? false : (userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall),
       offline,
+      ...(userOptions.preparedPlan && { preparedPlan: true }),
       strict: userOptions.strict ?? false,
       debug: userOptions.debug ?? DEFAULT_OPTIONS.debug,
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
@@ -557,13 +563,15 @@ export class DepsConflictResolver {
   ): Promise<void> {
     try {
       const registryClient = new NpmRegistryClient(this.metrics);
+      const cached = this.hooks.onAnalysisComplete ? undefined : this.loadPreparedPlan();
       this.analysisResult =
-        candidate &&
+        cached ??
+        (candidate &&
         candidate.revision === this.preparation?.revision &&
         candidate.key === inputKey(this.options) &&
         candidate.inputs.matches()
           ? candidate.result
-          : await this.analyzeCurrent({ clearCache: false, registryClient });
+          : await this.analyzeCurrent({ clearCache: false, registryClient }));
       this.assertResolved();
       if (!this.options.autoInstall) {
         this.publishWithoutInstallation();
@@ -580,6 +588,14 @@ export class DepsConflictResolver {
       this.observeSnapshot();
       if (watch) {
         this.recordWatchFiles();
+        if (watch.savePlan) {
+          this.assertResolved();
+          const file = preparedPlanLocation(this.options, this.preparation!.owner);
+          if (!file || !watch.inputs?.matches())
+            throw new Error('Could not record a stable dependency plan for the installed project');
+          await writePreparedPlan(file, { analysis: this.analysisResult, inputs: watch.inputs });
+          watch.planFile = file;
+        }
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
           this.watchSnapshot = {
             result: this.analysisResult,
@@ -591,6 +607,44 @@ export class DepsConflictResolver {
       }
     } finally {
       clearPackageJsonCache();
+    }
+  }
+
+  private loadPreparedPlan(): AnalysisResult | undefined {
+    if (!this.options.preparedPlan) return undefined;
+    const file = preparedPlanLocation(this.options, this.preparation!.owner);
+    const plan = file
+      ? this.metrics.measure('planValidation', () => readPreparedPlan(file))
+      : undefined;
+    if (!plan) {
+      this.metrics.counts.planMisses++;
+      logger.info(
+        'No current dependency plan. Running offline analysis. Run prepare --write-plan to refresh it.',
+      );
+      return undefined;
+    }
+    this.metrics.counts.planHits++;
+    currentDependencyInputs()?.merge(plan.inputs);
+    return plan.analysis;
+  }
+
+  private async savePreparedPlan(): Promise<string> {
+    if (!this.initialized)
+      throw new Error('Initialize the resolver before saving a dependency plan');
+    const verifier = new DepsConflictResolver({
+      ...this.userOptions,
+      projectRoot: this.options.projectRoot,
+      offline: true,
+      autoInstall: false,
+      strict: true,
+      preparedPlan: false,
+    });
+    const watch: WatchCapture = { inputs: new DependencyInputs(), savePlan: true };
+    try {
+      await verifier.initializePreparation(watch);
+      return watch.planFile!;
+    } finally {
+      this.metrics.add(verifier.metrics);
     }
   }
 
