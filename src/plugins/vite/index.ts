@@ -293,8 +293,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       if (resolved) {
         logger.debug(`Redirecting ${source} -> ${resolved} (from ${importer ?? 'entry'})`);
 
-        // 返回解析后的模块 ID，让 Vite 继续解析
-        return this.resolve(resolved, importer, {
+        // Active aliases were verified from the host. A linked importer may
+        // live outside that host's node_modules resolution ancestry.
+        return this.resolve(resolved, join(resolver.getOptions().projectRoot, 'package.json'), {
           ...resolveOptions,
           skipSelf: true,
         }).then((result) => {
