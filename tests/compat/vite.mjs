@@ -570,7 +570,7 @@ try {
     ['vue', '3.0.0'],
     ['vue2', '2.7.16'],
   ]) {
-    const directory = join(watchRoot, 'node_modules', request);
+    const directory = join(watchRoot, request + '-provider');
     json(join(directory, 'package.json'), {
       name: 'vue',
       version,
@@ -578,6 +578,7 @@ try {
       main: 'index.js',
     });
     writeFileSync(join(directory, 'index.js'), 'export const version = ' + JSON.stringify(version));
+    link(directory, join(watchRoot, 'node_modules', request));
   }
   const watchManifest = join(watchRoot, 'linked/package.json');
   const peer = (range) =>
@@ -651,10 +652,13 @@ try {
   ]) {
     peer(range);
     const slot = join(watchRoot, 'node_modules', name);
-    const backup = join(watchRoot, 'previous-' + name);
-    renameSync(slot, backup);
-    const original = realpathSync(backup);
-    link(original, slot);
+    const original = realpathSync(slot);
+    const replaceLink = (target) => {
+      const replacement = join(watchRoot, 'node_modules/provider-replacement');
+      link(target, replacement);
+      if (process.platform === 'win32') rmSync(slot);
+      renameSync(replacement, slot);
+    };
     const newProvider = join(watchRoot, 'replacement-' + name);
     cpSync(original, newProvider, { recursive: true });
     writeFileSync(
@@ -694,10 +698,7 @@ try {
               assert.equal(version, previous);
               edit ??= setTimeout(() => {
                 try {
-                  const replacement = join(watchRoot, 'node_modules/provider-replacement');
-                  link(newProvider, replacement);
-                  if (process.platform === 'win32') rmSync(slot);
-                  renameSync(replacement, slot);
+                  replaceLink(newProvider);
                 } catch (error) {
                   reject(error);
                 }
@@ -713,8 +714,7 @@ try {
       clearTimeout(timeout);
       clearTimeout(edit);
       await replacing.close();
-      rmSync(slot);
-      renameSync(backup, slot);
+      replaceLink(original);
     }
   }
   process.stdout.write(
