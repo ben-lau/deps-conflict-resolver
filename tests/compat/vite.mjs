@@ -208,7 +208,8 @@ try {
     }
   }
   let mixedSsrConfig;
-  if (Number.parseInt(vite.version, 10) >= 6) {
+  let nestedSsrExternal;
+  if (Number.parseInt(vite.version, 10) >= 5) {
     const server = await vite.createServer({
       root: app,
       configFile: false,
@@ -218,7 +219,7 @@ try {
       ssr: {
         external: true,
         noExternal: ['legacy', 'vue2'],
-        optimizeDeps: { exclude: ['native-addon'], force: true },
+        optimizeDeps: { force: true },
       },
       environments: { ssr: { resolve: { noExternal: ['other-internal'] } } },
     });
@@ -237,6 +238,48 @@ try {
     } finally {
       await server.close();
     }
+    const nested = join(legacyDirectory, 'node_modules/nested-native-addon');
+    json(join(nested, 'package.json'), {
+      name: 'nested-native-addon',
+      version: '1.0.0',
+      type: 'module',
+      exports: { '.': { import: './entry.mjs' } },
+    });
+    writeFileSync(
+      join(nested, 'entry.mjs'),
+      'export default { ready: true }; export const load = () => import("./binding.node");',
+    );
+    writeFileSync(join(nested, 'binding.node'), '');
+    json(join(legacyDirectory, 'package.json'), {
+      name: 'legacy',
+      version: '1.0.0',
+      type: 'module',
+      exports: './index.js',
+      peerDependencies: { vue: '^2.0.0' },
+      dependencies: { 'nested-native-addon': '1.0.0' },
+    });
+    writeFileSync(
+      join(legacyDirectory, 'index.js'),
+      'import Vue from "vue"; import native from "nested-native-addon"; export const runtime = Vue; export const runtimeVersion = Vue.version; export const nativeReady = native.ready;',
+    );
+    const esmServer = await vite.createServer({
+      root: app,
+      configFile: false,
+      logLevel: 'silent',
+      server: { middlewareMode: true, hmr: false },
+      plugins: [plugin()],
+      ssr: { external: true, noExternal: ['legacy', 'vue2'], optimizeDeps: { force: true } },
+    });
+    try {
+      const result = await esmServer.ssrLoadModule('/entry.js');
+      assert.equal(result.runtimeVersion, legacyVersion);
+      assert.equal(result.hostVersion, hostVersion);
+      assert.equal(result.shared, true);
+      assert.equal(result.nativeReady, true);
+      nestedSsrExternal = { shared: result.shared, nativeReady: result.nativeReady };
+    } finally {
+      await esmServer.close();
+    }
   }
   process.stdout.write(
     JSON.stringify(
@@ -247,6 +290,7 @@ try {
         ssr: { host: ssr.hostVersion, legacy: ssr.runtimeVersion },
         ssrDev,
         mixedSsrConfig,
+        nestedSsrExternal,
       },
       null,
       2,
