@@ -1344,7 +1344,6 @@ export class DependencyAnalyzer {
 
     // 2. 查找 workspace 级别的别名
     const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
-    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
 
     if (workspaceAliases.length > 0) {
       logger.debug(`  Checking ${workspaceAliases.length} workspace alias(es)...`);
@@ -1357,64 +1356,24 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      // 尝试从 workspace 根目录获取已安装版本（pnpm 模式下依赖安装在根目录）
-      let installedVersion: string | null = null;
-      let installedPath: string | undefined;
-
-      if (workspaceRoot) {
-        const { packagePath, pkgJson } = this.resolvePackageJson(wsAlias.aliasName, workspaceRoot);
-        if (packagePath) {
-          if (pkgJson?.name !== packageName) {
-            logger.debug(
-              `    Skip ${wsAlias.aliasName}: installed package name ${pkgJson?.name ?? 'unknown'} does not match ${packageName}`,
-            );
-            continue;
-          }
-          installedVersion = pkgJson?.version ?? null;
-          installedPath = packagePath;
-          logger.debug(
-            `    Found ${wsAlias.aliasName} installed at workspace root: ${installedVersion}`,
-          );
-        }
+      // Workspace declarations supply candidate names. Verify the installation
+      // visible from the same host origin used by runtime alias resolution.
+      const { packagePath, pkgJson } = this.resolvePackageJson(
+        wsAlias.aliasName,
+        this.options.projectRoot,
+      );
+      if (!packagePath || pkgJson?.name !== packageName || !pkgJson.version) continue;
+      const installedVersion = pkgJson.version;
+      if (ranges.every((range) => satisfies(installedVersion, range))) {
+        logger.info(`    Reusing workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
+        return {
+          name: wsAlias.aliasName,
+          version: installedVersion,
+          isWorkspaceAlias: true,
+          installedPath: packagePath,
+          scope: 'workspace',
+        };
       }
-
-      // 如果找不到，尝试从当前项目查找（可能是 hoisted 或软链接）
-      if (!installedVersion) {
-        installedVersion = this.getAliasInstalledVersion(wsAlias.aliasName);
-        if (installedVersion) {
-          const installedAlias = this.installedPackageCache.get(wsAlias.aliasName);
-          installedPath = installedAlias?.path;
-          if (installedAlias?.realName !== packageName) {
-            logger.debug(
-              `    Skip ${wsAlias.aliasName}: installed package name ${installedAlias?.realName ?? 'unknown'} does not match ${packageName}`,
-            );
-            continue;
-          }
-          logger.debug(`    Found ${wsAlias.aliasName} installed at project: ${installedVersion}`);
-        }
-      }
-
-      // 如果已安装，用实际版本检查
-      if (installedVersion) {
-        const allSatisfied = ranges.every((range) => satisfies(installedVersion, range));
-        if (allSatisfied) {
-          logger.info(`    Reusing workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
-          return {
-            name: wsAlias.aliasName,
-            version: installedVersion,
-            isWorkspaceAlias: true,
-            installedPath,
-            scope: 'workspace',
-          };
-        } else {
-          logger.debug(
-            `    Skip ${wsAlias.aliasName}@${installedVersion}: version doesn't satisfy all ranges`,
-          );
-        }
-        continue;
-      }
-
-      // 仅已安装的 workspace alias 可复用；声明但尚未安装的 alias 仍需解析远程版本。
     }
 
     logger.debug(`  No existing alias found for ${packageName}`);

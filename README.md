@@ -186,7 +186,7 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason 可以表示已重定向、被排除、没有匹配、未初始化或多版本歧义；它也会说明 beforeResolve 钩子是否接管请求。诊断使用稳定的 code，无需解析日志。严格初始化失败时可以捕获导出的 ResolutionError 并读取 diagnostics。
 
-需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。并发的 installDependencies() 会共享同一次安装；安装未结束时 invalidate() 会抛错，应先等待安装完成。包管理器退出后会重新校验包括复用项在内的 alias，失配项不会继续发布为有效映射。
+需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。并发的 installDependencies() 会共享同一次安装；安装未结束时 invalidate() 会抛错，应先等待安装完成。新一轮初始化会在首次读取前刷新本库的 IO 缓存。包管理器退出后会按当前可见的安装目录和软链接目标重新校验包括复用项在内的 alias，失配项不会继续发布为有效映射。
 
 ### 兼容性与验证
 
@@ -194,7 +194,7 @@ explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason �
 - Vite 4.0 的原生 SSR 预构建在混用 Vue 2 的 ESM / CommonJS 入口时会产生独立实例，插件也受此限制；此场景建议使用 Vite 5 或更新版本。包的条件导出由 Vite 解析，插件不强制合并本来就不同的导出入口。
 - Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
 - 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
-- workspace 根目录通过 dependencies、devDependencies 或 optionalDependencies 声明的 alias 均可离线复用，前提是实际安装的包名正确、版本满足目标 peer。
+- workspace 根目录通过 dependencies、devDependencies 或 optionalDependencies 声明的 alias 均可离线复用，前提是从宿主实际可见的安装包名正确、版本满足目标 peer。本地同名目录遮蔽根 alias 时，按本地实际身份与版本判断，不直接复用被遮蔽的根安装。
 - workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。
 - 同一个 alias 被多个消费方共享时，会检查各方的有效 peer provider，包含使用宿主版本的消费方及 include/exclude 覆盖。provider 不一致会报告 AMBIGUOUS_IMPORTER，strict=true 时拒绝初始化；不声明该 peer 的消费方不会被误判为冲突。
 - 普通共享包若声明了相关 peer，且配置入口为同一物理实例带来不同的有效 provider，会产生 SHARED_PEER_CONTEXT 告警。它只检查已配置入口可达的安装图，尊重显式 include/exclude；不扫描图外消费者，也不自动复制包。宽泛的 peer 范围不能证明业务一定出错，因此该告警不会使 strict=true 初始化失败；需要跨运行时共享的包应明确配置解析范围，或隔离安装实例。
