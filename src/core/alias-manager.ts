@@ -6,7 +6,7 @@ import type {
   ResolutionExplanation,
   ResolverDiagnostic,
 } from '../types/index';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { join, posix } from 'path';
 import { createLogger } from '../utils/logger';
 import { findPackagePath, readPackageJsonCached } from '../utils/fs';
@@ -59,8 +59,7 @@ const NO_IMPORTER: Decision = { reason: 'no-importer', aliases: [], matchedPaths
 const UNMATCHED: Decision = { reason: 'unmatched', aliases: [], matchedPaths: [] };
 
 function normalizePath(path: string): string {
-  const clean = path.split(/[?#]/, 1)[0] ?? path;
-  const normalized = posix.normalize(clean.replace(/\\/g, '/'));
+  const normalized = posix.normalize(path.replace(/\\/g, '/'));
   return normalized.length <= 1 ? normalized : normalized.replace(/\/+$/, '');
 }
 
@@ -148,24 +147,44 @@ export class AliasManager {
     this.diagnostics.clear();
   }
 
-  private pathCandidates(path: string): string[] {
-    const cached = this.pathCache.get(path);
+  private pathCandidates(path: string, moduleId = false): string[] {
+    const cacheKey = (moduleId ? 'id\0' : 'path\0') + path;
+    const cached = this.pathCache.get(cacheKey);
     if (cached) return cached;
-    const paths = new Set([normalizePath(path)]);
+    let literalPath = path;
+    let realPath: string | undefined;
     try {
-      paths.add(normalizePath(realpathSync(path.split(/[?#]/, 1)[0] ?? path)));
+      realPath = realpathSync(path);
     } catch {
-      // Nonexistent/virtual importers retain their lexical path.
+      // Physical directory paths are literal. For module IDs, recognize a
+      // suffix only after a real file, preserving '#' and '?' in directories
+      // and filenames. Longest prefixes handle multiple query/hash markers.
+      if (moduleId) {
+        const markers = [...path.matchAll(/[?#]/g)];
+        for (let index = markers.length - 1; index >= 0; index--) {
+          const candidate = path.slice(0, markers[index]!.index);
+          try {
+            if (!statSync(candidate).isFile()) continue;
+            realPath = realpathSync(candidate);
+            literalPath = candidate;
+            break;
+          } catch {
+            // Nonexistent/virtual importers retain their lexical path.
+          }
+        }
+      }
     }
+    const paths = new Set([normalizePath(literalPath)]);
+    if (realPath) paths.add(normalizePath(realPath));
     const candidates = [...paths];
-    this.pathCache.set(path, candidates);
+    this.pathCache.set(cacheKey, candidates);
     return candidates;
   }
 
   private importerInfo(importer: string): ImporterInfo {
     const cached = this.importerCache.get(importer);
     if (cached) return cached;
-    const paths = this.pathCandidates(importer);
+    const paths = this.pathCandidates(importer, true);
     const instances = paths.flatMap(packageInstances);
     if (instances.length === 0) {
       // Workspace sources have no node_modules segment. Find their owner
