@@ -748,6 +748,123 @@ describe('resolution correctness with installed packages', () => {
     expect(mapping?.allDependents).not.toContain('modern-helper');
   });
 
+  it('preserves all workspace entry paths sharing a hoisted physical package for Vite SSR and uses shortest BFS paths', async () => {
+    const workspace = project({
+      name: 'ws-hoisted-shared-root',
+      workspaces: ['packages/*'],
+    });
+    const app = join(workspace, 'packages', 'app');
+    const wsA = join(workspace, 'packages', 'ws-a');
+    const wsB = join(workspace, 'packages', 'ws-b');
+    mkdirSync(join(app, 'node_modules'), { recursive: true });
+    mkdirSync(join(wsA, 'node_modules'), { recursive: true });
+    mkdirSync(join(wsB, 'node_modules'), { recursive: true });
+
+    writeFileSync(
+      join(app, 'package.json'),
+      JSON.stringify({
+        name: 'app',
+        version: '1.0.0',
+        dependencies: {
+          legacy: '1.0.0',
+          // Put ws-a before ws-b to verify BFS picks shortest path ws-b>legacy over ws-a>ws-b>legacy
+          'ws-a': 'workspace:*',
+          'ws-b': 'workspace:*',
+          vue: '3.5.0',
+          vue2: 'npm:vue@2.6.14',
+        },
+      }),
+    );
+    writeFileSync(
+      join(wsA, 'package.json'),
+      JSON.stringify({
+        name: 'ws-a',
+        version: '1.0.0',
+        dependencies: { 'ws-b': 'workspace:*' },
+      }),
+    );
+    writeFileSync(
+      join(wsB, 'package.json'),
+      JSON.stringify({
+        name: 'ws-b',
+        version: '1.0.0',
+        dependencies: { legacy: '1.0.0' },
+      }),
+    );
+
+    // Single hoisted physical directory shared by app and ws-b
+    pkg(workspace, 'legacy', { peerDependencies: { vue: '^2.6.0' } });
+    pkg(workspace, 'vue', { version: '3.5.0' });
+    pkg(workspace, 'vue2', { name: 'vue', version: '2.6.14' });
+    symlinkSync(
+      wsA,
+      join(app, 'node_modules', 'ws-a'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    symlinkSync(
+      wsB,
+      join(app, 'node_modules', 'ws-b'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    symlinkSync(
+      wsB,
+      join(wsA, 'node_modules', 'ws-b'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const resolver = await createResolver({
+      ...baseOptions(app, ['legacy']),
+      offline: true,
+      strict: true,
+    });
+    const usedBy = resolver.getAnalysisResult()?.aliasMappings[0]?.usedBy ?? [];
+    expect(usedBy).toContain('legacy');
+    expect(usedBy).toContain('ws-b>legacy');
+    expect(usedBy).not.toContain('ws-a>ws-b>legacy');
+
+    const ssrConfig = await resolveConfig(
+      {
+        root: app,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            ssr: 'auto',
+            offline: true,
+            strict: true,
+          }),
+        ],
+      },
+      'serve',
+    );
+    expect(ssrConfig.ssr.noExternal).toEqual(expect.arrayContaining(['ws-b', 'legacy', 'vue2']));
+    expect(ssrConfig.ssr.optimizeDeps?.include).toEqual(
+      expect.arrayContaining(['legacy', 'ws-b > legacy', 'vue2']),
+    );
+
+    // When ssr.external=true and only the bridge package ws-b is in noExternal,
+    // the external target leaf "legacy" must not be forced into ssr.optimizeDeps.include.
+    const externalLeafConfig = await resolveConfig(
+      {
+        root: app,
+        configFile: false,
+        logLevel: 'silent',
+        ssr: { external: true, noExternal: ['ws-b'] },
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            ssr: 'auto',
+            offline: true,
+            strict: true,
+          }),
+        ],
+      },
+      'serve',
+    );
+    expect(externalLeafConfig.ssr.optimizeDeps?.include).not.toContain('ws-b > legacy');
+  });
+
   it('uses the selected alias manifest for peer closure instead of the host manifest', async () => {
     const root = project({
       dependencies: {

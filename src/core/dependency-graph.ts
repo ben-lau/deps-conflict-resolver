@@ -16,8 +16,8 @@ export interface InstalledPackageNode {
 export interface InstalledDependencyGraph {
   nodes: Map<string, InstalledPackageNode>;
   roots: string[];
-  /** Configured name -> physical package directory -> dependency path from the host. */
-  rootRequests: Map<string, Map<string, string[]>>;
+  /** Configured name -> physical package directory -> reachable dependency paths from the host. */
+  rootRequests: Map<string, Map<string, string[][]>>;
 }
 
 interface PackageRequest {
@@ -47,8 +47,8 @@ function findRootRequests(
     { directory: canonicalPath(projectRoot), path: [] },
   ];
   const visited = new Set<string>();
-  while (pending.length > 0) {
-    const { directory, path } = pending.pop()!;
+  for (let index = 0; index < pending.length; index++) {
+    const { directory, path } = pending[index]!;
     if (visited.has(directory)) continue;
     visited.add(directory);
     watchFiles?.add(join(directory, 'package.json'));
@@ -93,7 +93,7 @@ export function buildInstalledDependencyGraph(
 ): InstalledDependencyGraph {
   const nodes = new Map<string, InstalledPackageNode>();
   const roots = new Set<string>();
-  const rootRequests = new Map<string, Map<string, string[]>>();
+  const rootRequests = new Map<string, Map<string, string[][]>>();
   const requests = findRootRequests(packageNames, projectRoot, workspaceRoot, watchFiles);
   const stack: PackageRequest[] = [];
   for (let index = requests.length - 1; index >= 0; index--) stack.push(requests[index]!);
@@ -111,8 +111,13 @@ export function buildInstalledDependencyGraph(
     if (!existingNode && !packageJson) continue;
     if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);
     if (item.rootPath) {
-      const instances = rootRequests.get(item.name) ?? new Map<string, string[]>();
-      if (!instances.has(normalizedPath)) instances.set(normalizedPath, item.rootPath);
+      const instances = rootRequests.get(item.name) ?? new Map<string, string[][]>();
+      const paths = instances.get(normalizedPath) ?? [];
+      const serialized = item.rootPath.join('\0');
+      if (!paths.some((existing) => existing.join('\0') === serialized)) {
+        paths.push(item.rootPath);
+      }
+      instances.set(normalizedPath, paths);
       rootRequests.set(item.name, instances);
       roots.add(normalizedPath);
       if (existingNode) existingNode.parentId = null;

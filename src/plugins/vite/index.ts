@@ -196,8 +196,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           : () => false;
     const allowsSsrOptimization = (name: string) => {
       const segments = name.split(' > ');
+      const target = segments.at(-1) ?? name;
       return (
-        (external !== true || segments.some((segment) => keepsInternal(segment))) &&
+        (external !== true || keepsInternal(target)) &&
         !segments.some((segment) =>
           ssrExcluded.some(
             (excluded) => segment === excluded || segment.startsWith(excluded + '/'),

@@ -659,9 +659,12 @@ export class DependencyAnalyzer {
 
     if (this.dependencyGraph?.roots.length) {
       for (const instances of this.dependencyGraph.rootRequests.values()) {
-        for (const [packagePath, path] of instances) {
+        for (const [packagePath, paths] of instances) {
           const manifest = readPackageJsonCached(packagePath);
-          if (manifest) collectPeers(manifest, path, packagePath);
+          if (!manifest) continue;
+          for (const path of paths) {
+            collectPeers(manifest, path, packagePath);
+          }
         }
       }
     } else {
