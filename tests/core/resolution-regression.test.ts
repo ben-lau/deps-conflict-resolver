@@ -277,28 +277,37 @@ describe('diagnostics and deterministic offline operation', () => {
     },
   );
 
-  it('keeps both configured names when roots share one physical package', async () => {
+  it('resolves alias-specific peers in either order for roots sharing one physical package', async () => {
     const root = project({
       dependencies: {
         a: 'npm:legacy@1.0.0',
         b: 'npm:legacy@1.0.0',
+        helper: '1.0.0',
         vue: '3.5.0',
         vue2: 'npm:vue@2.7.16',
       },
     });
     const physical = pkg(root, 'legacy-store', { name: 'legacy', peerDependencies: { vue: '^2' } });
+    const helper = pkg(root, 'helper', {});
     pkg(root, 'vue', { version: '3.5.0' });
     pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
     for (const name of ['a', 'b'])
       symlinkSync(physical, join(root, 'node_modules', name), 'junction');
-    const resolver = await createResolver({
-      ...baseOptions(root, ['a', 'b']),
-      offline: true,
-      strict: true,
-    });
-    expect(resolver.getDiagnostics()).toEqual([]);
-    expect(resolver.getAnalysisResult()!.aliasMappings[0]!.usedBy).toEqual(['a', 'b']);
-    expect(resolver.resolveModule('vue', join(physical, 'index.js'))).toBe('vue2');
+    for (const dependencies of [
+      ['a', 'b'],
+      ['b', 'a'],
+    ]) {
+      const resolver = await createResolver({
+        ...baseOptions(root, dependencies),
+        peerOverrides: { b: { helper: '^1' } },
+        offline: true,
+        strict: true,
+      });
+      expect(resolver.getDiagnostics()).toEqual([]);
+      expect(resolver.getAnalysisResult()!.aliasMappings[0]!.usedBy).toEqual(dependencies);
+      expect(resolver.resolveModule('vue', join(physical, 'index.js'))).toBe('vue2');
+      expect(resolver.resolveModule('vue', join(helper, 'index.js'))).toBe('vue2');
+    }
   });
 
   it('reuses the current hoisted alias target on the first offline refresh', async () => {
@@ -1037,6 +1046,54 @@ describe('resolution correctness with installed packages', () => {
     expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe('runtime1');
     expect(resolver.resolveModule('runtime', join(root, 'src/index.js'))).toBeNull();
   });
+
+  it.each<{ constraint: string; peerOverrides: Record<string, Record<string, string>> }>([
+    {
+      constraint: 'catalog:',
+      peerOverrides: {},
+    },
+    {
+      constraint: '>=2.5.0',
+      peerOverrides: {
+        'vue-router@3.x': { vue: '^3.0.0' },
+        'router3@3.x': { vue: '^2.6.0' },
+      },
+    },
+  ])(
+    'links installed alias peer constraints declared as $constraint',
+    async ({ constraint, peerOverrides }) => {
+      const root = project({
+        dependencies: {
+          'legacy-ui': '1.0.0',
+          'legacy-router': '1.0.0',
+          vue: '3.5.0',
+          vue2: 'npm:vue@2.6.14',
+          'vue-router': '4.5.0',
+          router3: 'npm:vue-router@3.6.5',
+        },
+      });
+      writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages: []\ncatalog:\n  vue: "^2.6.0"\n');
+      pkg(root, 'legacy-ui', { peerDependencies: { vue: '^2.6.0' } });
+      pkg(root, 'legacy-router', { peerDependencies: { 'vue-router': '^3.6.0' } });
+      pkg(root, 'vue', { version: '3.5.0' });
+      pkg(root, 'vue2', { name: 'vue', version: '2.6.14' });
+      pkg(root, 'vue-router', { version: '4.5.0' });
+      const router = pkg(root, 'router3', {
+        name: 'vue-router',
+        version: '3.6.5',
+        peerDependencies: { vue: constraint },
+      });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, ['legacy-ui', 'legacy-router']),
+        peerOverrides,
+        offline: true,
+        strict: true,
+      });
+      expect(resolver.resolveModule('vue', join(router, 'index.js'))).toBe('vue2');
+      expect(resolver.getDiagnostics()).toEqual([]);
+    },
+  );
 
   it('links a selected alias only to a peer version satisfying its own range', async () => {
     const root = project({

@@ -1,7 +1,12 @@
 import { isAbsolute, join, relative, sep } from 'node:path';
-import type { DependencyPath } from '../types';
+import type { DependencyPath, PackageJson } from '../types';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
-import { getEffectivePeerDependencies } from '../utils/peer-overrides';
+import { getEffectivePeerDependencies, type EffectivePeerEntry } from '../utils/peer-overrides';
+import {
+  getDependencyRequirement,
+  type DependencyRequirement,
+  type VersionSpecResolver,
+} from '../utils/version-spec';
 
 export interface InstalledPackageNode {
   id: string;
@@ -9,8 +14,9 @@ export interface InstalledPackageNode {
   version: string;
   packagePath: string;
   parentId: string | null;
-  dependencyNames: string[];
-  peerDependencyNames: string[];
+  manifest: PackageJson;
+  peerDependenciesByName: Map<string, Map<string, EffectivePeerEntry>>;
+  requirementsByDependency: Map<string, readonly DependencyRequirement[]>;
   /** Resolved dependency and peer edges, including edges to shared nodes. */
   resolvedChildren: Map<string, string>;
 }
@@ -133,6 +139,22 @@ export function collectWorkspaceEntryNames(
   return [...names];
 }
 
+export function getInstalledDependencyRequirements(
+  node: InstalledPackageNode,
+  name: string,
+  workspace: VersionSpecResolver,
+): readonly DependencyRequirement[] {
+  const cached = node.requirementsByDependency.get(name);
+  if (cached) return cached;
+  const requirements: DependencyRequirement[] = [];
+  for (const peers of node.peerDependenciesByName.values()) {
+    const requirement = getDependencyRequirement(node.manifest, name, peers.get(name), workspace);
+    if (requirement) requirements.push(requirement);
+  }
+  node.requirementsByDependency.set(name, requirements);
+  return requirements;
+}
+
 /**
  * Traverse installed packages while preserving each package directory as the
  * identity of a node. Package resolution for a child starts at its parent's
@@ -166,8 +188,8 @@ export function buildInstalledDependencyGraph(
 
     const normalizedPath = canonicalPath(packagePath);
     const existingNode = nodes.get(normalizedPath);
-    const packageJson = existingNode ? null : readPackageJsonCached(normalizedPath);
-    if (!existingNode && !packageJson) continue;
+    const manifest = existingNode?.manifest ?? readPackageJsonCached(normalizedPath);
+    if (!manifest) continue;
     if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);
     if (item.rootPath) {
       const instances = rootRequests.get(item.name) ?? new Map<string, RootRequest[]>();
@@ -179,32 +201,31 @@ export function buildInstalledDependencyGraph(
       if (existingNode) existingNode.parentId = null;
     }
 
-    if (!packageJson) continue;
-
-    const dependencyNames = Object.keys({
-      ...packageJson.dependencies,
-      ...packageJson.optionalDependencies,
-    });
-    const peerDependencyNames = [
-      ...getEffectivePeerDependencies(packageJson, item.name, peerOverrides).keys(),
-    ];
-    const node: InstalledPackageNode = {
+    const node: InstalledPackageNode = existingNode ?? {
       id: normalizedPath,
       name: item.name,
-      version: packageJson.version ?? 'unknown',
+      version: manifest.version ?? 'unknown',
       packagePath: normalizedPath,
       parentId: item.parentId,
-      dependencyNames,
-      peerDependencyNames,
+      manifest,
+      peerDependenciesByName: new Map(),
+      requirementsByDependency: new Map(),
       resolvedChildren: new Map(),
     };
+    if (node.peerDependenciesByName.has(item.name)) continue;
+    const peers = getEffectivePeerDependencies(manifest, item.name, peerOverrides);
+    node.peerDependenciesByName.set(item.name, peers);
+    if (!existingNode) nodes.set(normalizedPath, node);
 
-    nodes.set(normalizedPath, node);
-
-    const childNames = [...dependencyNames, ...peerDependencyNames];
+    // Peer overrides can introduce edges under a new request name even when
+    // an earlier request has already visited this physical package.
+    const dependencies = existingNode
+      ? []
+      : Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies });
+    const childNames = [...new Set([...dependencies, ...peers.keys()])];
     for (let index = childNames.length - 1; index >= 0; index--) {
       const childName = childNames[index];
-      if (childName) {
+      if (childName && !node.resolvedChildren.has(childName)) {
         stack.push({
           name: childName,
           baseDir: normalizedPath,

@@ -9,6 +9,7 @@ import type {
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
 import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 import { satisfies } from '../utils/semver';
+import { resolveDependencyRequirement } from '../utils/version-spec';
 import { createWorkspaceDetector } from './workspace-detector';
 import type { RegistryClient } from './registry-client';
 import { AliasManager } from './alias-manager';
@@ -39,7 +40,8 @@ export async function linkAliasPeers(
     }
     mapping.peerImporterPaths = {};
   }
-  const workspaceRoot = createWorkspaceDetector(options.projectRoot).getWorkspaceRoot();
+  const workspace = createWorkspaceDetector(options.projectRoot);
+  const workspaceRoot = workspace.getWorkspaceRoot();
   const manifests = new Map<AliasMapping, PackageJson>();
   const installedPaths = new Map<AliasMapping, string>();
   const consumerRequests = new Map(
@@ -98,14 +100,15 @@ export async function linkAliasPeers(
     const pendingInstallation = !installedPath && options.autoInstall && importer.installSpec;
 
     const effectivePeers = getEffectivePeerDependencies(
-      manifest,
-      importer.originalName,
+      manifest.name ? manifest : { ...manifest, name: importer.originalName },
+      importer.aliasName,
       options.peerOverrides,
       manifest.version ?? importer.resolvedVersion,
     );
 
-    for (const [peerName, { range, optional }] of effectivePeers) {
+    for (const [peerName, { range: spec, optional }] of effectivePeers) {
       if (optional) continue;
+      const { range } = resolveDependencyRequirement(peerName, spec, workspace);
       // A shared physical alias cannot change runtime according to its caller.
       // Include consumers satisfied by the host; they have no alias mapping.
       const providers = new Map<string, string[]>();

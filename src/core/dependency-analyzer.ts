@@ -28,11 +28,16 @@ import {
   generateAliasName,
   createAliasInstallSpec,
 } from '../utils/semver';
-import { parseNpmAlias } from '../utils/version-spec';
+import {
+  getRuntimeDependencySpec,
+  parseNpmAlias,
+  resolveDependencyRequirement,
+} from '../utils/version-spec';
 import {
   findInvalidPeerOverrideKeys,
   getEffectivePeerDependencies,
   resolvePeerOverridesForPackage,
+  type EffectivePeerEntry,
 } from '../utils/peer-overrides';
 import { clearNpmRegistryCache } from './npm-registry';
 import { npmRegistryClient, type RegistryClient } from './registry-client';
@@ -633,17 +638,10 @@ export class DependencyAnalyzer {
   private collectFirstLevelPeerDependencies(): Map<string, DependencyPath[]> {
     const peerDepsMap = new Map<string, DependencyPath[]>();
     const collectPeers = (
-      manifest: Pick<PackageJson, 'name' | 'version' | 'peerDependencies' | 'peerDependenciesMeta'>,
+      effectivePeers: ReadonlyMap<string, EffectivePeerEntry>,
       path: string[],
       packagePath?: string,
     ) => {
-      const packageName = path.at(-1);
-      const effectivePeers = getEffectivePeerDependencies(
-        manifest,
-        packageName,
-        this.options.peerOverrides,
-      );
-
       for (const [peerName, { range: peerRange, optional }] of effectivePeers) {
         if (optional) continue;
 
@@ -661,12 +659,14 @@ export class DependencyAnalyzer {
     };
 
     if (this.dependencyGraph?.roots.length) {
-      for (const instances of this.dependencyGraph.rootRequests.values()) {
+      for (const [name, instances] of this.dependencyGraph.rootRequests) {
         for (const [packagePath, requests] of instances) {
-          const manifest = readPackageJsonCached(packagePath);
-          if (!manifest) continue;
+          const peers = this.dependencyGraph.nodes
+            .get(packagePath)
+            ?.peerDependenciesByName.get(name);
+          if (!peers) continue;
           for (const { path } of requests) {
-            collectPeers(manifest, path, packagePath);
+            collectPeers(peers, path, packagePath);
           }
         }
       }
@@ -674,7 +674,11 @@ export class DependencyAnalyzer {
       // Retain the fallback for analyzers with injected package metadata.
       for (const name of this.options.dependencies) {
         const manifest = this.analyzedDependencies.get(name);
-        if (manifest) collectPeers(manifest, [name]);
+        if (manifest) {
+          collectPeers(getEffectivePeerDependencies(manifest, name, this.options.peerOverrides), [
+            name,
+          ]);
+        }
       }
     }
 
@@ -708,9 +712,7 @@ export class DependencyAnalyzer {
       this.watchFiles.add(join(canonicalAncestor, 'package.json'));
       const ancestorManifest = readPackageJsonCached(canonicalAncestor);
       if (ancestorManifest) {
-        const declaredSpec =
-          ancestorManifest.dependencies?.[packageName] ??
-          ancestorManifest.optionalDependencies?.[packageName];
+        const declaredSpec = getRuntimeDependencySpec(ancestorManifest, packageName);
         if (typeof declaredSpec === 'string') {
           const npmAlias = parseNpmAlias(declaredSpec);
           if (!npmAlias || npmAlias[0] === packageName) {
@@ -775,9 +777,11 @@ export class DependencyAnalyzer {
       const undeclaredRequests: DependencyPath[] = [];
 
       for (const request of requestedBy) {
-        const resolvedRange =
-          this.workspaceDetector.resolveVersionSpec(packageName, request.requiredRange) ??
-          request.requiredRange;
+        const { range: resolvedRange } = resolveDependencyRequirement(
+          packageName,
+          request.requiredRange,
+          this.workspaceDetector,
+        );
 
         if (mainVersion && satisfies(mainVersion, resolvedRange)) {
           satisfiedRanges.push(request);
@@ -1648,7 +1652,10 @@ export class DependencyAnalyzer {
    */
   private isDescendantIncompatibleWithAlias(
     manifest:
-      | Pick<PackageJson, 'name' | 'version' | 'dependencies' | 'peerDependencies'>
+      | Pick<
+          PackageJson,
+          'name' | 'version' | 'dependencies' | 'optionalDependencies' | 'peerDependencies'
+        >
       | null
       | undefined,
     target?: {
@@ -1670,7 +1677,7 @@ export class DependencyAnalyzer {
     const peerRange =
       overrides?.[target.packageName] ?? manifest?.peerDependencies?.[target.packageName];
     const depRange =
-      peerRange === undefined ? manifest?.dependencies?.[target.packageName] : undefined;
+      peerRange === undefined ? getRuntimeDependencySpec(manifest, target.packageName) : undefined;
     const rawRange = peerRange ?? depRange;
     if (!rawRange) return false;
 
@@ -1742,10 +1749,10 @@ export class DependencyAnalyzer {
       const isExcludedConflictPackage = excludeSet.has(node.name);
       if (!rootSet.has(node.id) && target) {
         const naturalNode = this.findGraphChildNode(node, target.packageName);
-        const naturalManifest = naturalNode ? readPackageJsonCached(naturalNode.packagePath) : null;
+        const naturalManifest = naturalNode?.manifest;
         if (
           this.isDescendantIncompatibleWithAlias(
-            readPackageJsonCached(node.packagePath),
+            node.manifest,
             target,
             node.name,
             node.version,
@@ -1768,9 +1775,8 @@ export class DependencyAnalyzer {
       if (isExcludedConflictPackage) continue;
 
       collected.push({ name: node.name, path: node.packagePath });
-      for (const dependencyName of [...node.dependencyNames, ...node.peerDependencyNames]) {
-        const child = this.findGraphChildNode(node, dependencyName);
-        if (child && !visited.has(child.id)) stack.push(child.id);
+      for (const childId of node.resolvedChildren.values()) {
+        if (!visited.has(childId)) stack.push(childId);
       }
     }
 
