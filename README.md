@@ -234,17 +234,17 @@ explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason �
 
 需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。同一实例并发调用 installDependencies() 会共享一次准备；安装未结束时 invalidate() 会抛错，应先等待安装完成。
 
-同一实际安装工程或共享 workspace 的准备会串行执行，等待者重新读取输入后规划名称；同一系统用户的进程通过共享 OS 临时目录中的本地锁协调，参与进程需使用相同临时目录。已退出进程的独立锁记录可以回收，不按等待时长抢占活进程。新生成的 alias 精确保存版本，已有有效 alias 继续复用。包管理器结束后会重建消费方范围、peer 关联和 watch 输入，并重新验证所有 alias；必要时最多进行一次修正安装，输入持续变化则报告 PROJECT_STATE_CHANGED。
+同一 workspace 中，`offline: true` 或 `autoInstall: false` 的初始化持共享读锁，可以跨进程并行分析和复用已安装的 alias。可能调用包管理器的准备从正式分析开始就持独占锁，直到发布结果。同一次准备及其修正安装会复用自己的 registry 元数据。参与进程应属于同一系统用户并使用同一 OS 临时目录。锁记录按进程退出状态回收。新生成的 alias 精确保存版本。包管理器结束后会重建消费方范围、peer 关联和 watch 输入，并验证所有 alias。必要时最多进行一次修正安装，输入持续变化则报告 PROJECT_STATE_CHANGED。
 
 已初始化实例若因另一轮准备而改变实际规则或 provider，会明确失效；strict 模式拒绝继续解析，应调用 invalidate() 后重新 initialize()，或重启对应构建。并发初始化会等待工程准备队列完成。用户钩子在准备锁外执行，内部重新规划不会重复触发分析通知；onAnalysisComplete 观察的是候选分析，最终结果在 initialize() 完成后通过 getAnalysisResult() 查询。
 
 Vite 的隐式 projectRoot 使用最终配置的 root，支持其他 config 钩子调整目录；显式 projectRoot 优先。准备锁协调本库的准备过程；正在构建时应避免其他进程或包管理器改写安装树。并行 CI 建议先 prepare、冻结安装，再使用 offline + strict 构建。
 
-运行 `pnpm bench:scale` 可检查重复版本范围、多 importer、多请求包名以及 5,000 项缓存容量边界的耗时、realpath 次数和堆变化。解析缓存保持有界；零 realpath 热路径适用于工作集能驻留缓存的情况，不代表任意工程规模都无需文件系统查询。
+运行 `pnpm bench:scale` 可测量重复版本范围，以及密集、稀疏和分散导入的冷、热耗时、文件系统调用次数和内存用量。安装目录被多个不同 importer 访问后，已验证的普通文件可共享所属目录的解析决策。文件级链接仍单独解析，带查询参数的请求优先检查完整文件名。目录、文件和决策缓存均有容量上限，在新一代规则发布后重新建立。
 
 ### 兼容性与验证
 
-- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 的客户端冷启动预构建（含全局 `resolve.alias`）、SSR 构建和 SSR 开发模式（ESM / CommonJS），CI 覆盖 Vite 4.0.0、5、6、7、8。
+- Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 的客户端冷启动预构建（含全局 `resolve.alias`）、SSR 构建和 SSR 开发模式（ESM / CommonJS）。CI 在 Vite 4.0.0、5、6、7、8 上运行 strict 和默认过滤两种模式。
 - Vite 4.0 的原生 SSR 预构建在混用 Vue 2 的 ESM / CommonJS 入口时会产生独立实例，插件也受此限制；此场景建议使用 Vite 5 或更新版本。包的条件导出由 Vite 解析，插件不强制合并本来就不同的导出入口。
 - Webpack 5 继续使用 beforeResolve；默认初始化失败会记录错误并继续编译，strict=true 时错误会交给编译器。
 - 已安装的 optionalDependencies 会参与运行时依赖图。optional peer 的既有忽略策略保持不变。
