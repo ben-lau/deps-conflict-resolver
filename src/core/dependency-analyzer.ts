@@ -171,16 +171,6 @@ export class DependencyAnalyzer {
     };
   }
 
-  /** Keep generated alias names clear of host and workspace dependencies. */
-  private getReservedDependencyNames(): Set<string> {
-    this.ensureWorkspaceRootDeclaredDepsLoaded();
-    return new Set([
-      ...Object.keys(this.rawDeclaredDeps),
-      ...Object.keys(this.declaredDeps),
-      ...Object.keys(this.workspaceRootDeclaredDeps),
-    ]);
-  }
-
   /**
    * 判断某个包是否在“主工程”声明（dependencies/devDependencies）
    *
@@ -473,7 +463,35 @@ export class DependencyAnalyzer {
   private populateAnalyzedDependenciesFromGraph(): void {
     if (!this.dependencyGraph) return;
 
+    const rootVisibleNodeIds = new Map<string, string>();
     for (const node of this.dependencyGraph.nodes.values()) {
+      const rootVisiblePath = findPackagePath(node.name, this.options.projectRoot);
+      if (!rootVisiblePath) continue;
+
+      const rootVisibleNode = this.dependencyGraph.nodes.get(
+        this.normalizeInstalledPath(rootVisiblePath),
+      );
+      if (rootVisibleNode && !rootVisibleNodeIds.has(node.name)) {
+        rootVisibleNodeIds.set(node.name, rootVisibleNode.id);
+      }
+    }
+
+    const orderedNodes: InstalledPackageNode[] = [];
+    const selectedNodeIds = new Set<string>();
+    for (const nodeId of rootVisibleNodeIds.values()) {
+      const node = this.dependencyGraph.nodes.get(nodeId);
+      if (node && !selectedNodeIds.has(node.id)) {
+        selectedNodeIds.add(node.id);
+        orderedNodes.push(node);
+      }
+    }
+    for (const node of this.dependencyGraph.nodes.values()) {
+      if (!selectedNodeIds.has(node.id)) {
+        orderedNodes.push(node);
+      }
+    }
+
+    for (const node of orderedNodes) {
       if (this.analyzedDependencies.has(node.name)) continue;
 
       const packageJson = readPackageJsonCached(node.packagePath);
@@ -538,9 +556,21 @@ export class DependencyAnalyzer {
    */
   private collectFirstLevelPeerDependencies(): Map<string, DependencyPath[]> {
     const peerDepsMap = new Map<string, DependencyPath[]>();
+    const hasInstalledGraphRoots = (this.dependencyGraph?.roots.length ?? 0) > 0;
 
     // 只遍历第一层依赖（用户指定的 dependencies）
     for (const depName of this.options.dependencies) {
+      // `analyzedDependencies` is intentionally keyed by package name for
+      // compatibility, so a nested instance can appear under the same key
+      // after another root populated the graph. In a real installed graph,
+      // only a node recorded in `roots` is a configured first-level package.
+      // Keep the no-root fallback for injected/unit-test analyzers that do
+      // not materialize an installed graph at all.
+      if (hasInstalledGraphRoots && !this.findGraphRoot(depName)) {
+        logger.debug(`Skipping non-root configured dependency: ${depName}`);
+        continue;
+      }
+
       const depInfo = this.analyzedDependencies.get(depName);
       if (!depInfo) continue;
 
@@ -1384,6 +1414,23 @@ export class DependencyAnalyzer {
     }
 
     return names;
+  }
+
+  /**
+   * Return every dependency key that the host or its workspace root owns.
+   *
+   * Generated aliases share the package namespace with ordinary dependency
+   * keys. Keeping the complete set here prevents a generated alias from
+   * silently replacing an unrelated dependency declared by the user.
+   */
+  private getReservedDependencyNames(): Set<string> {
+    this.ensureWorkspaceRootDeclaredDepsLoaded();
+
+    return new Set([
+      ...Object.keys(this.rawDeclaredDeps),
+      ...Object.keys(this.declaredDeps),
+      ...Object.keys(this.workspaceRootDeclaredDeps),
+    ]);
   }
 
   private normalizeInstalledPath(packagePath: string): string {

@@ -1191,6 +1191,112 @@ describe('DependencyAnalyzer Edge Cases', () => {
 });
 
 describe('DependencyAnalyzer path-aware redirect scopes', () => {
+  it('uses the root-visible instance for name-keyed analyzedDependencies', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-root-visible-'));
+
+    try {
+      const rootConsumerPath = await writeTestPackage(projectRoot, 'root-consumer', {
+        dependencies: { shared: '1.0.0' },
+      });
+      await writeTestPackage(rootConsumerPath, 'shared', { version: '1.1.0' });
+      const rootSharedPath = await writeTestPackage(projectRoot, 'shared', { version: '2.1.0' });
+      const mainPackageJson: PackageJson = {
+        name: 'root-visible-host',
+        version: '1.0.0',
+        dependencies: {
+          'root-consumer': '1.0.0',
+          shared: '2.1.0',
+        },
+      };
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify(mainPackageJson),
+        'utf8',
+      );
+
+      const result = await new DependencyAnalyzer(
+        {
+          dependencies: ['root-consumer', 'shared'],
+          projectRoot,
+          autoInstall: true,
+          packageManager: 'npm',
+          registry: 'https://registry.example.test',
+          debug: false,
+          aliasPrefix: 'aliased-',
+          excludeRedirects: {},
+          includeRedirects: {},
+        },
+        mainPackageJson,
+        undefined,
+        { fetchAllVersions: vi.fn() },
+      ).analyze();
+
+      expect(result.analyzedDependencies.get('shared')).toMatchObject({
+        version: '2.1.0',
+        dependencyPath: [],
+      });
+      expect(result.analyzedDependencies.get('shared')).toBeDefined();
+      expect(realpathSync(rootSharedPath)).not.toBe(
+        realpathSync(join(rootConsumerPath, 'node_modules', 'shared')),
+      );
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not treat a nested-only configured package as a first-level peer requester', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-nested-only-'));
+    const registryClient = { fetchAllVersions: vi.fn().mockResolvedValue(['2.7.16']) };
+
+    try {
+      const hostPath = await writeTestPackage(projectRoot, 'host-consumer', {
+        dependencies: { 'nested-only': '1.0.0' },
+      });
+      await writeTestPackage(hostPath, 'nested-only', {
+        version: '1.0.0',
+        peerDependencies: { vue: '^2.0.0' },
+      });
+      await writeTestPackage(projectRoot, 'vue', { version: '3.5.0' });
+
+      const mainPackageJson: PackageJson = {
+        name: 'nested-only-host',
+        version: '1.0.0',
+        dependencies: {
+          'host-consumer': '1.0.0',
+          vue: '^3.0.0',
+        },
+      };
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify(mainPackageJson),
+        'utf8',
+      );
+
+      const result = await new DependencyAnalyzer(
+        {
+          dependencies: ['host-consumer', 'nested-only'],
+          projectRoot,
+          autoInstall: true,
+          packageManager: 'npm',
+          registry: 'https://registry.example.test',
+          debug: false,
+          aliasPrefix: 'aliased-',
+          excludeRedirects: {},
+          includeRedirects: {},
+        },
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(result.peerConflicts).toEqual([]);
+      expect(result.aliasMappings).toEqual([]);
+      expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('includes each nested package instance in the generated importer paths', async () => {
     const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-path-scope-'));
     const registryClient = {
@@ -1363,6 +1469,93 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
       ).toBeNull();
     } finally {
       await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('DependencyAnalyzer alias ownership', () => {
+  it('reserves project and workspace dependency keys before generating aliases', async () => {
+    const workspaceRoot = await fs.mkdtemp(
+      join(tmpdir(), 'deps-conflict-resolver-alias-ownership-'),
+    );
+    const projectRoot = join(workspaceRoot, 'packages', 'app');
+    const consumerPackage = 'legacy-vue-consumer';
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockResolvedValue(['2.7.16']),
+    };
+
+    try {
+      await fs.mkdir(projectRoot, { recursive: true });
+      await fs.writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+      await fs.writeFile(
+        join(workspaceRoot, 'package.json'),
+        JSON.stringify({
+          name: 'alias-ownership-workspace',
+          version: '1.0.0',
+          dependencies: { 'aliased-vue2': '1.0.0' },
+          devDependencies: { 'aliased-vue-2-7-16': '1.0.0' },
+        }),
+        'utf8',
+      );
+      const mainPackageJson: PackageJson = {
+        name: 'alias-ownership-app',
+        version: '1.0.0',
+        dependencies: {
+          [consumerPackage]: '1.0.0',
+          vue: '^3.0.0',
+        },
+      };
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify(mainPackageJson),
+        'utf8',
+      );
+
+      await writeTestPackage(workspaceRoot, 'aliased-vue2', { version: '1.0.0' });
+      await writeTestPackage(workspaceRoot, consumerPackage, {
+        peerDependencies: { vue: '^2.7.0' },
+      });
+      await writeTestPackage(workspaceRoot, 'vue', { version: '3.5.0' });
+
+      const options: ResolvedOptions = {
+        dependencies: [consumerPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'pnpm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(
+        options,
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(result.aliasMappings).toContainEqual(
+        expect.objectContaining({
+          originalName: 'vue',
+          aliasName: 'aliased-vue2-2',
+          installSpec: 'aliased-vue2-2@npm:vue@2.7.16',
+        }),
+      );
+      expect(result.aliasMappings).not.toContainEqual(
+        expect.objectContaining({ aliasName: 'aliased-vue2' }),
+      );
+      expect(result.aliasMappings).not.toContainEqual(
+        expect.objectContaining({ aliasName: 'aliased-vue-2-7-16' }),
+      );
+      expect(
+        JSON.parse(
+          await fs.readFile(join(workspaceRoot, 'node_modules/aliased-vue2/package.json'), 'utf8'),
+        ),
+      ).toEqual(expect.objectContaining({ name: 'aliased-vue2', version: '1.0.0' }));
+    } finally {
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
   });
 });
