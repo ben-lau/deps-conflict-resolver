@@ -78,6 +78,33 @@ interface PlanCapture {
   result?: PlanWriteResult;
 }
 
+interface ResolutionDraft {
+  analysis: AnalysisResult | null;
+  matcher: AliasManager | null;
+  activeMappings: AliasMapping[];
+  installation: InstallReport | null;
+  installDiagnostics: ResolverDiagnostic[];
+}
+
+interface PublishedGeneration {
+  readonly rules: Readonly<ResolutionDraft>;
+  readonly revision: number;
+  readonly signature: string;
+  readonly providers: ReadonlyMap<string, string>;
+  readonly error: ResolutionError | null;
+  readonly invalidated: boolean;
+}
+
+function emptyDraft(): ResolutionDraft {
+  return {
+    analysis: null,
+    matcher: null,
+    activeMappings: [],
+    installation: null,
+    installDiagnostics: [],
+  };
+}
+
 export interface ModuleRedirect {
   target: string;
   source: 'alias' | 'hook';
@@ -154,27 +181,19 @@ export class DepsConflictResolver {
   private readonly trackLockWait = (milliseconds: number) => {
     this.metrics.milliseconds.lockWait += milliseconds;
   };
-  private aliasManager: AliasManager | null = null;
   private installer: PackageInstaller | null = null;
 
-  private analysisResult: AnalysisResult | null = null;
+  private draft = emptyDraft();
+  private published: PublishedGeneration | null = null;
   private initialized = false;
   private initializationPromise: Promise<void> | null = null;
   private installationPromise: Promise<void> | null = null;
   private preparing = false;
-  private installResult: InstallReport | null = null;
-  private installDiagnostics: ResolverDiagnostic[] = [];
   private preparation: ProjectPreparation | null = null;
   private notificationScope?: AsyncLocalStorage<{ running: boolean }>;
-  private snapshotRevision = 0;
-  private snapshotError: ResolutionError | null = null;
   private snapshotGeneration = 0;
-  private snapshotSignature = '';
-  private snapshotInvalidated = false;
   private initialReplanNeeded = false;
-  private providerVersions = new Map<string, string>();
   private readonly watch = new DependencyWatch();
-  private activeMappings: AliasMapping[] = [];
   private snapshotObserver: WeakRef<PreparationObserver> | null = null;
   private readonly observer: PreparationObserver = {
     refresh: () => this.withPreparationCache(() => this.refreshSnapshot()),
@@ -189,8 +208,8 @@ export class DepsConflictResolver {
     refreshForWatch: (changes) => this.refreshForWatch(changes),
     closeWatch: () => this.watch.close(),
     snapshot: () => ({
-      analysis: this.analysisResult,
-      providers: this.providerVersions,
+      analysis: this.visibleRules().analysis,
+      providers: this.published?.providers ?? new Map(),
       watchFiles: this.watch.files,
     }),
   };
@@ -287,7 +306,7 @@ export class DepsConflictResolver {
       // Only clear the promise that failed. A caller may have started a retry
       // after another concurrent caller observed the rejection.
       if (this.initializationPromise === initialization) {
-        if (watch) watch.recoveryFiles = this.analysisResult?.watchFiles;
+        if (watch) watch.recoveryFiles = this.draft.analysis?.watchFiles;
         this.initializationPromise = null;
         this.rollbackGeneration();
       }
@@ -353,10 +372,10 @@ export class DepsConflictResolver {
       this.initialized &&
       !this.installationPromise &&
       this.watch.snapshot === snapshot &&
-      this.analysisResult === snapshot.result &&
+      this.published?.rules.analysis === snapshot.result &&
       snapshot.key === this.watchKey() &&
       preparation.revision === snapshot.revision &&
-      !this.snapshotInvalidated &&
+      !this.published.invalidated &&
       this.snapshotCurrent();
     const reused = await withProjectPreparation(
       preparation,
@@ -366,7 +385,7 @@ export class DepsConflictResolver {
         // Build inputs can change an importer's path or owning manifest even
         // when the dependency analysis and its rules are still current.
         clearPackageJsonCache(this.fileSystemCache);
-        this.aliasManager?.clearImporterCache();
+        this.published?.rules.matcher?.clearImporterCache();
         return true;
       },
       undefined,
@@ -404,21 +423,14 @@ export class DepsConflictResolver {
     this.initialized = false;
     if (this.snapshotObserver) this.preparation?.observers.delete(this.snapshotObserver);
     this.snapshotObserver = null;
-    this.snapshotError = null;
-    this.snapshotSignature = '';
-    this.snapshotInvalidated = false;
+    this.published = null;
     this.initialReplanNeeded = false;
-    this.providerVersions = new Map();
     this.watch.snapshot = undefined;
     clearPackageJsonCache(this.fileSystemCache);
     this.snapshotGeneration++;
-    this.activeMappings = [];
-    this.analysisResult = null;
-    this.aliasManager?.clear?.();
-    this.aliasManager = null;
+    this.draft.matcher?.clear?.();
+    this.draft = emptyDraft();
     this.installer = null;
-    this.installResult = null;
-    this.installDiagnostics = [];
   }
 
   private withPreparationCache<T>(task: () => T): T {
@@ -459,7 +471,7 @@ export class DepsConflictResolver {
     }
 
     // 初始化子模块
-    this.aliasManager = createAliasManager(this.options, this.fileSystemCache);
+    this.draft.matcher = createAliasManager(this.options, this.fileSystemCache);
     this.installer = createPackageInstaller(this.options, () => {
       this.metrics.counts.packageManagerRuns++;
     });
@@ -538,7 +550,7 @@ export class DepsConflictResolver {
     // Keep the reusable candidate separate from user code. Hooks can also
     // prepare the same workspace, so the notification runs outside the lock.
     const observed = structuredClone(result);
-    this.analysisResult = observed;
+    this.draft.analysis = observed;
     await this.runPreparationHook(() => hook.call(this.hooks, observed));
     return candidate;
   }
@@ -553,7 +565,7 @@ export class DepsConflictResolver {
       const planFile = plan && (await this.beginPreparedPlan(plan));
       const registryClient = new NpmRegistryClient(this.metrics, this.options);
       const cached = this.hooks.onAnalysisComplete ? undefined : this.loadPreparedPlan();
-      this.analysisResult =
+      this.draft.analysis =
         cached ??
         (candidate &&
         candidate.revision === this.preparation?.revision &&
@@ -573,17 +585,17 @@ export class DepsConflictResolver {
           this.installationPromise = null;
         }
       }
-      this.logMissingFirstLevelPeers(this.analysisResult);
+      this.logMissingFirstLevelPeers(this.draft.analysis);
       this.observeSnapshot();
       if (watch || planFile) this.recordWatchFiles();
       if (planFile && !this.generationDiagnostics().some(({ severity }) => severity === 'error')) {
-        plan.result = await this.persistPreparedPlan(planFile, plan.inputs, this.analysisResult);
+        plan.result = await this.persistPreparedPlan(planFile, plan.inputs, this.draft.analysis);
       }
       if (watch) {
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
           this.watch.snapshot = {
-            result: this.analysisResult,
-            revision: this.snapshotRevision,
+            result: this.draft.analysis,
+            revision: this.published!.revision,
             key: watch.key,
             inputs: watch.inputs,
           };
@@ -703,9 +715,9 @@ export class DepsConflictResolver {
     this.watch.recordFiles(
       this.options.projectRoot,
       this.preparation!.owner,
-      this.analysisResult,
+      this.draft.analysis,
       this.options.dependencies,
-      this.snapshotError !== null,
+      !!this.published?.error,
     );
   }
 
@@ -748,7 +760,7 @@ export class DepsConflictResolver {
   }
 
   private async prepareInstallation(): Promise<void> {
-    if (!this.analysisResult || !this.installer || !this.preparation) {
+    if (!this.draft.analysis || !this.installer || !this.preparation) {
       throw new Error('Resolver not initialized. Call initialize() first.');
     }
     this.preparing = true;
@@ -759,8 +771,8 @@ export class DepsConflictResolver {
           try {
             const registryClient = new NpmRegistryClient(this.metrics, this.options);
             this.watch.snapshot = undefined;
-            this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
-            this.installDiagnostics = [];
+            this.draft.analysis = await this.analyzeCurrent({ clearCache: false, registryClient });
+            this.draft.installDiagnostics = [];
             this.assertResolved();
             if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
@@ -807,11 +819,11 @@ export class DepsConflictResolver {
   }
 
   private publishWithoutInstallation(): void {
-    const mappings = this.analysisResult!.aliasMappings;
+    const mappings = this.draft.analysis!.aliasMappings;
     this.setActiveAliasMappings(mappings.filter((mapping) => mapping.installSpec === ''));
     for (const mapping of mappings) {
       if (mapping.installSpec)
-        this.installDiagnostics.push({
+        this.draft.installDiagnostics.push({
           code: 'ALIAS_NOT_INSTALLED',
           severity: 'error',
           packageName: mapping.originalName,
@@ -832,11 +844,11 @@ export class DepsConflictResolver {
       failed: [],
       errors: [],
     };
-    this.installResult = report;
-    this.installDiagnostics = [];
+    this.draft.installation = report;
+    this.draft.installDiagnostics = [];
     const blocked = new Set<string>();
     for (let attempt = 0; attempt < 2; attempt++) {
-      const planned = this.analysisResult!.aliasMappings;
+      const planned = this.draft.analysis!.aliasMappings;
       if (planned.some((mapping) => mapping.installSpec)) {
         currentDependencyInputs()?.invalidate();
         markChanged();
@@ -856,7 +868,7 @@ export class DepsConflictResolver {
       }
       for (const aliasName of result.failed ?? []) {
         blocked.add(aliasName);
-        this.installDiagnostics.push({
+        this.draft.installDiagnostics.push({
           code: 'ALIAS_INSTALL_FAILED',
           severity: 'error',
           packageName:
@@ -878,13 +890,13 @@ export class DepsConflictResolver {
 
       // Installation can reconcile the whole tree. Reusing a planned alias
       // also changes the set of verified providers for scopes and diagnostics.
-      this.analysisResult = await this.analyzeCurrent({
+      this.draft.analysis = await this.analyzeCurrent({
         offline: !result.success || this.options.offline,
         preparedAliases: verified,
         clearCache: false,
         registryClient,
       });
-      const fresh = this.analysisResult.aliasMappings;
+      const fresh = this.draft.analysis.aliasMappings;
       const pending = fresh.filter(
         (mapping) => mapping.installSpec && !blocked.has(mapping.aliasName),
       );
@@ -894,7 +906,7 @@ export class DepsConflictResolver {
         const message =
           'Dependency inputs changed during preparation; refusing to publish an unstable installation plan';
         report.errors.push(message);
-        this.installDiagnostics.push({
+        this.draft.installDiagnostics.push({
           code: 'PROJECT_STATE_CHANGED',
           severity: 'error',
           packageName: this.options.dependencies.join(', '),
@@ -919,7 +931,6 @@ export class DepsConflictResolver {
   }
 
   private observeSnapshot(): void {
-    this.snapshotInvalidated = false;
     this.initialReplanNeeded = false;
     if (!this.snapshotObserver) {
       this.snapshotObserver = new WeakRef(this.observer);
@@ -929,19 +940,20 @@ export class DepsConflictResolver {
   }
 
   private async refreshSnapshot(): Promise<void> {
-    if (!this.analysisResult || !this.aliasManager) return;
+    const current = this.published;
+    if (!current) return;
     this.watch.snapshot = undefined;
-    if (this.snapshotInvalidated) {
-      this.snapshotRevision = this.preparation!.revision;
+    if (current.invalidated) {
+      this.published = { ...current, revision: this.preparation!.revision };
       return;
     }
     const generation = this.snapshotGeneration;
-    const previous = this.snapshotSignature;
+    let invalidated = false;
     try {
       try {
         const analysis = await this.analyzeCurrent({
           offline: true,
-          preparedAliases: this.activeMappings,
+          preparedAliases: current.rules.activeMappings,
           clearCache: false,
         });
         if (generation !== this.snapshotGeneration) return;
@@ -957,15 +969,15 @@ export class DepsConflictResolver {
               ' is installed';
           }
         }
-        this.analysisResult = analysis;
+        this.draft.analysis = analysis;
         this.setActiveAliasMappings(
           analysis.aliasMappings.filter((mapping) => !mapping.installSpec),
         );
-        const changed = previous !== this.describeSnapshot();
+        const changed = current.signature !== this.describeSnapshot();
         if (this.initialized && changed) {
-          this.snapshotInvalidated = true;
+          invalidated = true;
           this.setActiveAliasMappings([]);
-          this.installDiagnostics.push({
+          this.draft.installDiagnostics.push({
             code: 'PROJECT_STATE_CHANGED',
             severity: 'error',
             packageName: this.options.dependencies.join(', '),
@@ -976,16 +988,16 @@ export class DepsConflictResolver {
       } catch (error) {
         if (generation !== this.snapshotGeneration) return;
         this.initialReplanNeeded = false;
-        this.snapshotInvalidated = true;
+        invalidated = true;
         this.setActiveAliasMappings([]);
-        this.installDiagnostics.push({
+        this.draft.installDiagnostics.push({
           code: 'PROJECT_STATE_CHANGED',
           severity: 'error',
           packageName: this.options.dependencies.join(', '),
           message: 'Cannot refresh dependency rules after another installation: ' + String(error),
         });
       }
-      this.captureSnapshot();
+      this.captureSnapshot(invalidated);
       if (this.watch.files) this.recordWatchFiles();
     } finally {
       clearPackageJsonCache();
@@ -993,7 +1005,7 @@ export class DepsConflictResolver {
   }
 
   private describeSnapshot(providers = this.describeProviders()): string {
-    const mappings = this.activeMappings
+    const mappings = this.draft.activeMappings
       .map((mapping) => [
         mapping.originalName,
         mapping.aliasName,
@@ -1013,7 +1025,7 @@ export class DepsConflictResolver {
   }
 
   private describeProviders() {
-    return (this.aliasManager?.getAliasPathMappings() ?? [])
+    return (this.draft.matcher?.getAliasPathMappings() ?? [])
       .map((mapping) => {
         const cachedPath = getCachedRealPath(mapping.path);
         let path = cachedPath ?? mapping.path;
@@ -1029,11 +1041,9 @@ export class DepsConflictResolver {
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
   }
 
-  private captureSnapshot(): void {
-    this.snapshotRevision = this.preparation!.revision;
+  private captureSnapshot(invalidated = false): void {
     const providers = this.metrics.measure('verify', () => this.describeProviders());
-    this.snapshotSignature = this.describeSnapshot(providers);
-    this.providerVersions = new Map(
+    const versions = new Map(
       providers.map(([name, path, manifest]) => [
         name,
         createHash('sha256')
@@ -1044,15 +1054,22 @@ export class DepsConflictResolver {
     const errors = this.generationDiagnostics().filter(
       (diagnostic) => diagnostic.severity === 'error',
     );
-    this.snapshotError = errors.length ? new ResolutionError(errors) : null;
+    this.published = {
+      rules: { ...this.draft, installDiagnostics: [...this.draft.installDiagnostics] },
+      revision: this.preparation!.revision,
+      signature: this.describeSnapshot(providers),
+      providers: versions,
+      error: errors.length ? new ResolutionError(errors) : null,
+      invalidated,
+    };
   }
 
   private async notifyInstallComplete(): Promise<void> {
     const hook = this.hooks.onInstallComplete;
-    if (!this.installResult || !hook) return;
+    if (!this.draft.installation || !hook) return;
     const completed = this.filterCompletedMappings(
-      this.analysisResult!.aliasMappings,
-      this.installResult,
+      this.draft.analysis!.aliasMappings,
+      this.draft.installation,
       true,
     );
     await this.runPreparationHook(() => hook.call(this.hooks, structuredClone(completed)));
@@ -1075,7 +1092,7 @@ export class DepsConflictResolver {
     if (
       this.preparation.writing ||
       this.preparing ||
-      this.snapshotRevision !== this.preparation.revision
+      this.published?.revision !== this.preparation.revision
     ) {
       if (this.options.strict) {
         throw this.projectChanged(
@@ -1084,7 +1101,7 @@ export class DepsConflictResolver {
       }
       return false;
     }
-    if (this.options.strict && this.snapshotError) throw this.snapshotError;
+    if (this.options.strict && this.published?.error) throw this.published.error;
     return true;
   }
 
@@ -1092,12 +1109,12 @@ export class DepsConflictResolver {
     this.snapshotCurrent();
     const revision = this.preparation?.revision;
     const generation = this.snapshotGeneration;
-    const fingerprint = this.snapshotSignature;
+    const fingerprint = this.published?.signature;
     return () => {
       if (
         revision !== this.preparation?.revision ||
         generation !== this.snapshotGeneration ||
-        fingerprint !== this.snapshotSignature
+        fingerprint !== this.published?.signature
       ) {
         throw this.projectChanged('Dependencies changed during compilation. Run the build again.');
       }
@@ -1177,13 +1194,13 @@ export class DepsConflictResolver {
     mappings: AliasMapping[],
     blockedAliasNames: Iterable<string> = [],
   ): void {
-    if (!this.aliasManager || !this.analysisResult) {
+    if (!this.draft.matcher || !this.draft.analysis) {
       return;
     }
 
     const activeAliasNames = new Set(mappings.map((mapping) => mapping.aliasName));
     const inactiveAliasNames = new Set(blockedAliasNames);
-    for (const mapping of this.analysisResult.aliasMappings) {
+    for (const mapping of this.draft.analysis.aliasMappings) {
       if (!activeAliasNames.has(mapping.aliasName)) {
         inactiveAliasNames.add(mapping.aliasName);
       }
@@ -1216,9 +1233,14 @@ export class DepsConflictResolver {
       };
     });
 
-    this.activeMappings = activeMappings;
-    this.aliasManager.initFromAnalysisResult({
-      ...this.analysisResult,
+    this.draft.activeMappings = activeMappings;
+    // A writer can refresh another resolver. Compile into an unpublished
+    // matcher so the previous generation keeps its complete set of rules.
+    if (this.draft.matcher === this.published?.rules.matcher) {
+      this.draft.matcher = createAliasManager(this.options, this.fileSystemCache);
+    }
+    this.draft.matcher.initFromAnalysisResult({
+      ...this.draft.analysis,
       aliasMappings: activeMappings,
     });
   }
@@ -1248,7 +1270,8 @@ export class DepsConflictResolver {
   }
 
   private redirect(request: string, importer?: string): ModuleRedirect | null {
-    if (!this.initialized || !this.aliasManager) {
+    const matcher = this.published?.rules.matcher;
+    if (!this.initialized || !matcher) {
       return null;
     }
 
@@ -1262,7 +1285,7 @@ export class DepsConflictResolver {
       }
     }
 
-    const target = this.aliasManager.resolveModule({ request, importer });
+    const target = matcher.resolveModule({ request, importer });
     return target === null ? null : { target, source: 'alias' };
   }
 
@@ -1271,30 +1294,37 @@ export class DepsConflictResolver {
    * 返回别名名称到实际路径的映射，供构建工具插件转换为各自的格式
    */
   getAliasPathMappings(): AliasPathMapping[] {
-    if (!this.initialized || !this.aliasManager) {
+    const matcher = this.published?.rules.matcher;
+    if (!this.initialized || !matcher) {
       return [];
     }
 
     if (!this.snapshotCurrent()) return [];
-    return this.aliasManager.getAliasPathMappings();
+    return matcher.getAliasPathMappings();
   }
 
   /** Stable identity of the active rules and their installed providers. */
   getResolutionFingerprint(): string {
-    return this.initialized && this.snapshotCurrent() ? this.snapshotSignature : '';
+    return this.initialized && this.snapshotCurrent() ? (this.published?.signature ?? '') : '';
   }
 
   /**
    * 获取分析结果
    */
   getAnalysisResult(): AnalysisResult | null {
-    return structuredClone(this.analysisResult);
+    return structuredClone(this.visibleRules().analysis);
   }
 
-  private generationDiagnostics(): ResolverDiagnostic[] {
-    const analysis = this.analysisResult?.diagnostics ?? [];
-    const runtime = this.aliasManager?.getDiagnostics?.() ?? [];
-    if (runtime.length === 0) return [...analysis, ...this.installDiagnostics];
+  private visibleRules(): Readonly<ResolutionDraft> {
+    return this.initialized && this.published ? this.published.rules : this.draft;
+  }
+
+  private generationDiagnostics(
+    rules: Readonly<ResolutionDraft> = this.draft,
+  ): ResolverDiagnostic[] {
+    const analysis = rules.analysis?.diagnostics ?? [];
+    const runtime = rules.matcher?.getDiagnostics?.() ?? [];
+    if (runtime.length === 0) return [...analysis, ...rules.installDiagnostics];
 
     // Keep the initialization diagnostic with its configured requesters when
     // an actual import encounters the same set of rules at the same path.
@@ -1303,7 +1333,7 @@ export class DepsConflictResolver {
     );
     return [
       ...analysis,
-      ...this.installDiagnostics,
+      ...rules.installDiagnostics,
       ...runtime.filter(
         (entry) =>
           entry.code !== 'AMBIGUOUS_IMPORTER' || !knownAmbiguities.has(importerAmbiguityKey(entry)),
@@ -1324,7 +1354,7 @@ export class DepsConflictResolver {
             },
           ]
         : []),
-      ...this.generationDiagnostics(),
+      ...this.generationDiagnostics(this.visibleRules()),
     ].map((diagnostic) =>
       Object.assign({}, diagnostic, {
         ...(diagnostic.aliases && { aliases: [...diagnostic.aliases] }),
@@ -1341,7 +1371,7 @@ export class DepsConflictResolver {
       );
       if (errors.length > 0)
         throw new ResolutionError(errors, {
-          aliases: this.analysisResult?.aliasMappings ?? [],
+          aliases: this.draft.analysis?.aliasMappings ?? [],
           diagnostics: this.getDiagnostics(),
           installation: this.getInstallResult(),
         });
@@ -1354,7 +1384,8 @@ export class DepsConflictResolver {
     importer?: string,
     options: { skipHook?: boolean } = {},
   ): ResolutionExplanation {
-    if (!this.initialized || !this.aliasManager) {
+    const matcher = this.published?.rules.matcher;
+    if (!this.initialized || !matcher) {
       return {
         request,
         importer,
@@ -1379,17 +1410,18 @@ export class DepsConflictResolver {
         return { request, importer, resolved, reason: 'hook', aliases: [], matchedPaths: [] };
       }
     }
-    return this.aliasManager.explainResolution(request, importer);
+    return matcher.explainResolution(request, importer);
   }
 
   getInstallResult(): InstallReport | null {
+    const { installation } = this.visibleRules();
     return (
-      this.installResult && {
-        ...this.installResult,
-        installed: [...this.installResult.installed],
-        reused: [...this.installResult.reused],
-        failed: [...this.installResult.failed],
-        errors: [...this.installResult.errors],
+      installation && {
+        ...installation,
+        installed: [...installation.installed],
+        reused: [...installation.reused],
+        failed: [...installation.failed],
+        errors: [...installation.errors],
       }
     );
   }
