@@ -1,9 +1,12 @@
 import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite';
 import { randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
 import type { PluginConfig, PluginHooks, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver, getResolverBuild } from '../../core/resolver';
-import { directPathMatches } from '../../utils/dependency-input-paths';
+import {
+  changedPackageLookup,
+  type PackageLookupChange,
+  type PackageLookups,
+} from '../../utils/dependency-inputs';
 import { createLogger, LogLevel, withLogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
 import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
@@ -82,25 +85,13 @@ function changedPackagePath(
   return undefined;
 }
 
-function changedConfiguredPath(paths: EnvironmentWatch['packages']): string | undefined {
-  const verified = new Map<string, boolean>();
-  for (const [slot, path] of paths ?? []) {
-    if (directPathMatches(slot, path, verified)) continue;
-    try {
-      if (realpathSync(slot) === path) continue;
-    } catch {
-      // Removal after configuration invalidates the prepared path as well.
-    }
-    return slot;
-  }
-  return undefined;
-}
-
-function packageMoved(slot: string, watch: boolean): Error {
+function packageLookupError({ path, kind }: PackageLookupChange, watch: boolean): Error {
   const command = watch ? 'Restart vite build --watch' : 'Restart the Vite build';
-  return new Error(
-    'The installed package at ' + slot + ' changed paths. ' + command + ' to reload it.',
-  );
+  const reason =
+    kind === 'moved'
+      ? 'The installed package at ' + path + ' changed paths.'
+      : 'The package lookup at ' + path + ' changed after configuration.';
+  return new Error(reason + ' ' + command + ' to reload it.');
 }
 
 function watchInstalledProviders(config: ResolvedConfig, files: ReadonlySet<string>): void {
@@ -221,7 +212,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   let optimizerHookKey: string | undefined;
   let hasResolveHook = false;
   let watch: BuildWatch | undefined;
-  let configuredPaths: ReadonlyMap<string, string> | undefined;
+  let configuredLookups: PackageLookups | undefined;
   const verifyBuild = new WeakMap<object, () => void>();
 
   const {
@@ -421,7 +412,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       optimizerHookKey = undefined;
       configured = undefined;
       watch = undefined;
-      configuredPaths = undefined;
+      configuredLookups = undefined;
       ssrExternalEnabled = false;
       resolveSsrExternal = undefined;
       isSsrExternal = undefined;
@@ -453,7 +444,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         (Boolean(config.build?.watch) ||
           Object.values(config.environments ?? {}).some((environment) => environment.build?.watch));
       if (watchBuild || (config.command === 'build' && resolverOptions.strict))
-        build.trackInstalledPaths();
+        build.trackPackageLookups();
       if (watchBuild) {
         await withViteLogger(config, Boolean(options.debug), () => build.refreshForWatch({}));
         const files = build.snapshot().watchFiles?.providerFiles;
@@ -469,7 +460,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       } else {
         await withViteLogger(config, Boolean(options.debug), () => active.initialize());
       }
-      configuredPaths = build.snapshot().installedPaths;
+      configuredLookups = build.snapshot().packageLookups;
       // Capture the callback after preparation so build and pre-bundling use
       // the same registration. A declared function can delegate at runtime.
       const beforeResolve = hooks?.beforeResolve;
@@ -602,8 +593,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       const environment = this.environment ?? configured;
       if (!watch || !this.meta.watchMode) {
         if (resolverOptions.strict) {
-          const changedPath = changedConfiguredPath(configuredPaths);
-          if (changedPath) throw packageMoved(changedPath, false);
+          const change = changedPackageLookup(configuredLookups);
+          if (change) throw packageLookupError(change, false);
           verifyBuild.set(environment, build.guardGeneration());
         }
         return;
@@ -612,12 +603,12 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       try {
         if (!session.refreshing) {
           const { first, modified, removed } = session;
+          const change = first ? changedPackageLookup(configuredLookups) : undefined;
+          if (change && viteMajor >= 8) throw packageLookupError(change, true);
           session.first = false;
           session.modified = new Set();
           session.removed = new Set();
-          const changedPath = first ? changedConfiguredPath(configuredPaths) : undefined;
-          if (changedPath && viteMajor >= 8) throw packageMoved(changedPath, true);
-          if (!first || modified.size || removed.size || changedPath) {
+          if (!first || modified.size || removed.size || change) {
             session.refreshing = withViteLogger(configured, Boolean(options.debug), () =>
               build.refreshForWatch({ modifiedFiles: modified, removedFiles: removed }),
             ).finally(() => {
@@ -628,7 +619,8 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         await session.refreshing;
         const fingerprint = active.getResolutionFingerprint();
         const previous = session.environments.get(environment);
-        const packages = build.snapshot().installedPaths;
+        const packages = build.snapshot().packageLookups?.paths;
+        const configuredPaths = configuredLookups?.paths;
         const nativePaths =
           viteMajor >= 8 ? (previous?.nativePaths ?? new Map(configuredPaths)) : undefined;
         const changedPath =
@@ -642,7 +634,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         if (nativePaths && changedPath) {
           // An atomic link replacement can arrive as an update. Rolldown may
           // keep the old realpath for this slot until the watcher is restarted.
-          throw packageMoved(changedPath, true);
+          throw packageLookupError({ path: changedPath, kind: 'moved' }, true);
         }
         if (changedPath || fingerprint !== session.fingerprint) {
           const { packageCache } = configured as ResolvedConfig & {

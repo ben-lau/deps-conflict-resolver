@@ -840,23 +840,51 @@ try {
 
   if (nativeWatch) {
     const original = realpathSync(installed('legacy'));
-    const builder = await vite.createBuilder(watchConfig(), true);
     rmSync(watchOutput);
-    replaceLink('legacy', join(watchRoot, 'replacement-legacy'));
-    const starting = await builder.build(builder.environments.client);
-    try {
-      await new Promise((complete, reject) => {
-        timeout = setTimeout(() => reject(new Error('First watch build did not settle')), 5000);
-        starting.on('event', (event) => {
-          if (event.code === 'ERROR') complete(event.error);
-          else if (event.code === 'END') reject(new Error('First watch build wrote output'));
+    const nested = join(original, 'node_modules');
+    for (const kind of ['relink', 'nearer peer']) {
+      const builder = await vite.createBuilder(watchConfig(), true);
+      if (kind === 'relink') replaceLink('legacy', join(watchRoot, 'replacement-legacy'));
+      else {
+        const provider = join(nested, 'vue');
+        json(join(provider, 'package.json'), {
+          name: 'vue',
+          version: '2.7.16',
+          type: 'module',
+          main: 'index.js',
         });
-      }).then((error) => assert.match(String(error), /Restart vite build --watch/));
-      assert.equal(existsSync(watchOutput), false);
-    } finally {
-      clearTimeout(timeout);
-      await starting.close();
-      replaceLink('legacy', original);
+        writeFileSync(join(provider, 'index.js'), 'export const version = "nearer-provider";');
+      }
+      const starting = await builder.build(builder.environments.client);
+      edit = undefined;
+      try {
+        await new Promise((complete, reject) => {
+          let retried = false;
+          timeout = setTimeout(() => reject(new Error('First watch build did not settle')), 5000);
+          starting.on('event', (event) => {
+            try {
+              if (event.code === 'END') assert.equal(existsSync(watchOutput), false);
+              if (event.code !== 'ERROR') return;
+              assert.match(String(event.error), /Restart vite build --watch/);
+              if (kind === 'relink' || retried) return complete();
+              assert.match(String(event.error), /package lookup/);
+              edit ??= scheduleEdit(() => {
+                retried = true;
+                peer('^2');
+              }, reject);
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
+        assert.equal(existsSync(watchOutput), false);
+      } finally {
+        clearTimeout(timeout);
+        clearTimeout(edit);
+        await starting.close();
+        if (kind === 'relink') replaceLink('legacy', original);
+        else rmSync(nested, { recursive: true });
+      }
     }
   }
   process.stdout.write(

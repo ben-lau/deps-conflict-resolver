@@ -7,6 +7,16 @@ import { dirname, isAbsolute } from 'node:path';
 type Value = string | boolean | undefined;
 type Probe = (path: string) => Value;
 
+export interface PackageLookups {
+  paths: Map<string, string>;
+  missing: Map<string, 'directory' | 'manifest'>;
+}
+
+export interface PackageLookupChange {
+  path: string;
+  kind: 'moved' | 'lookup';
+}
+
 const recording = new AsyncLocalStorage<DependencyInputs>();
 const WATCH_INPUT_LIMIT = 65_536;
 const PLAN_INPUT_LIMIT = 196_608;
@@ -60,20 +70,21 @@ export class DependencyInputs {
     }
   }
 
-  installedPackagePaths(): Map<string, string> {
-    // A successful lookup already recorded the lexical manifest and the
-    // realpath of its containing package. Recover both without probing disk.
-    const paths = new Map<string, string>();
+  packageLookups(): PackageLookups {
+    const lookups: PackageLookups = { paths: new Map(), missing: new Map() };
+    for (const [directory, found] of this.values.get(isLookupDirectory) ?? []) {
+      if (found === false) lookups.missing.set(directory, 'directory');
+    }
     const realpaths = this.values.get(realPath);
-    if (realpaths) {
-      for (const [manifest, exists] of this.values.get(isLookupManifest) ?? []) {
-        if (exists !== true) continue;
+    for (const [manifest, found] of this.values.get(isLookupManifest) ?? []) {
+      if (found === false) lookups.missing.set(manifest, 'manifest');
+      else if (found === true) {
         const slot = dirname(manifest);
-        const resolved = realpaths.get(slot);
-        if (typeof resolved === 'string') paths.set(slot, resolved);
+        const resolved = realpaths?.get(slot);
+        if (typeof resolved === 'string') lookups.paths.set(slot, resolved);
       }
     }
-    return paths;
+    return lookups;
   }
 
   serialize(): unknown {
@@ -134,6 +145,29 @@ export class DependencyInputs {
     }
     return true;
   }
+}
+
+export function changedPackageLookup(lookups?: PackageLookups): PackageLookupChange | undefined {
+  if (!lookups) return undefined;
+  const verified = new Map<string, boolean>();
+  for (const [slot, path] of lookups.paths) {
+    if (directPathMatches(slot, path, verified)) continue;
+    try {
+      if (realPath(slot) === path) continue;
+    } catch {
+      // A removed or inaccessible slot cannot confirm the prepared path.
+    }
+    return { path: slot, kind: 'moved' };
+  }
+  for (const [path, kind] of lookups.missing) {
+    try {
+      if (!(kind === 'directory' ? isLookupDirectory(path) : isLookupManifest(path))) continue;
+    } catch {
+      // An unreadable lookup no longer verifies its prepared absence.
+    }
+    return { path, kind: 'lookup' };
+  }
+  return undefined;
 }
 
 export function currentDependencyInputs(): DependencyInputs | undefined {

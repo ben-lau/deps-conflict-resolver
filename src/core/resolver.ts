@@ -24,6 +24,7 @@ import {
   DependencyInputs,
   observedRealpath,
   withoutDependencyInputs,
+  type PackageLookups,
 } from '../utils/dependency-inputs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -82,7 +83,7 @@ interface PlanCapture {
 
 interface ResolutionDraft {
   analysis: AnalysisResult | null;
-  installedPaths?: ReadonlyMap<string, string>;
+  packageLookups?: PackageLookups;
   matcher: AliasManager | null;
   activeMappings: AliasMapping[];
   installation: InstallReport | null;
@@ -119,13 +120,13 @@ interface ResolverBuild {
   initializeAndSavePreparedPlan(): Promise<PlanWriteResult | undefined>;
   savePreparedPlan(): Promise<PlanWriteResult | undefined>;
   assertWatchCanWait(): void;
-  trackInstalledPaths(): void;
+  trackPackageLookups(): void;
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
   snapshot(): {
     analysis: AnalysisResult | null;
     providers: ReadonlyMap<string, string>;
-    installedPaths?: ReadonlyMap<string, string>;
+    packageLookups?: PackageLookups;
     watchFiles: WatchedFiles | undefined;
   };
 }
@@ -199,7 +200,7 @@ export class DepsConflictResolver {
   private snapshotGeneration = 0;
   private initialReplanNeeded = false;
   private readonly watch = new DependencyWatch();
-  private tracksInstalledPaths = false;
+  private tracksPackageLookups = false;
   private snapshotObserver: WeakRef<PreparationObserver> | null = null;
   private readonly observer: PreparationObserver = {
     refresh: () => this.withPreparationCache(() => this.refreshSnapshot()),
@@ -211,17 +212,24 @@ export class DepsConflictResolver {
     initializeAndSavePreparedPlan: () => this.initializeAndSavePreparedPlan(),
     savePreparedPlan: () => this.savePreparedPlan(),
     assertWatchCanWait: () => this.assertWatchCanWait(),
-    trackInstalledPaths: () => {
-      this.tracksInstalledPaths = true;
+    trackPackageLookups: () => {
+      this.tracksPackageLookups = true;
     },
     refreshForWatch: (changes) => this.refreshForWatch(changes),
     closeWatch: () => this.watch.close(),
-    snapshot: () => ({
-      analysis: this.visibleRules().analysis,
-      providers: this.published?.providers ?? new Map(),
-      installedPaths: this.watch.files?.installedPaths ?? this.visibleRules().installedPaths,
-      watchFiles: this.watch.files,
-    }),
+    snapshot: () => {
+      const { analysis, packageLookups } = this.visibleRules();
+      const watchFiles = this.watch.files;
+      return {
+        analysis,
+        providers: this.published?.providers ?? new Map(),
+        packageLookups: packageLookups && {
+          ...packageLookups,
+          paths: watchFiles?.installedPaths ?? packageLookups.paths,
+        },
+        watchFiles,
+      };
+    },
   };
 
   constructor(userOptions: DepsConflictResolverOptions, hooks: PluginHooks = {}) {
@@ -608,7 +616,7 @@ export class DepsConflictResolver {
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
           this.watch.snapshot = {
             result: this.draft.analysis!,
-            installedPaths: this.draft.installedPaths,
+            packageLookups: this.draft.packageLookups,
             revision: this.published!.revision,
             key: watch.key,
             inputs: watch.inputs,
@@ -698,7 +706,7 @@ export class DepsConflictResolver {
     currentDependencyInputs()?.merge(plan.inputs);
     return {
       result: plan.analysis,
-      installedPaths: this.tracksInstalledPaths ? plan.inputs.installedPackagePaths() : undefined,
+      packageLookups: this.tracksPackageLookups ? plan.inputs.packageLookups() : undefined,
     };
   }
 
@@ -736,7 +744,7 @@ export class DepsConflictResolver {
       this.options.dependencies,
       this.draft.activeMappings,
       !!this.published?.error,
-      this.draft.installedPaths,
+      this.draft.packageLookups?.paths,
     );
   }
 
@@ -849,16 +857,18 @@ export class DepsConflictResolver {
       this.metrics.measureAsync('analysis', () =>
         analyzer.analyze({ clearCache, metrics: this.metrics }),
       );
-    const installedPaths = this.tracksInstalledPaths ? new Map<string, string>() : undefined;
-    const result = await (installedPaths
-      ? withFileSystemCache(this.fileSystemCache, analyze, installedPaths)
+    const packageLookups: PackageLookups | undefined = this.tracksPackageLookups
+      ? { paths: new Map(), missing: new Map() }
+      : undefined;
+    const result = await (packageLookups
+      ? withFileSystemCache(this.fileSystemCache, analyze, packageLookups)
       : analyze());
-    return { result, installedPaths };
+    return { result, packageLookups };
   }
 
-  private setAnalysis({ result, installedPaths }: AnalyzedProject): void {
+  private setAnalysis({ result, packageLookups }: AnalyzedProject): void {
     this.draft.analysis = result;
-    this.draft.installedPaths = installedPaths;
+    this.draft.packageLookups = packageLookups;
   }
 
   private publishWithoutInstallation(): void {
@@ -996,7 +1006,7 @@ export class DepsConflictResolver {
     let invalidated = false;
     try {
       try {
-        const { result: analysis, installedPaths } = await this.analyzeCurrent({
+        const { result: analysis, packageLookups } = await this.analyzeCurrent({
           offline: true,
           preparedAliases: current.rules.activeMappings,
           clearCache: false,
@@ -1017,7 +1027,7 @@ export class DepsConflictResolver {
         this.draft = {
           ...emptyDraft(),
           analysis,
-          installedPaths,
+          packageLookups,
           installation: this.draft.installation,
         };
         this.setActiveAliasMappings(

@@ -13,6 +13,7 @@ import {
   observedReadText,
   observedRealpath,
   type DependencyInputs,
+  type PackageLookups,
 } from './dependency-inputs';
 
 /**
@@ -55,16 +56,16 @@ type LookupDirectoryCache = FileSystemCache['lookupDirectories'];
 const defaultCaches = createFileSystemCache();
 const cacheScope = new AsyncLocalStorage<{
   cache: FileSystemCache;
-  installedPaths?: Map<string, string>;
+  packageLookups?: PackageLookups;
 }>();
 const recordingCaches = new WeakMap<DependencyInputs, FileSystemCache>();
 
 export function withFileSystemCache<T>(
   cache: FileSystemCache,
   task: () => T,
-  installedPaths?: Map<string, string>,
+  packageLookups?: PackageLookups,
 ): T {
-  return cacheScope.run({ cache, installedPaths }, task);
+  return cacheScope.run({ cache, packageLookups }, task);
 }
 
 function getCaches(cache?: FileSystemCache): FileSystemCache {
@@ -210,6 +211,7 @@ export function findPackagePath(
 
   const metadataRequest = `${packageName}/package.json`;
   const scope = cacheScope.getStore();
+  const lookups = scope?.packageLookups;
   // Directory-wide negative answers are valid for one preparation pass.
   const lookupDirectories =
     (currentDependencyInputs() ?? scope) ? caches.lookupDirectories : undefined;
@@ -235,18 +237,14 @@ export function findPackagePath(
             lookupDirectories,
             metrics,
             trace,
+            lookups?.missing,
           );
           if (visible) break;
         }
       }
       const resolved = visible ? canonicalPath(visible, caches) : null;
-      if (
-        scope?.installedPaths &&
-        visible &&
-        resolved &&
-        caches.canonicalPathCache.get(visible)?.real
-      )
-        scope.installedPaths.set(visible, resolved);
+      if (lookups && visible && resolved && caches.canonicalPathCache.get(visible)?.real)
+        lookups.paths.set(visible, resolved);
       // Do not fall back to require.resolve on a miss: it can still return a
       // deleted link's old store directory from Node's private path cache.
       packagePathCache.set(cacheKey, resolved);
@@ -269,10 +267,11 @@ export function findPackagePath(
       lookupDirectories,
       metrics,
       trace,
+      lookups?.missing,
     );
-    if (visible && scope?.installedPaths) {
+    if (visible && lookups) {
       const physical = canonicalPath(visible, caches);
-      if (caches.canonicalPathCache.get(visible)?.real) scope.installedPaths.set(visible, physical);
+      if (caches.canonicalPathCache.get(visible)?.real) lookups.paths.set(visible, physical);
     }
     packagePathCache.set(cacheKey, visible);
     return visible;
@@ -305,6 +304,7 @@ function findPackagePathFallback(
   lookupDirectories: LookupDirectoryCache | undefined,
   metrics: PreparationMetrics | undefined,
   trace: PackageLookupTrace | undefined,
+  missing: PackageLookups['missing'] | undefined,
 ): string | null {
   for (const dir of iterateParentDirs(baseDir)) {
     const candidate = findPackageInLookupDirectory(
@@ -313,6 +313,7 @@ function findPackagePathFallback(
       lookupDirectories,
       metrics,
       trace,
+      missing,
     );
     if (candidate) return candidate;
   }
@@ -326,6 +327,7 @@ function findPackageInLookupDirectory(
   lookupDirectories: LookupDirectoryCache | undefined,
   metrics: PreparationMetrics | undefined,
   trace: PackageLookupTrace | undefined,
+  missing: PackageLookups['missing'] | undefined,
 ): string | null {
   if (lookupDirectories) {
     let exists = lookupDirectories.get(directory);
@@ -338,6 +340,7 @@ function findPackageInLookupDirectory(
     }
     if (!exists) {
       trace?.missing.set(join(directory, request), directory);
+      missing?.set(directory, 'directory');
       return null;
     }
   }
@@ -345,6 +348,7 @@ function findPackageInLookupDirectory(
   if (metrics) metrics.counts.lookupProbes++;
   if (!observedLookupManifest(manifest)) {
     trace?.missing.set(manifest, directory);
+    missing?.set(manifest, 'manifest');
     return null;
   }
   if (trace) trace.manifest = manifest;

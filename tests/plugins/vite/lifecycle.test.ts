@@ -80,6 +80,69 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it.each([
+    { watch: false, preparedPlan: false, existingDirectory: false },
+    { watch: true, preparedPlan: false, existingDirectory: true },
+    { watch: false, preparedPlan: true, existingDirectory: true },
+    { watch: true, preparedPlan: true, existingDirectory: false },
+  ])(
+    'handles a nearer peer installed after configuration (watch=$watch, plan=$preparedPlan)',
+    async ({ watch, preparedPlan, existingDirectory }) => {
+      const root = fixture('2.7.16');
+      const consumer = join(root, 'node_modules/legacy');
+      const options = { projectRoot: root, dependencies: ['legacy'], offline: true, strict: true };
+      if (existingDirectory) mkdirSync(join(consumer, 'node_modules'));
+      if (preparedPlan) {
+        const result = await getResolverBuild(
+          new DepsConflictResolver(options),
+        ).initializeAndSavePreparedPlan();
+        expect(result?.file).toBeDefined();
+      }
+      const analyze = vi.spyOn(DependencyAnalyzer.prototype, 'analyze');
+      const builder = await createBuilder(
+        {
+          root,
+          configFile: false,
+          logLevel: 'silent',
+          plugins: [plugin({ ...options, preparedPlan })],
+          build: {
+            lib: { entry: join(root, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
+            watch: watch ? {} : null,
+          },
+        },
+        true,
+      );
+      expect(analyze).toHaveBeenCalledTimes(preparedPlan ? 0 : 1);
+      writeModule(
+        consumer,
+        'vue',
+        { name: 'vue', version: '2.7.16' },
+        'export const version = "nearer-provider";',
+      );
+      const output = join(root, 'dist/runtime.cjs');
+      const compile = () => builder.build(builder.environments.client!);
+      if (!watch) {
+        await expect(compile()).rejects.toThrow(/package lookup.*Restart the Vite build/s);
+        expect(existsSync(output)).toBe(false);
+        return;
+      }
+      const watcher = await compile();
+      if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          watcher.on('event', (event) => {
+            if (event.code === 'ERROR') reject(event.error);
+            if (event.code === 'END') resolve();
+          });
+        });
+        expect(createRequire(import.meta.url)(output).version).toBe('nearer-provider');
+        expect(analyze).toHaveBeenCalledTimes(preparedPlan ? 1 : 2);
+      } finally {
+        await watcher.close();
+      }
+    },
+  );
+
   it.each(['strict build', 'watch', 'prepared watch', 'unchanged watch'] as const)(
     'validates the configured entry before the first %s',
     async (mode) => {

@@ -5,6 +5,7 @@ import {
   observeLockfile,
   observedLookupDirectory,
   type DependencyInputs,
+  type PackageLookups,
 } from '../utils/dependency-inputs';
 import {
   canonicalPath,
@@ -61,7 +62,7 @@ function watchFiles(
 
 export interface AnalyzedProject {
   result: AnalysisResult;
-  installedPaths?: ReadonlyMap<string, string>;
+  packageLookups?: PackageLookups;
 }
 
 export interface AnalysisSnapshot extends AnalyzedProject {
