@@ -145,6 +145,9 @@ it('installs a real npm alias, verifies it, and reuses the result offline withou
       await readFile(join(root, 'node_modules/aliased-vue2/package.json'), 'utf8'),
     );
     expect(installed).toMatchObject({ name: 'vue', version: '2.7.16' });
+    expect(
+      JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['aliased-vue2'],
+    ).toBe('npm:vue@2.7.16');
     const importer = await realpath(join(root, 'node_modules/legacy/index.js'));
     expect(resolver.resolveModule('vue', importer)).toBe('aliased-vue2');
 
