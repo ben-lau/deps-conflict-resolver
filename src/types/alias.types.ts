@@ -53,6 +53,8 @@ export interface AliasMapping {
  * 依赖分析结果
  */
 export interface AnalysisResult {
+  /** Package manifests and workspace files consulted by dependency analysis. */
+  watchFiles?: string[];
   /** Structured issues; optional for compatibility with older result producers. */
   diagnostics?: ResolverDiagnostic[];
   /**

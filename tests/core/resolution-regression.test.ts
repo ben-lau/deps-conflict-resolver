@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ResolutionError } from '../../src/core/resolution-error';
 import { createResolver } from '../../src/core/resolver';
 import type { PackageJson } from '../../src/types';
+import { npmRegistryClient } from '../../src/core/registry-client';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
 
@@ -29,7 +30,7 @@ function project(manifest: PackageJson, prefix = 'deps-resolution-'): string {
   return root;
 }
 
-function pkg(root: string, name: string, manifest: PackageJson): string {
+function pkg(root: string, name: string, manifest: PackageJson & Record<string, unknown>): string {
   const directory = join(root, 'node_modules', name);
   mkdirSync(directory, { recursive: true });
   writeFileSync(
@@ -109,6 +110,146 @@ describe('diagnostics and deterministic offline operation', () => {
     ).rejects.toBeInstanceOf(ResolutionError);
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'rejects the wrong installed package regardless of graph traversal: visited=%s',
+    async (graphVisitsAlias) => {
+      const { root } = vueProject();
+      pkg(root, 'vue2', { name: 'unrelated-package', version: '2.7.16' });
+      pkg(root, 'legacy', {
+        peerDependencies: { vue: '^2' },
+        ...(graphVisitsAlias ? { dependencies: { vue2: 'npm:vue@2.7.16' } } : {}),
+      });
+      await expect(
+        createResolver({ ...baseOptions(root), offline: true, strict: true }),
+      ).rejects.toMatchObject({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING' }),
+        ]),
+      });
+    },
+  );
+
+  it('assigns distinct aliases to scoped and unscoped packages with the same normalized name', async () => {
+    const root = project({
+      dependencies: { consumer: '1.0.0', '@scope/foo': '2.0.0', 'scope-foo': '2.0.0' },
+    });
+    pkg(root, 'consumer', { peerDependencies: { '@scope/foo': '^1', 'scope-foo': '^1' } });
+    for (const name of ['@scope/foo', 'scope-foo']) pkg(root, name, { version: '2.0.0' });
+    vi.spyOn(npmRegistryClient, 'fetchAllVersions').mockResolvedValue(['1.0.0', '2.0.0']);
+    vi.spyOn(npmRegistryClient, 'fetchPackageManifest').mockImplementation(
+      async (name, version) => ({ name, version }),
+    );
+    const resolver = await createResolver(baseOptions(root, ['consumer']));
+    const mappings = resolver.getAnalysisResult()!.aliasMappings;
+    expect(mappings).toHaveLength(2);
+    expect(new Set(mappings.map((mapping) => mapping.aliasName)).size).toBe(2);
+    expect(mappings.map((mapping) => mapping.originalName)).toEqual(['@scope/foo', 'scope-foo']);
+  });
+
+  it('recognizes local and workspace aliases that link to the same physical package', async () => {
+    const root = project({
+      workspaces: ['packages/*'],
+      dependencies: { vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+    });
+    const app = join(root, 'packages/app');
+    mkdirSync(join(app, 'node_modules'), { recursive: true });
+    writeFileSync(
+      join(app, 'package.json'),
+      JSON.stringify({ name: 'app', dependencies: { legacy: '1.0.0', vue2: 'npm:vue@2.7.16' } }),
+    );
+    const physical = pkg(root, 'vue-store', {
+      name: 'vue',
+      version: '2.7.16',
+      exports: './index.js',
+    });
+    pkg(root, 'vue', { version: '3.5.0' });
+    const legacy = pkg(app, 'legacy', { peerDependencies: { vue: '^2' } });
+    symlinkSync(physical, join(root, 'node_modules/vue2'), 'junction');
+    symlinkSync(physical, join(app, 'node_modules/vue2'), 'junction');
+    const resolver = await createResolver({ ...baseOptions(app), offline: true, strict: true });
+    expect(resolver.getDiagnostics()).toEqual([]);
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+  });
+
+  it('keeps both configured names when roots share one physical package', async () => {
+    const root = project({
+      dependencies: {
+        a: 'npm:legacy@1.0.0',
+        b: 'npm:legacy@1.0.0',
+        vue: '3.5.0',
+        vue2: 'npm:vue@2.7.16',
+      },
+    });
+    const physical = pkg(root, 'legacy-store', { name: 'legacy', peerDependencies: { vue: '^2' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    for (const name of ['a', 'b'])
+      symlinkSync(physical, join(root, 'node_modules', name), 'junction');
+    const resolver = await createResolver({
+      ...baseOptions(root, ['a', 'b']),
+      offline: true,
+      strict: true,
+    });
+    expect(resolver.getDiagnostics()).toEqual([]);
+    expect(resolver.getAnalysisResult()!.aliasMappings[0]!.usedBy).toEqual(['a', 'b']);
+    expect(resolver.resolveModule('vue', join(physical, 'index.js'))).toBe('vue2');
+  });
+
+  it.each([
+    'mixed',
+    'same-provider',
+    'no-peer',
+    'optional-peer',
+    'excluded',
+    'included',
+    'isolated',
+    'outside-roots',
+  ])(
+    'diagnoses shared peer contexts without rejecting intentional or independent sharing: %s',
+    async (kind) => {
+      const root = project({
+        dependencies: { legacy: '1.0.0', modern: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+      });
+      const legacy = pkg(root, 'legacy', {
+        peerDependencies: { vue: '^2' },
+        dependencies: { shared: '1.0.0' },
+      });
+      const modern = pkg(root, 'modern', {
+        peerDependencies: { vue: kind === 'same-provider' ? '^2' : '^3' },
+        dependencies: { shared: '1.0.0' },
+      });
+      const sharedManifest = {
+        ...(kind === 'no-peer' ? {} : { peerDependencies: { vue: '>=2' } }),
+        ...(kind === 'optional-peer' ? { peerDependenciesMeta: { vue: { optional: true } } } : {}),
+      };
+      pkg(root, 'shared', sharedManifest);
+      if (kind === 'isolated') {
+        pkg(legacy, 'shared', sharedManifest);
+        pkg(modern, 'shared', sharedManifest);
+      }
+      pkg(root, 'vue', { version: '3.5.0' });
+      pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+      const resolver = await createResolver({
+        ...baseOptions(root, kind === 'outside-roots' ? ['legacy'] : ['legacy', 'modern']),
+        offline: true,
+        strict: true,
+        ...(kind === 'excluded' ? { excludeRedirects: { vue: ['shared'] } } : {}),
+        ...(kind === 'included' ? { includeRedirects: { vue: ['modern'] } } : {}),
+      });
+      const diagnostics = resolver
+        .getDiagnostics()
+        .filter((diagnostic) => diagnostic.code === 'SHARED_PEER_CONTEXT');
+      expect(diagnostics).toHaveLength(kind === 'mixed' ? 1 : 0);
+      if (kind === 'mixed')
+        expect(diagnostics[0]).toMatchObject({
+          severity: 'warning',
+          packageName: 'vue',
+          requestedBy: expect.arrayContaining(['legacy', 'modern']),
+          message: expect.stringContaining('shared'),
+        });
+    },
+  );
 
   it('preserves registry errors as diagnostics rather than reporting no conflicts', async () => {
     const { root } = vueProject(false);
