@@ -186,6 +186,8 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason 可以表示已重定向、被排除、没有匹配、未初始化或多版本歧义；它也会说明 beforeResolve 钩子是否接管请求。诊断使用稳定的 code，无需解析日志。严格初始化失败时可以捕获导出的 ResolutionError 并读取 diagnostics。
 
+需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。并发的 installDependencies() 会共享同一次安装；安装未结束时 invalidate() 会抛错，应先等待安装完成。包管理器退出后会重新校验包括复用项在内的 alias，失配项不会继续发布为有效映射。
+
 ### 兼容性与验证
 
 - Vite 4–7 使用 esbuild 预构建适配，Vite 8 使用原生 Rolldown 适配。兼容脚本验证真实 Vue 2 / Vue 3 在客户端冷启动预构建、SSR 构建和 SSR 开发模式（ESM / CommonJS）中的版本及实例身份，CI 覆盖 Vite 4.0.0、5、6、7、8。
@@ -195,6 +197,8 @@ explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason �
 - workspace 根目录通过 dependencies、devDependencies 或 optionalDependencies 声明的 alias 均可离线复用，前提是实际安装的包名正确、版本满足目标 peer。
 - workspace 的真实路径与 node_modules 链接均参与匹配。相同物理 importer 匹配多个不同 alias 时报告 AMBIGUOUS_IMPORTER，不按名称随意选择；strict=true 时中止该请求。
 - 同一个 alias 被多个消费方共享时，会检查各方的有效 peer provider，包含使用宿主版本的消费方及 include/exclude 覆盖。provider 不一致会报告 AMBIGUOUS_IMPORTER，strict=true 时拒绝初始化；不声明该 peer 的消费方不会被误判为冲突。
+- 普通共享包若声明了相关 peer，且配置入口为同一物理实例带来不同的有效 provider，会产生 SHARED_PEER_CONTEXT 告警。它只检查已配置入口可达的安装图，尊重显式 include/exclude；不扫描图外消费者，也不自动复制包。宽泛的 peer 范围不能证明业务一定出错，因此该告警不会使 strict=true 初始化失败；需要跨运行时共享的包应明确配置解析范围，或隔离安装实例。
+- linked/workspace 包的重定向请求从宿主工程解析，根请求与子路径均保留打包器的 exports 和 import/require 条件。Webpack watch 会监听分析涉及的包清单，重定向改变时重新解析相关模块，并保留无关模块缓存。
 - 当前未提供 Yarn PnP 的完整适配，也未实现私有 registry 的 scope 路由与认证配置继承。
 - 多版本运行时共存仍需要合适的挂载/更新/卸载桥接；本插件不承担 SFC 编译器转换、跨版本组件协议或 CSS 隔离。
 

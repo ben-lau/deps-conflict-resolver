@@ -3,6 +3,7 @@ import * as vite from 'vite';
 import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, extname, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { compileFunction } from 'node:vm';
 import { findPackagePath, iterateParentDirs, readPackageJsonCached } from '../../utils/fs';
 import type { SsrExternalPolicy } from './optimizer';
 import { LruCache } from '../../utils/lru-cache';
@@ -19,18 +20,30 @@ function isDefault(name: ExportNode['exported']): boolean {
 
 function hasDefaultExport(file: string): boolean {
   const extension = extname(file);
-  if (extension !== '.mjs') {
-    let esm = false;
-    if (extension !== '.cjs') {
-      for (const directory of iterateParentDirs(dirname(file))) {
-        const manifest = readPackageJsonCached(directory);
-        if (manifest) {
-          esm = manifest.type === 'module';
-          break;
-        }
+  if (extension === '.cjs') return true;
+  let format = extension === '.mjs' ? 'module' : undefined;
+  if (!format) {
+    for (const directory of iterateParentDirs(dirname(file))) {
+      const manifest = readPackageJsonCached(directory);
+      if (manifest) {
+        format = manifest.type;
+        break;
       }
     }
-    if (!esm) return true;
+  }
+  if (format === 'commonjs') return true;
+  const source = readFileSync(file, 'utf8');
+  if (format !== 'module') {
+    try {
+      // Match Node's syntax detection without executing the dependency. A
+      // CommonJS body permits top-level return and dynamic import, whereas ESM
+      // declarations, import.meta, top-level await and wrapper redeclarations
+      // fail compilation here and are validated by the ESM parser below.
+      compileFunction(source, ['exports', 'require', 'module', '__filename', '__dirname']);
+      return true;
+    } catch {
+      // Ambiguous .js can be native ESM even without a package "type" field.
+    }
   }
   // Vite 5+ exposes its parser. Namespace lookup keeps ordinary Vite 4 imports
   // compatible; external=true itself is not a Vite 4 SSR option.
@@ -38,7 +51,7 @@ function hasDefaultExport(file: string): boolean {
     | ((source: string) => { body: ExportNode[] })
     | undefined;
   if (!parse) throw new Error('Inspecting ESM SSR externals requires Vite 5 or newer');
-  return parse(readFileSync(file, 'utf8')).body.some(
+  return parse(source).body.some(
     (node) =>
       node.type === 'ExportDefaultDeclaration' ||
       isDefault(node.exported) ||

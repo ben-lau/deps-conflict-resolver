@@ -186,6 +186,8 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 explainResolution returns resolved, reason, aliases, and matchedPaths. Reasons distinguish redirection, exclusion, no match, inactive state, ambiguity, and beforeResolve hook handling. Diagnostics have stable codes and do not require parsing log messages. Strict initialization failures throw the exported ResolutionError, which exposes diagnostics.
 
+Pass `{ skipHook: true }` as the third argument to inspect static redirect rules without invoking user callbacks. Concurrent installDependencies() calls share one installation. invalidate() throws while installation is pending; await it first. After the package manager exits, all accepted aliases, including reused ones, are revalidated. Mismatched aliases are removed from active mappings.
+
 ### Compatibility and Verification
 
 - Vite 4–7 use an esbuild optimizer adapter; Vite 8 uses native Rolldown hooks. The compatibility script checks actual Vue 2 / Vue 3 versions and instance identities during client cold optimization, SSR build, and SSR development with both ESM and CommonJS. CI covers Vite 4.0.0, 5, 6, 7, and 8.
@@ -195,6 +197,8 @@ explainResolution returns resolved, reason, aliases, and matchedPaths. Reasons d
 - Installed aliases declared in workspace-root dependencies, devDependencies, or optionalDependencies can be reused offline when their actual package name is correct and their installed version satisfies the target peer.
 - Workspace real paths and node_modules links both match. Multiple aliases for the same physical importer produce AMBIGUOUS_IMPORTER rather than a name-based arbitrary choice; strict=true rejects the request.
 - Shared aliases validate every consumer's effective peer provider, including host-satisfied consumers and include/exclude overrides. Different providers produce AMBIGUOUS_IMPORTER and strict=true rejects initialization. Consumers that do not declare that peer are not treated as conflicting.
+- Ordinary shared packages declaring a relevant peer emit SHARED_PEER_CONTEXT when configured entries bring different effective providers to one physical instance. This check covers the installed graph reachable from configured entries, respects explicit include/exclude choices, and neither scans outside consumers nor duplicates packages. A broad peer range cannot establish that application behavior is invalid, so this advisory does not reject strict initialization. Configure the intended redirect scope or isolate package instances when crossing runtime contexts.
+- Redirects from linked/workspace packages resolve from the host while preserving the bundler's exports and import/require conditions for roots and subpaths. Webpack watch tracks consulted package manifests and re-resolves affected modules when redirects change, retaining unrelated module caches.
 - Full Yarn PnP support and private-registry scope/authentication inheritance are not implemented.
 - Coexisting framework versions still require suitable mount/update/unmount bridges. SFC compiler conversion, cross-version component protocols, and CSS isolation are outside this plugin's scope.
 

@@ -113,7 +113,7 @@ afterEach(() => {
   clearPackageJsonCache();
 });
 
-describe.each(['webpack'] as const)('linked aliases in %s', (tool) => {
+describe.each(['webpack', 'vite'] as const)('linked aliases in %s', (tool) => {
   it.each([false, true])(
     'resolves root and exported subpaths from the host: commonjs=%s',
     async (commonjs) => {

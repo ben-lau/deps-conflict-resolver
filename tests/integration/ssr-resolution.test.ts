@@ -90,7 +90,7 @@ function nativeDependency(root: string, imported = false, subpath = false): void
 }
 
 describe('SSR alias resolution', () => {
-  it.each([
+  it.for([
     { commonjs: false, location: 'root', pattern: false },
     { commonjs: true, location: 'root', pattern: false },
     { commonjs: false, location: 'nested', pattern: false },
@@ -100,17 +100,33 @@ describe('SSR alias resolution', () => {
     { commonjs: false, location: 'esm-only', pattern: true },
     { commonjs: false, location: 'named-only', pattern: true },
     { commonjs: false, location: 'named-only-js', pattern: true },
+    { commonjs: false, location: 'typeless-named-only-js', pattern: true },
+    { commonjs: false, location: 'nested-cjs-return', pattern: false },
     { commonjs: false, location: 'nested-dual-main', pattern: false },
   ])(
     'applies external=true to nested SSR requests: $commonjs, $location, pattern=$pattern',
-    async ({ commonjs, location, pattern }) => {
+    async ({ commonjs, location, pattern }, context) => {
+      if (
+        location === 'typeless-named-only-js' &&
+        Number(process.versions.node.split('.')[0]) < 22
+      ) {
+        context.skip('Requires native Node syntax detection');
+      }
       const { root } = fixture(commonjs);
       nativeDependency(root);
       const legacy = join(root, 'node_modules/legacy');
       let native = join(root, 'node_modules/native-addon');
-      const namedOnly = location === 'named-only' || location === 'named-only-js';
+      const namedOnly = location.includes('named-only');
       if (
-        ['nested', 'esm-only', 'named-only', 'named-only-js', 'nested-dual-main'].includes(location)
+        [
+          'nested',
+          'esm-only',
+          'named-only',
+          'named-only-js',
+          'typeless-named-only-js',
+          'nested-cjs-return',
+          'nested-dual-main',
+        ].includes(location)
       ) {
         const directory = join(legacy, 'node_modules/native-addon');
         mkdirSync(join(legacy, 'node_modules'), { recursive: true });
@@ -118,13 +134,13 @@ describe('SSR alias resolution', () => {
         native = directory;
       }
       if (location === 'esm-only' || namedOnly) {
-        const esmEntry = location === 'named-only-js' ? './index.js' : './index.mjs';
+        const esmEntry = location.endsWith('-js') ? './index.js' : './index.mjs';
         writeFileSync(
           join(native, 'package.json'),
           JSON.stringify({
             name: 'native-addon',
             version: '1.0.0',
-            type: 'module',
+            ...(location === 'typeless-named-only-js' ? {} : { type: 'module' }),
             exports: { '.': { import: esmEntry } },
           }),
         );
@@ -133,6 +149,9 @@ describe('SSR alias resolution', () => {
           (namedOnly ? 'export const ready = true;' : 'export default { ready: true };') +
             'export const load = () => import("./binding.node");',
         );
+      }
+      if (location === 'nested-cjs-return') {
+        writeFileSync(join(native, 'index.js'), 'exports.ready = true; return;');
       }
       if (location === 'nested-dual-main') {
         writeFileSync(
