@@ -15,7 +15,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const engineRoot = resolve(process.argv[2] ?? repository);
+const args = process.argv.slice(2);
+const strict = !args.includes('--non-strict');
+const engineRoot = resolve(args.find((arg) => arg !== '--non-strict') ?? repository);
 const root = mkdtempSync(join(tmpdir(), 'deps-vite-compat-'));
 const originalInfo = console.info;
 console.info = () => {};
@@ -77,7 +79,7 @@ try {
     depsConflictResolverVitePlugin({
       dependencies: ['legacy'],
       offline: true,
-      strict: true,
+      strict,
       ssr: 'auto',
       ...overrides,
     });
@@ -96,11 +98,16 @@ try {
   const config = await optimizerConfig();
   const optimizer = Number.parseInt(vite.version, 10) >= 8 ? 'rolldown' : 'esbuild';
   if (optimizer === 'rolldown') {
-    assert(
-      config.optimizeDeps.rolldownOptions.plugins.some((p) =>
-        p.name.startsWith('deps-conflict-resolver-rolldown-'),
-      ),
+    const redirect = config.optimizeDeps.rolldownOptions.plugins.find((candidate) =>
+      candidate.name.startsWith('deps-conflict-resolver-rolldown-'),
     );
+    assert(redirect);
+    if (!strict) {
+      const filter = redirect.resolveId.filter?.id;
+      assert(filter instanceof RegExp);
+      assert(filter.test('vue/dist/vue.esm-bundler.js'));
+      assert(!filter.test('vue-extra'));
+    }
   }
   const metadata = await vite.optimizeDeps(config, true);
   const legacy = await import(pathToFileURL(metadata.optimized.legacy.file).href);
@@ -404,7 +411,7 @@ try {
       configFile: false,
       logLevel: 'silent',
       plugins: [
-        depsConflictResolverVitePlugin({ dependencies: ['legacy'], offline: true, strict: true }),
+        depsConflictResolverVitePlugin({ dependencies: ['legacy'], offline: true, strict }),
         {
           name: 'framework-root',
           ...(post ? { enforce: 'post' } : {}),
@@ -440,7 +447,7 @@ try {
       depsConflictResolverVitePlugin({
         dependencies: ['legacy'],
         offline: true,
-        strict: true,
+        strict,
         hooks: {
           onAnalysisComplete: () => {
             if (worker) workerAnalyses++;
@@ -491,6 +498,7 @@ try {
     JSON.stringify(
       {
         vite: vite.version,
+        strict,
         optimizer,
         dev: { host: host.version, legacy: legacy.runtimeVersion },
         changedRedirect: changedLegacy.runtimeVersion,

@@ -3,7 +3,7 @@ import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
-import { createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
+import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
 import { createSsrExternalPolicy } from './ssr-external';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
@@ -94,10 +94,11 @@ function mergeOptimizer(
  */
 export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plugin {
   let resolver: DepsConflictResolver | null = null;
-  let isEnabled = true;
   let resolveSsrExternal: SsrExternalPolicy['resolve'] | undefined;
   let ssrExternalEnabled = false;
   let isSsrExternal: SsrExternalPolicy['isExternal'] | undefined;
+  let requestFilter: RegExp | undefined;
+  let configured: ResolvedConfig | undefined;
 
   const {
     enableInDev = true,
@@ -106,6 +107,18 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     hooks,
     ...resolverOptions
   } = options;
+  // Strict snapshots can report a change on any request. Custom hooks also
+  // receive requests outside the active aliases.
+  const filterRequests = !hooks?.beforeResolve && !resolverOptions.strict;
+
+  function enabledFor(command: ResolvedConfig['command']): boolean {
+    return command === 'serve' ? enableInDev : enableInBuild;
+  }
+
+  function resolverOwner(config: ResolvedConfig): ResolvedConfig {
+    const mainConfig = (config as ResolvedConfig & { mainConfig?: ResolvedConfig }).mainConfig;
+    return config.isWorker && mainConfig?.plugins.includes(plugin) ? mainConfig : config;
+  }
 
   if (options.debug) {
     logger.setLevel(LogLevel.ALL);
@@ -114,6 +127,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
   function runtimeConfig(
     config: ResolvedConfig,
     activeResolver: DepsConflictResolver,
+    aliasPathMappings: AliasPathMapping[],
   ): UserConfig | undefined {
     const command = config.command;
     // 获取分析结果
@@ -131,7 +145,6 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     }
 
     // 获取别名路径映射并转换为 Vite 格式
-    const aliasPathMappings = activeResolver.getAliasPathMappings();
     if (aliasPathMappings.length === 0) {
       logger.info('No active aliases available');
       return undefined;
@@ -212,18 +225,30 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 
     // 创建 esbuild 插件用于预构建阶段的别名解析
-    const optimizeDeps = createOptimizerOptions(activeResolver, projectRoot, viteVersion);
+    const optimizeDeps = createOptimizerOptions(
+      activeResolver,
+      projectRoot,
+      viteVersion,
+      undefined,
+      filterRequests,
+    );
     ssrExternalEnabled =
       ssr === 'auto' && command === 'serve' && external === true && manualNoExternal !== true;
     isSsrExternal = (packageName) => !keepsInternal(packageName);
     const ssrOptimizeDeps = ssrExternalEnabled
-      ? createOptimizerOptions(activeResolver, projectRoot, viteVersion, {
-          isExternal: (packageName) => !keepsInternal(packageName),
-          resolve: (source, importer, isRequire) => {
-            if (!resolveSsrExternal) throw new Error('SSR external resolver is not initialized');
-            return resolveSsrExternal(source, importer, isRequire);
+      ? createOptimizerOptions(
+          activeResolver,
+          projectRoot,
+          viteVersion,
+          {
+            isExternal: (packageName) => !keepsInternal(packageName),
+            resolve: (source, importer, isRequire) => {
+              if (!resolveSsrExternal) throw new Error('SSR external resolver is not initialized');
+              return resolveSsrExternal(source, importer, isRequire);
+            },
           },
-        })
+          filterRequests,
+        )
       : optimizeDeps;
 
     // 返回要合并的配置
@@ -259,11 +284,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
     // for all config hooks, including framework plugins that choose the root.
     enforce: 'pre',
     config(config, { command }) {
-      const enabled =
-        (command === 'serve' && enableInDev) || (command === 'build' && enableInBuild);
       const [major, minor] = viteVersion.split('.').map(Number);
       if (
-        enabled &&
+        enabledFor(command) &&
         ssr === 'auto' &&
         command === 'serve' &&
         (major! < 5 || (major === 5 && minor === 0)) &&
@@ -279,16 +302,17 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       // Vite 4 invokes the same plugin concurrently for its worker config.
       // Membership, rather than initialization timing, identifies the main
       // instance. Worker-only instances must prepare their own resolver.
-      const mainConfig = (config as ResolvedConfig & { mainConfig?: ResolvedConfig }).mainConfig;
-      if (config.isWorker && mainConfig?.plugins.includes(plugin)) return;
-      isEnabled =
-        (config.command === 'serve' && enableInDev) ||
-        (config.command === 'build' && enableInBuild);
+      if (resolverOwner(config) !== config) return;
       resolver = null;
+      requestFilter = undefined;
+      configured = undefined;
       ssrExternalEnabled = false;
       resolveSsrExternal = undefined;
       isSsrExternal = undefined;
-      if (!isEnabled) return;
+      if (!enabledFor(config.command)) {
+        configured = config;
+        return;
+      }
       resolver = new DepsConflictResolver(
         {
           ...resolverOptions,
@@ -297,6 +321,9 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         hooks,
       );
       await resolver.initialize();
+      const aliasPathMappings = resolver.getAliasPathMappings();
+      if (filterRequests) requestFilter = aliasRequestFilter(aliasPathMappings);
+      configured = config;
       // Worker builds inherit optimizer/SSR objects from the main config.
       // Only their module resolver is ours; keep those shared objects intact.
       if (config.isWorker) return;
@@ -311,7 +338,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           config.configFileDependencies.push(path);
         }
       }
-      const addition = runtimeConfig(config, resolver);
+      const addition = runtimeConfig(config, resolver, aliasPathMappings);
       if (!addition) return;
       // Do not reassign resolve.alias here: Vite already created its alias
       // plugin. resolveId and the optimizer resolve through the final resolver.
@@ -349,12 +376,32 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         ).resolve;
     },
 
+    applyToEnvironment(environment) {
+      if (resolverOwner(environment.getTopLevelConfig()) !== configured) return true;
+      if (!resolver) return false;
+      if (!filterRequests) return true;
+      if (!requestFilter) return false;
+      // Vite caches compiled filters by plugin identity. Give each environment
+      // a fresh hook so restarting a shared plugin can change the target set.
+      const hook = plugin.resolveId;
+      if (!hook || typeof hook === 'function') return true;
+      return {
+        name: PLUGIN_NAME,
+        enforce: 'pre',
+        resolveId: { ...hook, filter: { id: requestFilter } },
+      };
+    },
     resolveId: {
       // Vite's alias plugin precedes user plugins ordered by enforce.
       // Inspect the original request before a global alias rewrites it.
       order: 'pre',
       handler(source, importer, resolveOptions) {
-        if (!isEnabled || !resolver || isPathLikeRequest(source) || isVirtualModuleRequest(source))
+        if (
+          !resolver ||
+          (filterRequests && !requestFilter?.test(source)) ||
+          isPathLikeRequest(source) ||
+          isVirtualModuleRequest(source)
+        )
           return null;
         const resolved = resolver.resolveModule(source, importer);
         if (!resolved) return null;

@@ -3,6 +3,7 @@ import type { Plugin as EsbuildPlugin } from 'esbuild';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { DepsConflictResolver } from '../../core/resolver';
+import type { AliasPathMapping } from '../../types';
 import { escapeRegex } from '../../utils/regex';
 
 export interface OptimizerOptions {
@@ -16,35 +17,41 @@ export interface SsrExternalPolicy {
   resolve: (source: string, importer: string, isRequire: boolean) => Promise<string | undefined>;
 }
 
-async function externalId(
+export function aliasRequestFilter(mappings: readonly AliasPathMapping[]): RegExp | undefined {
+  const originals = [...new Set(mappings.map(({ originalName }) => originalName))];
+  return originals.length
+    ? new RegExp('^(' + originals.map(escapeRegex).join('|') + ')([/?#]|$)')
+    : undefined;
+}
+
+function resolveExternalId(
   policy: SsrExternalPolicy,
   source: string,
   importer: string,
   isRequire: boolean,
-): Promise<string | null> {
+): Promise<string | undefined> | undefined {
   // Leave paths, private imports, protocols and virtual IDs to their normal
   // resolvers. Only installed Node-compatible package entries are externalized.
-  if (!/^[\w@]/.test(source) || source.includes(':')) return null;
+  if (!/^[\w@]/.test(source) || source.includes(':')) return undefined;
   const request = source.split(/[?#]/, 1)[0] ?? '';
   const parts = request.split('/');
   const packageName = request.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!;
-  if (!policy.isExternal(packageName)) return null;
-  return (await policy.resolve(source, importer, isRequire)) ?? null;
+  return policy.isExternal(packageName) ? policy.resolve(source, importer, isRequire) : undefined;
 }
 
 function esbuildExternalPlugin(policy: SsrExternalPolicy): EsbuildPlugin {
   return {
     name: 'deps-conflict-resolver-ssr-external',
     setup(build) {
-      build.onResolve({ filter: /^[\w@]/ }, async (args) => {
+      build.onResolve({ filter: /^[\w@]/ }, (args) => {
         if (!args.importer || args.kind === 'entry-point') return null;
-        const id = await externalId(
+        const resolution = resolveExternalId(
           policy,
           args.path,
           args.importer,
           args.kind.startsWith('require'),
         );
-        return id ? { path: id, external: true } : null;
+        return resolution?.then((id) => (id ? { path: id, external: true } : null)) ?? null;
       });
     },
   };
@@ -53,13 +60,16 @@ function esbuildExternalPlugin(policy: SsrExternalPolicy): EsbuildPlugin {
 function rolldownExternalPlugin(policy: SsrExternalPolicy): Plugin {
   return {
     name: 'deps-conflict-resolver-ssr-external',
-    async resolveId(source, importer, options) {
+    resolveId(source, importer, options) {
       if (!importer || options.isEntry) return null;
       const kind = (options as typeof options & { kind?: string }).kind;
       const isRequire =
         kind?.startsWith('require') ?? options.custom?.['node-resolve']?.isRequire === true;
-      const id = await externalId(policy, source, importer, isRequire);
-      return id ? { id, external: true } : null;
+      return (
+        resolveExternalId(policy, source, importer, isRequire)?.then((id) =>
+          id ? { id, external: true } : null,
+        ) ?? null
+      );
     },
   };
 }
@@ -72,12 +82,9 @@ function esbuildPlugin(
   return {
     name: 'deps-conflict-resolver-esbuild-' + fingerprint,
     setup(build) {
-      const originals = [
-        ...new Set(resolver.getAliasPathMappings().map((mapping) => mapping.originalName)),
-      ];
-      if (originals.length === 0) return;
-      const filter = new RegExp('^(' + originals.map(escapeRegex).join('|') + ')(?:[/?#].*)?$');
-      build.onResolve({ filter }, async (args) => {
+      const filter = aliasRequestFilter(resolver.getAliasPathMappings());
+      if (!filter) return;
+      build.onResolve({ filter }, (args) => {
         if (!args.importer) return null;
         const redirected = resolver.resolveModule(args.path, args.importer);
         if (!redirected) return null;
@@ -106,19 +113,24 @@ function rolldownPlugin(
   resolver: DepsConflictResolver,
   projectRoot: string,
   fingerprint: string,
+  filter: RegExp | undefined,
 ): Plugin {
   return {
     name: 'deps-conflict-resolver-rolldown-' + fingerprint,
-    async resolveId(source, importer, resolveOptions) {
-      if (!importer) return null;
-      const redirected = resolver.resolveModule(source, importer);
-      if (!redirected) return null;
-      const resolved = await this.resolve(redirected, join(projectRoot, 'package.json'), {
-        ...resolveOptions,
-        skipSelf: true,
-      });
-      if (!resolved) throw new Error('Cannot resolve active alias: ' + redirected);
-      return resolved;
+    resolveId: {
+      ...(filter && { filter: { id: filter } }),
+      handler(source, importer, resolveOptions) {
+        if (!importer || (filter && !filter.test(source))) return null;
+        const redirected = resolver.resolveModule(source, importer);
+        if (!redirected) return null;
+        return this.resolve(redirected, join(projectRoot, 'package.json'), {
+          ...resolveOptions,
+          skipSelf: true,
+        }).then((resolved) => {
+          if (!resolved) throw new Error('Cannot resolve active alias: ' + redirected);
+          return resolved;
+        });
+      },
     },
   };
 }
@@ -128,27 +140,33 @@ export function createOptimizerOptions(
   projectRoot: string,
   viteVersion: string,
   ssrExternal?: SsrExternalPolicy,
+  filterRequests = true,
 ): OptimizerOptions {
-  const include = [...new Set(resolver.getAliasPathMappings().map((mapping) => mapping.aliasName))];
+  const mappings = resolver.getAliasPathMappings();
+  const include = [...new Set(mappings.map((mapping) => mapping.aliasName))];
   // Vite hashes optimizer plugin names across esbuild and Rolldown releases.
   const fingerprint = resolver.getResolutionFingerprint();
-  return Number.parseInt(viteVersion, 10) >= 8
-    ? {
-        include,
-        rolldownOptions: {
-          plugins: [
-            rolldownPlugin(resolver, projectRoot, fingerprint),
-            ...(ssrExternal ? [rolldownExternalPlugin(ssrExternal)] : []),
-          ],
-        },
-      }
-    : {
-        include,
-        esbuildOptions: {
-          plugins: [
-            esbuildPlugin(resolver, projectRoot, fingerprint),
-            ...(ssrExternal ? [esbuildExternalPlugin(ssrExternal)] : []),
-          ],
-        },
-      };
+  if (Number.parseInt(viteVersion, 10) >= 8) {
+    const filter = filterRequests ? aliasRequestFilter(mappings) : undefined;
+    return {
+      include,
+      rolldownOptions: {
+        plugins: [
+          ...(!filterRequests || filter
+            ? [rolldownPlugin(resolver, projectRoot, fingerprint, filter)]
+            : []),
+          ...(ssrExternal ? [rolldownExternalPlugin(ssrExternal)] : []),
+        ],
+      },
+    };
+  }
+  return {
+    include,
+    esbuildOptions: {
+      plugins: [
+        esbuildPlugin(resolver, projectRoot, fingerprint),
+        ...(ssrExternal ? [esbuildExternalPlugin(ssrExternal)] : []),
+      ],
+    },
+  };
 }

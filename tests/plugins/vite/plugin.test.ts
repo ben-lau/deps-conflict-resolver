@@ -45,6 +45,13 @@ function resolveHook(plugin: Plugin) {
   return typeof hook === 'function' ? hook : hook.handler;
 }
 
+function applyToEnvironment(plugin: Plugin, config: ResolvedConfig) {
+  const environment = {
+    getTopLevelConfig: () => config,
+  } as Parameters<NonNullable<Plugin['applyToEnvironment']>>[0];
+  return plugin.applyToEnvironment!(environment);
+}
+
 describe('Vite Plugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -200,9 +207,12 @@ describe('Vite Plugin', () => {
         enableInDev: false,
         enableInBuild: false,
       });
-      const config = await configure(plugin, command);
+      const config = await configure(plugin, command, { plugins: [plugin] });
       expect(mockResolverInstance.initialize).not.toHaveBeenCalled();
       expect(config.optimizeDeps.include).toBeUndefined();
+      expect(await applyToEnvironment(plugin, config)).toBe(false);
+      const worker = { ...config, mainConfig: config, isWorker: true };
+      expect(await applyToEnvironment(plugin, worker)).toBe(false);
       const resolveId = resolveHook(plugin) as (source: string, importer?: string) => unknown;
       expect(resolveId('vue', '/test/index.js')).toBeNull();
     });
@@ -231,8 +241,13 @@ describe('Vite Plugin', () => {
     it('leaves optimization configuration alone when no mappings are needed', async () => {
       mockResolverInstance.getAnalysisResult.mockReturnValue({ ...analysis, aliasMappings: [] });
       mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
-      const config = await configure(depsConflictResolverVitePlugin({ dependencies: ['legacy'] }));
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+      const config = await configure(plugin);
       expect(config.optimizeDeps.include).toBeUndefined();
+      expect(await applyToEnvironment(plugin, config)).toBe(false);
+      const resolveId = resolveHook(plugin) as (source: string, importer: string) => unknown;
+      expect(resolveId('vue', '/test/index.js')).toBeNull();
+      expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
     });
 
     it.each(['./relative', '/absolute', '\0virtual'])(
@@ -251,7 +266,52 @@ describe('Vite Plugin', () => {
       await configure(plugin);
       const resolveId = resolveHook(plugin) as (source: string, importer?: string) => unknown;
       expect(resolveId('unrelated', '/test/index.js')).toBeNull();
+      expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
     });
+
+    it('builds a fresh environment filter from the active aliases for each configuration', async () => {
+      const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });
+      const filterFor = async (config: ResolvedConfig) => {
+        const filtered = (await applyToEnvironment(plugin, config)) as Plugin;
+        const hook = filtered.resolveId;
+        if (!hook || typeof hook === 'function') throw new Error('Expected a filtered hook');
+        const filter = hook.filter?.id;
+        if (!(filter instanceof RegExp)) throw new Error('Expected a package request filter');
+        return { filtered, filter };
+      };
+      const initial = await filterFor(await configure(plugin));
+      for (const request of ['vue', 'vue/feature', 'vue?raw', 'vue#fragment']) {
+        expect(initial.filter.test(request)).toBe(true);
+      }
+      expect(initial.filter.test('vue-extra')).toBe(false);
+      mockResolverInstance.getAliasPathMappings.mockReturnValue([
+        {
+          originalName: '@scope/runtime',
+          aliasName: 'runtime1',
+          path: '/test/node_modules/runtime1',
+        },
+      ]);
+      const replacement = await filterFor(await configure(plugin));
+      expect(replacement.filtered).not.toBe(initial.filtered);
+      expect(replacement.filter.test('@scope/runtime/subpath')).toBe(true);
+      expect(replacement.filter.test('vue')).toBe(false);
+    });
+
+    it.each([{ hooks: { beforeResolve: () => undefined } }, { strict: true }])(
+      'continues forwarding unrelated requests with no active aliases and %j',
+      async (options) => {
+        mockResolverInstance.getAliasPathMappings.mockReturnValue([]);
+        const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'], ...options });
+        const config = await configure(plugin);
+        expect(await applyToEnvironment(plugin, config)).toBe(true);
+        const resolveId = resolveHook(plugin) as (source: string, importer: string) => unknown;
+        expect(resolveId('unrelated', '/test/index.js')).toBeNull();
+        expect(mockResolverInstance.resolveModule).toHaveBeenCalledWith(
+          'unrelated',
+          '/test/index.js',
+        );
+      },
+    );
 
     it('delegates redirected requests from the final host context and preserves native results', async () => {
       const plugin = depsConflictResolverVitePlugin({ dependencies: ['legacy'] });

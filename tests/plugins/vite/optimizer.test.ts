@@ -39,6 +39,18 @@ afterEach(() => {
 });
 
 describe('optimizer adapters', () => {
+  it('keeps SSR external resolution when no Rolldown redirections are active', async () => {
+    const { root, resolver } = await fixture();
+    vi.spyOn(resolver, 'getAliasPathMappings').mockReturnValue([]);
+    const policy = { isExternal: () => true, resolve: async () => undefined };
+    const options = createOptimizerOptions(resolver, root, '8.3.8', policy);
+    expect(options.rolldownOptions!.plugins.map(({ name }) => name)).toEqual([
+      'deps-conflict-resolver-ssr-external',
+    ]);
+    const unfiltered = createOptimizerOptions(resolver, root, '8.3.8', policy, false);
+    expect(unfiltered.rolldownOptions!.plugins).toHaveLength(2);
+  });
+
   it('applies SSR externals to nested esbuild requests while preserving whitelist and entry points', async () => {
     const { root, resolver, importer } = await fixture();
     const resolve = vi.fn(async (_source: string, _importer: string, isRequire: boolean) =>
@@ -135,7 +147,7 @@ describe('optimizer adapters', () => {
       onResolve,
       resolve,
     } as unknown as PluginBuild);
-    const actual = await callback!({
+    const args = {
       path: 'vue',
       importer,
       kind: 'require-call',
@@ -143,7 +155,9 @@ describe('optimizer adapters', () => {
       resolveDir: root,
       pluginData: undefined,
       with: {},
-    });
+    } satisfies OnResolveArgs;
+    expect(callback!({ ...args, importer: join(root, 'entry.js') })).toBeNull();
+    const actual = await callback!(args);
     expect(actual).toEqual(result);
     expect(resolve).toHaveBeenCalledWith(
       'vue2',
@@ -156,16 +170,17 @@ describe('optimizer adapters', () => {
     const options = createOptimizerOptions(resolver, root, '8.3.8');
     expect(options.esbuildOptions).toBeUndefined();
     const plugin = options.rolldownOptions!.plugins[0]!;
-    const hook = plugin.resolveId;
-    if (typeof hook !== 'function') throw new Error('Expected resolveId function');
+    const resolveId = plugin.resolveId;
+    if (!resolveId || typeof resolveId === 'function') throw new Error('Expected a filtered hook');
+    const hook = resolveId.handler;
+    expect(resolveId.filter).toEqual({ id: expect.any(RegExp) });
     const result = { id: '/external/vue.js', external: true };
     const resolve = vi.fn().mockResolvedValue(result);
-    const resolved = await hook.call(
-      { resolve } as unknown as ThisParameterType<typeof hook>,
-      'vue',
-      importer,
-      { isEntry: false, attributes: {}, custom: undefined },
-    );
+    const context = { resolve } as unknown as ThisParameterType<typeof hook>;
+    const optionsForImport = { isEntry: false, attributes: {}, custom: undefined };
+    expect(hook.call(context, 'vue-extra', importer, optionsForImport)).toBeNull();
+    expect(hook.call(context, 'vue', join(root, 'entry.js'), optionsForImport)).toBeNull();
+    const resolved = await hook.call(context, 'vue', importer, optionsForImport);
     expect(resolved).toEqual(result);
     expect(resolve).toHaveBeenCalledWith(
       'vue2',
