@@ -2,6 +2,7 @@ import type { Alias, Plugin, SSROptions, UserConfig, ResolvedConfig } from 'vite
 import { randomUUID } from 'node:crypto';
 import type { PluginConfig, PluginHooks, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver, getResolverBuild } from '../../core/resolver';
+import type { WatchedFiles } from '../../core/dependency-watch';
 import { createLogger, LogLevel, withLogLevel } from '../../utils/logger';
 import { createFilter, mergeConfig, normalizePath, version as viteVersion } from 'vite';
 import { aliasRequestFilter, createOptimizerOptions, type SsrExternalPolicy } from './optimizer';
@@ -60,8 +61,23 @@ interface EnvironmentWatch {
   published?: string;
   fingerprint: string;
   rulesChanged: boolean;
-  providerPaths?: ReadonlyMap<string, string>;
-  publishedProviderPaths?: ReadonlyMap<string, string>;
+  packages?: WatchedFiles['selectedPackages'];
+  publishedPackages?: WatchedFiles['selectedPackages'];
+}
+
+function changedPackagePath(
+  previous: EnvironmentWatch['packages'],
+  current: EnvironmentWatch['packages'],
+  sameSlot: boolean,
+): string | undefined {
+  if (!previous || !current || previous === current) return undefined;
+  for (const [key, installed] of previous) {
+    const next = current.get(key);
+    if (!next || next.path === installed.path) continue;
+    if (sameSlot && (!installed.manifest || next.manifest !== installed.manifest)) continue;
+    return next.manifest ?? installed.manifest;
+  }
+  return undefined;
 }
 
 function watchInstalledProviders(config: ResolvedConfig, files: ReadonlySet<string>): void {
@@ -578,7 +594,23 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         }
         await session.refreshing;
         const fingerprint = active.getResolutionFingerprint();
-        if (fingerprint !== session.fingerprint) {
+        const previous = session.environments.get(environment);
+        const packages = build.snapshot().watchFiles?.selectedPackages;
+        const changedPath = changedPackagePath(
+          previous?.publishedPackages,
+          packages,
+          viteMajor >= 8,
+        );
+        if (viteMajor >= 8 && changedPath) {
+          // An atomic link replacement can arrive as an update. Rolldown may
+          // keep the old realpath for this slot until the watcher is restarted.
+          throw new Error(
+            'The installed package at ' +
+              dirname(changedPath) +
+              ' changed paths. Restart vite build --watch to reload it.',
+          );
+        }
+        if (changedPath || fingerprint !== session.fingerprint) {
           const { packageCache } = configured as ResolvedConfig & {
             packageCache?: Map<unknown, unknown>;
           };
@@ -590,32 +622,14 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         session.fingerprint = fingerprint;
         // Each environment has its own module cache. A custom redirect can
         // change the resolution without changing the dependency plan.
-        const previous = session.environments.get(environment);
-        const mappings = viteMajor >= 8 || filterRequests ? active.getAliasPathMappings() : [];
-        const providers =
-          viteMajor >= 8
-            ? new Map(mappings.map(({ aliasName, path }) => [aliasName, path]))
-            : undefined;
-        for (const [name, previousPath] of previous?.publishedProviderPaths ?? []) {
-          const currentPath = providers?.get(name);
-          if (currentPath && currentPath !== previousPath) {
-            // Native resolution may retain the old realpath after an atomic
-            // symlink replacement reported as an update. Restart before emitting.
-            throw new Error(
-              'The installed alias ' +
-                name +
-                ' changed paths. Restart vite build --watch to reload its provider.',
-            );
-          }
-        }
         session.environments.set(environment, {
           published: previous?.published,
-          publishedProviderPaths: previous?.publishedProviderPaths,
-          providerPaths: providers,
+          publishedPackages: previous?.publishedPackages,
+          packages,
           fingerprint,
-          rulesChanged: hasResolveHook || previous?.published !== fingerprint,
+          rulesChanged: !!changedPath || hasResolveHook || previous?.published !== fingerprint,
         });
-        if (filterRequests) requestFilter = aliasRequestFilter(mappings);
+        if (filterRequests) requestFilter = aliasRequestFilter(active.getAliasPathMappings());
         if (resolverOptions.strict) verifyBuild.set(environment, build.guardGeneration());
       } finally {
         const { analysis, watchFiles } = build.snapshot();
@@ -624,15 +638,11 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         for (const file of watchFiles?.missing ?? []) {
           // Chokidar watches the existing ancestor instead. Registering the
           // missing leaf as well can race its scan of the newly created slot.
-          if (
-            viteMajor < 8 &&
-            watchFiles?.providerFiles.has(file) &&
-            /\/node_modules\//.test(normalizePath(file))
-          )
-            continue;
+          if (viteMajor < 8 && watchFiles?.missingProviderParents.has(file)) continue;
           this.addWatchFile(file);
         }
-        for (const directory of watchFiles?.providerDirectories ?? []) this.addWatchFile(directory);
+        for (const directory of new Set(watchFiles?.missingProviderParents.values()))
+          this.addWatchFile(directory);
       }
     },
     generateBundle: {
@@ -646,7 +656,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       const state = watch?.environments.get(this.environment ?? configured);
       if (state) {
         state.published = state.fingerprint;
-        state.publishedProviderPaths = state.providerPaths;
+        state.publishedPackages = state.packages;
       }
     },
     ...(viteMajor < 8

@@ -233,7 +233,7 @@ ssr.external=true（Vite 5+）也作用于预构建入口内部的依赖；noExt
 
 Vite 优先对命中规则的 importer 应用重定向，其他请求仍由 Vite 自己解析，包括用户配置的 `resolve.alias`。预构建缓存随生效规则和已安装 provider 的变更失效。开发服务器会监听分析涉及的项目和 linked workspace 清单。
 
-`vite build --watch` 会随依赖输入刷新规则，并重新解析受影响的模块。生成的 `ssr: 'auto'` 外置策略变化时需要重启。Vite 8 的原生解析器可能在软链替换后继续使用旧路径，因此同名已启用别名变更物理路径时也会提示重启。自定义 `beforeResolve` 的返回值从原 importer 解析，插件生成的别名从宿主工程解析。
+`vite build --watch` 会随依赖输入刷新规则，并重新解析受影响的模块。已观察的入口、自然 peer 或启用别名换了软链目标时，Vite 4–7 会刷新解析缓存。Vite 8 的原生解析器可能继续使用旧路径，此时会提示重启并保留上一份产物。生成的 `ssr: 'auto'` 外置策略变化时也需要重启。自定义 `beforeResolve` 的返回值从原 importer 解析，插件生成的别名从宿主工程解析。
 
 入口实际使用的嵌套 peer 与要求不符时，可能报告 `PEER_PROVIDER_MISMATCH`，即使宿主另有一个兼容版本。入口和相关 peer 请求已经共用兼容的本地实例时，可以直接使用原生解析。`TRANSITIVE_PEER_CONFLICT` 提示已配置入口漏写的 peer 在其直接子依赖处存在版本冲突，供补充入口或修正声明。
 

@@ -233,7 +233,7 @@ ssr.external=true (Vite 5+) also applies inside pre-bundled entries; dependencie
 
 Vite applies scoped redirects before global aliases for matching importers. Other requests follow Vite's configured aliases and resolution. Optimizer caches are invalidated when active rules or installed providers change. The development server watches the project and linked workspace manifests used by analysis.
 
-`vite build --watch` refreshes redirects and re-resolves affected modules when dependency inputs change. A generated `ssr: 'auto'` externalization change requires a restart. Vite 8 also asks for a restart when an active alias moves to another physical path because native resolution can retain the old path after a symlink is replaced. Custom `beforeResolve` targets resolve from the original importer. Plugin-generated aliases resolve from the host project.
+`vite build --watch` refreshes redirects and re-resolves affected modules when dependency inputs change. Vite 4–7 refreshes its resolution cache when an observed entry, natural peer, or active alias symlink changes targets. Vite 8 asks for a restart and preserves the previous output because native resolution can retain the old path. A generated `ssr: 'auto'` externalization change also requires a restart. Custom `beforeResolve` targets resolve from the original importer. Plugin-generated aliases resolve from the host project.
 
 `PEER_PROVIDER_MISMATCH` reports a nested provider that shadows a compatible host version. An entry can use its installed provider when the affected peer requests already share that compatible instance. `TRANSITIVE_PEER_CONFLICT` points out incompatible peers of direct children when the selected entry omits the declaration.
 

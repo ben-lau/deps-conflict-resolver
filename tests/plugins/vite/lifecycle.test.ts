@@ -271,10 +271,41 @@ describe('Vite final configuration', () => {
     },
     6000,
   );
-  it.each(['retargeted alias', 'nearer peer'] as const)(
+  it.each([
+    'retargeted alias',
+    'nearer peer',
+    'linked workspace peer',
+    'newly active alias',
+  ] as const)(
     'wakes production watch for a %s without editing source',
     async (change) => {
       const root = fixture('2.7.16');
+      let app = root;
+      let consumer = join(root, 'node_modules/legacy');
+      const consumerManifest = join(consumer, 'package.json');
+      const legacy = JSON.parse(readFileSync(consumerManifest, 'utf8')) as PackageJson;
+      if (change === 'linked workspace peer') {
+        const linked = join(root, 'packages/legacy');
+        mkdirSync(join(root, 'packages'));
+        renameSync(consumer, linked);
+        symlinkSync(linked, consumer, 'junction');
+        consumer = linked;
+        const source = join(root, 'package.json');
+        const workspace = JSON.parse(readFileSync(source, 'utf8')) as PackageJson;
+        writeFileSync(
+          source,
+          JSON.stringify({ ...workspace, workspaces: ['apps/*', 'packages/*'] }),
+        );
+        app = join(root, 'apps/web');
+        mkdirSync(app, { recursive: true });
+        writeFileSync(join(app, 'package.json'), '{"name":"web","dependencies":{"legacy":"1"}}');
+        writeFileSync(join(app, 'entry.js'), readFileSync(join(root, 'entry.js')));
+      } else if (change === 'newly active alias') {
+        writeFileSync(
+          consumerManifest,
+          JSON.stringify({ ...legacy, peerDependencies: { vue: '^3' } }),
+        );
+      }
       const alias = join(root, 'node_modules/vue2');
       const first = join(root, 'first');
       const second = join(root, 'second');
@@ -283,21 +314,32 @@ describe('Vite final configuration', () => {
       writeFileSync(join(second, 'package.json'), readFileSync(join(first, 'package.json')));
       writeFileSync(join(second, 'index.js'), 'export const version = "new-provider";');
       symlinkSync(first, alias, 'junction');
+      const unrelated = join(app, 'unrelated.txt');
+      const changes: string[] = [];
       const watcher = await build({
-        root,
+        root: app,
         configFile: false,
         logLevel: 'silent',
-        plugins: [plugin({ dependencies: ['legacy'], offline: true, strict: true })],
+        plugins: [
+          plugin({ dependencies: ['legacy'], offline: true, strict: true }),
+          {
+            name: 'observe-watch-paths',
+            watchChange: (file) => {
+              changes.push(file);
+            },
+          },
+        ],
         build: {
-          lib: { entry: join(root, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
+          lib: { entry: join(app, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
           watch: { chokidar: { usePolling: true, interval: 30 }, buildDelay: 30 },
         },
       });
       if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
-      const output = join(root, 'dist/runtime.cjs');
+      const output = join(app, 'dist/runtime.cjs');
       const require = createRequire(import.meta.url);
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let edit: ReturnType<typeof setTimeout> | undefined;
+      let stage = 0;
       const observed: string[] = [];
       try {
         await new Promise<void>((resolve, reject) => {
@@ -311,15 +353,27 @@ describe('Vite final configuration', () => {
             delete require.cache[output];
             const { version } = require(output) as { version: string };
             observed.push(version);
-            if (version === 'new-provider') resolve();
-            if (edit) return undefined;
+            if (version === 'new-provider') return resolve();
+            if (change === 'newly active alias' && version === '3.0.0' && stage < 2) {
+              if (stage === 0) {
+                stage = 1;
+                edit = setTimeout(
+                  () => writeFileSync(consumerManifest, JSON.stringify(legacy)),
+                  200,
+                );
+              }
+              return undefined;
+            }
+            if (stage === 2) return undefined;
             if (version !== '2.7.16') return reject(new Error('Unexpected provider: ' + version));
+            stage = 2;
             edit = setTimeout(() => {
-              if (change === 'retargeted alias') {
+              if (change === 'retargeted alias' || change === 'newly active alias') {
                 rmSync(alias);
                 symlinkSync(second, alias, 'junction');
               } else {
-                const nested = join(root, 'node_modules/legacy/node_modules/vue');
+                if (change === 'linked workspace peer') writeFileSync(unrelated, 'unrelated');
+                const nested = join(consumer, 'node_modules/vue');
                 mkdirSync(nested, { recursive: true });
                 renameSync(join(second, 'index.js'), join(nested, 'index.js'));
                 renameSync(join(second, 'package.json'), join(nested, 'package.json'));
@@ -328,6 +382,7 @@ describe('Vite final configuration', () => {
             return undefined;
           });
         });
+        expect(changes).not.toContain(unrelated);
       } finally {
         clearTimeout(edit);
         clearTimeout(timeout);

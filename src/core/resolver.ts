@@ -51,6 +51,7 @@ import {
 } from './prepared-plan';
 import {
   DependencyWatch,
+  observeProjectLockfiles,
   type AnalysisSnapshot,
   type WatchChanges,
   type WatchedFiles,
@@ -587,8 +588,9 @@ export class DepsConflictResolver {
       }
       this.logMissingFirstLevelPeers(this.draft.analysis);
       this.observeSnapshot();
-      if (watch || planFile) this.recordWatchFiles();
+      if (watch) this.recordWatchFiles();
       if (planFile && !this.generationDiagnostics().some(({ severity }) => severity === 'error')) {
+        observeProjectLockfiles(this.options.projectRoot, this.preparation!.owner);
         plan.result = await this.persistPreparedPlan(planFile, plan.inputs, this.draft.analysis);
       }
       if (watch) {
@@ -717,6 +719,7 @@ export class DepsConflictResolver {
       this.preparation!.owner,
       this.draft.analysis,
       this.options.dependencies,
+      this.draft.activeMappings,
       !!this.published?.error,
     );
   }

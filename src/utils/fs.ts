@@ -181,16 +181,23 @@ export function packageLookupPaths(baseDir: string): string[] | null {
   );
 }
 
+/** Lexical manifest locations consulted while finding one installed package. */
+export interface PackageLookupTrace {
+  manifest?: string;
+  readonly missing: Map<string, string>;
+}
+
 export function findPackagePath(
   packageName: string,
   baseDir: string,
   cache?: FileSystemCache,
+  trace?: PackageLookupTrace,
 ): string | null {
   const caches = getCaches(cache);
   const { packagePathCache, requireCache, metrics } = caches;
   const cacheKey = `${baseDir}\0${packageName}`;
   const cached = packagePathCache.get(cacheKey);
-  if (cached !== undefined) {
+  if (cached !== undefined && !trace) {
     return cached;
   }
 
@@ -211,6 +218,7 @@ export function findPackagePath(
     const lookupPaths = localRequire.resolve.paths?.(metadataRequest);
     if (lookupPaths) {
       let visible = findSelfPackagePath(packageName, baseDir, caches);
+      if (trace && visible) trace.manifest = join(visible, 'package.json');
       if (!visible) {
         for (const directory of lookupPaths) {
           visible = findPackageInLookupDirectory(
@@ -218,6 +226,7 @@ export function findPackagePath(
             metadataRequest,
             lookupDirectories,
             metrics,
+            trace,
           );
           if (visible) break;
         }
@@ -232,13 +241,20 @@ export function findPackagePath(
     // Retain the existing adapter fallback for resolvers without lookup paths.
     currentDependencyInputs()?.invalidate();
     const pkgJsonPath = localRequire.resolve(metadataRequest);
+    if (trace) trace.manifest = pkgJsonPath;
     const resolved = dirname(pkgJsonPath);
     packagePathCache.set(cacheKey, resolved);
     return resolved;
   } catch {
     // 如果 require.resolve 失败，回退到手动查找
     // 这处理了一些边缘情况，比如包没有正确导出 package.json
-    const resolved = findPackagePathFallback(metadataRequest, baseDir, lookupDirectories, metrics);
+    const resolved = findPackagePathFallback(
+      metadataRequest,
+      baseDir,
+      lookupDirectories,
+      metrics,
+      trace,
+    );
     packagePathCache.set(cacheKey, resolved);
     return resolved;
   }
@@ -269,6 +285,7 @@ function findPackagePathFallback(
   baseDir: string,
   lookupDirectories: LookupDirectoryCache | undefined,
   metrics: PreparationMetrics | undefined,
+  trace: PackageLookupTrace | undefined,
 ): string | null {
   for (const dir of iterateParentDirs(baseDir)) {
     const candidate = findPackageInLookupDirectory(
@@ -276,6 +293,7 @@ function findPackagePathFallback(
       metadataRequest,
       lookupDirectories,
       metrics,
+      trace,
     );
     if (candidate) return candidate;
   }
@@ -288,6 +306,7 @@ function findPackageInLookupDirectory(
   request: string,
   lookupDirectories: LookupDirectoryCache | undefined,
   metrics: PreparationMetrics | undefined,
+  trace: PackageLookupTrace | undefined,
 ): string | null {
   if (lookupDirectories) {
     let exists = lookupDirectories.get(directory);
@@ -298,9 +317,17 @@ function findPackageInLookupDirectory(
       exists = observedLookupDirectory(directory);
       lookupDirectories.set(directory, exists);
     }
-    if (!exists) return null;
+    if (!exists) {
+      trace?.missing.set(join(directory, request), directory);
+      return null;
+    }
   }
   const manifest = join(directory, request);
   if (metrics) metrics.counts.lookupProbes++;
-  return observedLookupManifest(manifest) ? dirname(manifest) : null;
+  if (!observedLookupManifest(manifest)) {
+    trace?.missing.set(manifest, directory);
+    return null;
+  }
+  if (trace) trace.manifest = manifest;
+  return dirname(manifest);
 }

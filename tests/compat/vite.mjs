@@ -642,58 +642,80 @@ try {
     await watcher.close();
   }
 
-  peer('^2');
-  const installedAlias = join(watchRoot, 'node_modules/vue2');
-  const oldProvider = join(watchRoot, 'old-provider');
-  const newProvider = join(watchRoot, 'new-provider');
-  renameSync(installedAlias, oldProvider);
-  link(oldProvider, installedAlias);
-  cpSync(oldProvider, newProvider, { recursive: true });
-  writeFileSync(join(newProvider, 'index.js'), 'export const version = "retargeted";');
-  const replacing = await startWatch();
   const nativeWatch = Number(vite.version.split('.')[0]) >= 8;
-  let retargetedProvider;
-  edit = undefined;
-  try {
-    retargetedProvider = await new Promise((complete, reject) => {
-      timeout = setTimeout(() => reject(new Error('Alias replacement did not wake watch')), 5000);
-      replacing.on('event', (event) => {
-        if (event.code === 'ERROR') {
-          if (nativeWatch && /Restart vite build --watch/.test(String(event.error))) {
-            complete('restart required');
-          } else {
-            reject(event.error);
-          }
-        }
-        if (event.code !== 'END') return;
-        try {
-          delete repositoryRequire.cache[watchOutput];
-          const version = repositoryRequire(watchOutput).version;
-          if (version === 'retargeted') {
-            complete(version);
-          } else if (!edit) {
-            assert.equal(version, '2.7.16');
-            edit = setTimeout(() => {
-              try {
-                const replacement = join(watchRoot, 'node_modules/vue2-replacement');
-                link(newProvider, replacement);
-                if (process.platform === 'win32') rmSync(installedAlias);
-                renameSync(replacement, installedAlias);
-              } catch (error) {
-                reject(error);
+  const retargetedProviders = {};
+  for (const [name, range, previous, output] of [
+    ['vue2', '^2', '2.7.16', 'retargeted'],
+    ['legacy', '^2', '2.7.16', 'new-entry:2.7.16'],
+    ['vue', '^3', '3.0.0', 'retargeted'],
+  ]) {
+    peer(range);
+    const slot = join(watchRoot, 'node_modules', name);
+    const backup = join(watchRoot, 'previous-' + name);
+    renameSync(slot, backup);
+    const original = realpathSync(backup);
+    link(original, slot);
+    const newProvider = join(watchRoot, 'replacement-' + name);
+    cpSync(original, newProvider, { recursive: true });
+    writeFileSync(
+      join(newProvider, 'index.js'),
+      name === 'legacy'
+        ? 'import {version as peer} from "vue"; export const version = "new-entry:" + peer;'
+        : 'export const version = "retargeted";',
+    );
+    const replacing = await startWatch();
+    edit = undefined;
+    const readOutput = () => {
+      delete repositoryRequire.cache[watchOutput];
+      return repositoryRequire(watchOutput).version;
+    };
+    try {
+      retargetedProviders[name] = await new Promise((complete, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(name + ' replacement did not update the build')),
+          5000,
+        );
+        replacing.on('event', (event) => {
+          try {
+            if (event.code === 'ERROR') {
+              if (!nativeWatch || !/Restart vite build --watch/.test(String(event.error))) {
+                reject(event.error);
+                return;
               }
-            }, 250);
+              assert.equal(readOutput(), previous);
+              complete('restart required');
+              return;
+            }
+            if (event.code !== 'END') return;
+            const version = readOutput();
+            if (version === output) {
+              complete(version);
+            } else {
+              assert.equal(version, previous);
+              edit ??= setTimeout(() => {
+                try {
+                  const replacement = join(watchRoot, 'node_modules/provider-replacement');
+                  link(newProvider, replacement);
+                  if (process.platform === 'win32') rmSync(slot);
+                  renameSync(replacement, slot);
+                } catch (error) {
+                  reject(error);
+                }
+              }, 250);
+            }
+          } catch (error) {
+            reject(error);
           }
-        } catch (error) {
-          reject(error);
-        }
+        });
       });
-    });
-    assert.equal(retargetedProvider, nativeWatch ? 'restart required' : 'retargeted');
-  } finally {
-    clearTimeout(timeout);
-    clearTimeout(edit);
-    await replacing.close();
+      assert.equal(retargetedProviders[name], nativeWatch ? 'restart required' : output);
+    } finally {
+      clearTimeout(timeout);
+      clearTimeout(edit);
+      await replacing.close();
+      rmSync(slot);
+      renameSync(backup, slot);
+    }
   }
   process.stdout.write(
     JSON.stringify(
@@ -712,7 +734,7 @@ try {
         lateRoot,
         workers,
         watchVersions,
-        retargetedProvider,
+        retargetedProviders,
       },
       null,
       2,
