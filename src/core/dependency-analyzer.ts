@@ -158,7 +158,7 @@ export class DependencyAnalyzer {
     options: ResolvedOptions,
     mainPackageJson: PackageJson,
     /** 可选：注册表访问适配器（主要用于离线分析和测试） */
-    registryClient: RegistryClient = new NpmRegistryClient(),
+    registryClient: RegistryClient = new NpmRegistryClient(undefined, options),
   ) {
     this.options = options;
     this.registryClient = registryClient;

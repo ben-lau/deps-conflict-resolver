@@ -1,31 +1,88 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fetchAllVersions, clearNpmRegistryCache } from '../../src/core/npm-registry';
-import { DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../../src/constants';
+import { NpmRegistryClient } from '../../src/core/registry-client';
+import { DEFAULT_NPM_REGISTRY, DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../../src/constants';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Mock global fetch
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-describe('npm-registry', () => {
+describe('NpmRegistryClient', () => {
+  let client: NpmRegistryClient;
+  function fetchAllVersions(name: string, registry = DEFAULT_NPM_REGISTRY) {
+    return client.fetchAllVersions(name, registry);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
-    clearNpmRegistryCache();
+    client = new NpmRegistryClient();
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('routes scoped metadata and sends tokens only to the configured host and path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'deps-scoped-registry-'));
+    try {
+      for (const setting of [
+        'npm_config_userconfig',
+        'NPM_CONFIG_USERCONFIG',
+        'npm_config_globalconfig',
+        'NPM_CONFIG_GLOBALCONFIG',
+      ]) {
+        vi.stubEnv(setting, join(root, 'isolated.npmrc'));
+      }
+      vi.stubEnv('DCR_TEST_REGISTRY_TOKEN', 'fixture-token');
+      writeFileSync(
+        join(root, '.npmrc'),
+        [
+          '@private:registry=https://registry.test/team/',
+          '@sibling:registry=https://registry.test/teams/',
+          '//registry.test/team/:_authToken=${DCR_TEST_REGISTRY_TOKEN}',
+          '_authToken=unscoped-token',
+        ].join('\n'),
+      );
+      mockFetch.mockImplementation(async (url: string) => {
+        const version = url.endsWith('/1.0.0') ? '1.0.0' : undefined;
+        return new Response(
+          JSON.stringify({ name: '@private/runtime', versions: { '1.0.0': {} }, version }),
+        );
+      });
+      const project = new NpmRegistryClient(undefined, {
+        projectRoot: root,
+        packageManager: 'npm',
+      });
+      await project.fetchAllVersions('@private/runtime', DEFAULT_NPM_REGISTRY);
+      await project.fetchPackageManifest('@private/runtime', '1.0.0', DEFAULT_NPM_REGISTRY);
+      await project.fetchAllVersions('@sibling/runtime', DEFAULT_NPM_REGISTRY);
+      await project.fetchAllVersions('runtime', DEFAULT_NPM_REGISTRY);
+      const requests = mockFetch.mock.calls;
+      expect(requests.map(([url]) => url)).toEqual([
+        'https://registry.test/team/@private%2Fruntime',
+        'https://registry.test/team/@private%2Fruntime/1.0.0',
+        'https://registry.test/teams/@sibling%2Fruntime',
+        'https://registry.npmjs.org/runtime',
+      ]);
+      const headers = requests.map(([, options]) => new Headers(options.headers));
+      expect(
+        headers
+          .slice(0, 2)
+          .every((header) => header.get('Authorization') === 'Bearer fixture-token'),
+      ).toBe(true);
+      expect(requests.slice(0, 2).every(([, options]) => options.redirect === 'error')).toBe(true);
+      expect(headers.slice(2).some((header) => header.has('Authorization'))).toBe(false);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
   describe('fetchAllVersions', () => {
-    it('should expose the registry client used by the compatibility wrapper', async () => {
-      const registryModule = await import('../../src/core/npm-registry');
-
-      expect(registryModule.npmRegistryClient).toBeDefined();
-      expect(typeof registryModule.npmRegistryClient.fetchAllVersions).toBe('function');
-    });
-
     it('should fetch and return all versions of a package', async () => {
       const mockResponse = {
         ok: true,
@@ -99,7 +156,7 @@ describe('npm-registry', () => {
       );
     });
 
-    it('should return empty array when package not found (404)', async () => {
+    it('reports a missing package', async () => {
       const mockResponse = {
         ok: false,
         status: 404,
@@ -108,14 +165,10 @@ describe('npm-registry', () => {
 
       mockFetch.mockResolvedValue(mockResponse);
 
-      const versionsPromise = fetchAllVersions('nonexistent-package');
-      await vi.runAllTimersAsync();
-      const versions = await versionsPromise;
-
-      expect(versions).toEqual([]);
+      await expect(fetchAllVersions('nonexistent-package')).rejects.toThrow('HTTP 404');
     });
 
-    it('should return empty array on HTTP error', async () => {
+    it('reports an HTTP error', async () => {
       const mockResponse = {
         ok: false,
         status: 500,
@@ -124,21 +177,13 @@ describe('npm-registry', () => {
 
       mockFetch.mockResolvedValue(mockResponse);
 
-      const versionsPromise = fetchAllVersions('some-package');
-      await vi.runAllTimersAsync();
-      const versions = await versionsPromise;
-
-      expect(versions).toEqual([]);
+      await expect(fetchAllVersions('some-package')).rejects.toThrow('HTTP 500');
     });
 
-    it('should return empty array on network error', async () => {
+    it('preserves the network error', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'));
 
-      const versionsPromise = fetchAllVersions('some-package');
-      await vi.runAllTimersAsync();
-      const versions = await versionsPromise;
-
-      expect(versions).toEqual([]);
+      await expect(fetchAllVersions('some-package')).rejects.toThrow('Network error');
     });
 
     it('should cache results for subsequent calls', async () => {
@@ -173,11 +218,7 @@ describe('npm-registry', () => {
       abortError.name = 'AbortError';
       mockFetch.mockRejectedValue(abortError);
 
-      const versionsPromise = fetchAllVersions('aborted-package');
-      await vi.runAllTimersAsync();
-      const versions = await versionsPromise;
-
-      expect(versions).toEqual([]);
+      await expect(fetchAllVersions('aborted-package')).rejects.toThrow('Aborted');
     });
 
     it('should abort a stalled response body and preserve the body error reason', async () => {
@@ -206,7 +247,9 @@ describe('npm-registry', () => {
       });
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-      const versionsPromise = fetchAllVersions('stalled-body');
+      const failure = expect(fetchAllVersions('stalled-body')).rejects.toThrow(
+        'response body stalled',
+      );
       await vi.advanceTimersByTimeAsync(DEFAULT_NPM_REGISTRY_TIMEOUT_MS);
 
       try {
@@ -216,7 +259,7 @@ describe('npm-registry', () => {
         rejectBody(bodyAbortError);
       }
 
-      await expect(versionsPromise).resolves.toEqual([]);
+      await failure;
       expect(errorSpy).toHaveBeenCalledWith(
         expect.any(String),
         expect.stringContaining('Timeout fetching package info'),

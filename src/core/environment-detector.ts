@@ -5,6 +5,7 @@ import { observedReadTextAsync } from '../utils/dependency-inputs';
 import { DEFAULT_NPM_REGISTRY, LOCK_FILE_MAP } from '../constants';
 import type { PackageManagerType, PackageManagerDetectionResult } from '../types/index';
 import { parse as parseYaml } from 'yaml';
+import { npmrcFiles, readNpmrcSettings } from './npmrc-settings';
 
 const logger = createLogger('environment-detector');
 
@@ -169,74 +170,16 @@ export class EnvironmentDetector {
       }
     }
 
-    // 1. 从 projectRoot 向上遍历查找 .npmrc（覆盖 monorepo 子包场景）
-    for (const dir of iterateParentDirs(this.projectRoot)) {
-      const npmrcPath = join(dir, '.npmrc');
-      if (fileExists(npmrcPath)) {
-        const registry = await this.parseRegistryFromNpmrc(npmrcPath);
-        if (registry) {
-          logger.debug(`Detected registry from .npmrc: ${registry} (at ${dir})`);
-          return registry;
-        }
-      }
-    }
-
-    // 2. 检查用户级配置
-    const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? '';
-    if (homeDir) {
-      // 检查 .npmrc
-      const userNpmrc = join(homeDir, '.npmrc');
-      if (fileExists(userNpmrc)) {
-        const registry = await this.parseRegistryFromNpmrc(userNpmrc);
-        if (registry) {
-          logger.debug(`Detected registry from user .npmrc: ${registry}`);
-          return registry;
-        }
-      }
-
-      // 检查 pnpm 配置（如果是 pnpm）
-      if (packageManager === 'pnpm') {
-        const pnpmConfig = join(homeDir, '.pnpmrc');
-        if (fileExists(pnpmConfig)) {
-          const registry = await this.parseRegistryFromNpmrc(pnpmConfig);
-          if (registry) {
-            logger.debug(`Detected registry from .pnpmrc: ${registry}`);
-            return registry;
-          }
-        }
+    for (const file of npmrcFiles(this.projectRoot, packageManager)) {
+      const registry = (await readNpmrcSettings(file)).get('registry');
+      if (registry) {
+        logger.debug(`Detected registry from ${file}`);
+        return registry;
       }
     }
 
     logger.debug(`Using default registry: ${defaultRegistry}`);
     return defaultRegistry;
-  }
-
-  /**
-   * 从 .npmrc 文件解析 registry
-   */
-  private async parseRegistryFromNpmrc(filePath: string): Promise<string | null> {
-    try {
-      const content = await observedReadTextAsync(filePath);
-      const lines = content.split('\n');
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        // 跳过注释和空行
-        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) {
-          continue;
-        }
-
-        // 匹配 registry=xxx 或 registry = xxx
-        const match = trimmed.match(/^registry\s*=\s*(.+)$/i);
-        if (match?.[1]) {
-          return match[1].trim().replace(/["']/g, '');
-        }
-      }
-    } catch {
-      // 忽略读取错误
-    }
-
-    return null;
   }
 
   /**

@@ -246,7 +246,7 @@ export class DepsConflictResolver {
     if (!configuredRegistry) {
       registry = await this.environmentDetector.getRegistryForPackageManager(packageManager);
       if (registry !== DEFAULT_NPM_REGISTRY) {
-        logger.info(`Auto-detected registry: ${registry}`);
+        logger.debug('Detected a custom registry for package metadata');
       }
     } else {
       registry = configuredRegistry;
@@ -562,7 +562,7 @@ export class DepsConflictResolver {
     candidate?: AnalysisSnapshot,
   ): Promise<void> {
     try {
-      const registryClient = new NpmRegistryClient(this.metrics);
+      const registryClient = new NpmRegistryClient(this.metrics, this.options);
       const cached = this.hooks.onAnalysisComplete ? undefined : this.loadPreparedPlan();
       this.analysisResult =
         cached ??
@@ -756,7 +756,7 @@ export class DepsConflictResolver {
         this.preparation,
         async (markChanged) => {
           try {
-            const registryClient = new NpmRegistryClient(this.metrics);
+            const registryClient = new NpmRegistryClient(this.metrics, this.options);
             this.watchSnapshot = undefined;
             this.analysisResult = await this.analyzeCurrent({ clearCache: false, registryClient });
             this.installDiagnostics = [];
@@ -798,7 +798,7 @@ export class DepsConflictResolver {
     this.analyzer = createDependencyAnalyzer(
       { ...this.options, offline },
       preparedAliases,
-      registryClient ?? new NpmRegistryClient(this.metrics),
+      registryClient ?? new NpmRegistryClient(this.metrics, this.options),
     );
     try {
       const analyzer = this.analyzer;

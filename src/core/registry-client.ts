@@ -1,9 +1,10 @@
-import type { NpmPackageInfo, PackageJson } from '../types/index';
+import type { NpmPackageInfo, PackageJson, ResolvedOptions } from '../types/index';
 import { createLogger } from '../utils/logger';
 import { DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../constants';
 import { currentDependencyInputs } from '../utils/dependency-inputs';
 import { LruCache } from '../utils/lru-cache';
 import type { PreparationMetrics } from '../utils/preparation-metrics';
+import { loadNpmrcSettings, registryToken } from './npmrc-settings';
 
 const logger = createLogger('npm-registry');
 
@@ -57,25 +58,16 @@ async function fetchWithTimeout<T>(
  */
 async function fetchPackageInfo(
   packageName: string,
-  registry: string,
+  url: URL,
+  token: string | undefined,
   metrics?: PreparationMetrics,
 ): Promise<NpmPackageInfo> {
   try {
-    // 处理作用域包的 URL 编码
-    const encodedName = packageName.startsWith('@')
-      ? `@${encodeURIComponent(packageName.slice(1))}`
-      : packageName;
-
-    const url = `${registry.replace(/\/+$/, '')}/${encodedName}`;
     logger.debug(`Fetching package info from: ${url}`);
 
     const { response, data } = await fetchWithTimeout(
-      url,
-      {
-        headers: {
-          Accept: 'application/vnd.npm.install-v1+json',
-        },
-      },
+      url.href,
+      requestOptions('application/vnd.npm.install-v1+json', token),
       async (fetchedResponse) => {
         if (!fetchedResponse.ok) {
           return { response: fetchedResponse, data: null };
@@ -98,7 +90,7 @@ async function fetchPackageInfo(
         logger.warn(`Package not found: ${packageName}`);
         throw new Error(`Package not found: ${packageName} (HTTP 404)`);
       }
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      throw new Error(`HTTP ${response.status}`);
     }
 
     return {
@@ -138,18 +130,63 @@ async function fetchPackageInfo(
   }
 }
 
+function requestOptions(accept: string, token?: string): RequestInit {
+  // A redirect can leave the configured registry path, even on the same host.
+  return token
+    ? { headers: { Accept: accept, Authorization: 'Bearer ' + token }, redirect: 'error' }
+    : { headers: { Accept: accept } };
+}
+
 /** Metadata survives corrective analysis within the same preparation. */
 export class NpmRegistryClient implements RegistryClient {
   private readonly packageCache = new Map<string, NpmPackageInfo>();
   private readonly manifestCache = new LruCache<string, PackageJson>({ maxEntries: 200 });
 
-  constructor(private readonly metrics?: PreparationMetrics) {}
+  private settings?: Promise<ReadonlyMap<string, string>>;
+
+  constructor(
+    private readonly metrics?: PreparationMetrics,
+    private readonly project?: Pick<ResolvedOptions, 'projectRoot' | 'packageManager'>,
+  ) {}
+
+  private async endpoint(packageName: string, registry: string, version?: string) {
+    if (this.project) {
+      this.settings ??= loadNpmrcSettings(this.project.projectRoot, this.project.packageManager);
+    }
+    const settings = await this.settings;
+    const scope = packageName.startsWith('@') ? packageName.split('/', 1)[0] : undefined;
+    const configured = (scope && settings?.get(scope + ':registry')) ?? registry;
+    let base: URL;
+    try {
+      base = new URL(configured);
+      if (
+        !['https:', 'http:'].includes(base.protocol) ||
+        base.username ||
+        base.password ||
+        base.search ||
+        base.hash
+      )
+        throw new Error('Invalid registry address');
+    } catch {
+      throw new Error('Invalid registry address for ' + packageName);
+    }
+    const encodedName = scope
+      ? '@' + encodeURIComponent(packageName.slice(1))
+      : encodeURIComponent(packageName);
+    base.pathname =
+      base.pathname.replace(/\/+$/, '') +
+      '/' +
+      encodedName +
+      (version === undefined ? '' : '/' + encodeURIComponent(version));
+    return { url: base, token: settings && registryToken(base, settings) };
+  }
 
   async fetchAllVersions(packageName: string, registry: string): Promise<string[]> {
     const key = `${registry}\0${packageName}`;
     let info = this.packageCache.get(key);
     if (!info) {
-      info = await fetchPackageInfo(packageName, registry, this.metrics);
+      const { url, token } = await this.endpoint(packageName, registry);
+      info = await fetchPackageInfo(packageName, url, token, this.metrics);
       this.packageCache.set(key, info);
     }
     return info.versions;
@@ -174,17 +211,12 @@ export class NpmRegistryClient implements RegistryClient {
     const key = `${registry}\0${packageName}\0${version}`;
     const cached = this.getCachedManifest(packageName, version, registry);
     if (cached) return cached;
-    const encodedName = packageName.startsWith('@')
-      ? `@${encodeURIComponent(packageName.slice(1))}`
-      : encodeURIComponent(packageName);
-    const url = `${registry.replace(/\/+$/, '')}/${encodedName}/${encodeURIComponent(version)}`;
+    const { url, token } = await this.endpoint(packageName, registry, version);
     const manifest = await fetchWithTimeout(
-      url,
-      {
-        headers: { Accept: 'application/json' },
-      },
+      url.href,
+      requestOptions('application/json', token),
       async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return (await response.json()) as PackageJson;
       },
       this.metrics,
@@ -195,16 +227,4 @@ export class NpmRegistryClient implements RegistryClient {
     this.manifestCache.set(key, manifest);
     return manifest;
   }
-
-  clear(): void {
-    this.packageCache.clear();
-    this.manifestCache.clear();
-  }
-}
-
-// Shared only by the legacy npm-registry helper.
-export const npmRegistryClient = new NpmRegistryClient();
-
-export function clearNpmRegistryCache(): void {
-  npmRegistryClient.clear();
 }
