@@ -22,10 +22,39 @@ type NormalModuleFactory = Parameters<
 
 type RedirectBuildInfo = NonNullable<NormalModule['buildInfo']> & {
   depsConflictResolver?: string;
+  depsConflictResolverRequests?: string[];
 };
 type ResolveOptions = NonNullable<ResolveData['resolveOptions']>;
 
 const emptyResolveOptions: ResolveOptions = {};
+const packageRequest = /^(?:@[^/?#]+\/)?[^/?#]+/;
+
+function originalPackage(request: string): string {
+  return packageRequest.exec(request)?.[0] ?? '';
+}
+
+function eligible(request: string): boolean {
+  return Boolean(request) && !isPathLikeRequest(request) && !isWebpackInternalRequest(request);
+}
+
+function moduleRequests(module: NormalModule): string[] {
+  const requests = new Set<string>();
+  const blocks: Array<Pick<NormalModule, 'blocks' | 'dependencies'>> = [module];
+  while (blocks.length) {
+    const block = blocks.pop()!;
+    blocks.push(...block.blocks);
+    for (const dependency of block.dependencies) {
+      if (
+        'request' in dependency &&
+        typeof dependency.request === 'string' &&
+        eligible(dependency.request)
+      ) {
+        requests.add(dependency.request);
+      }
+    }
+  }
+  return [...requests];
+}
 
 /**
  * Webpack 插件主类
@@ -45,6 +74,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   private initialized = false;
   private generation = 0;
   private aliasVersions: ReadonlyMap<string, string> = new Map();
+  private targets: ReadonlySet<string> = new Set();
   private redirectOptions = new WeakMap<ResolveOptions, Map<string, ResolveOptions>>();
 
   constructor(config: PluginConfig) {
@@ -118,6 +148,9 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
           this.redirectOptions = new WeakMap();
         }
         this.aliasVersions = aliasVersions;
+        this.targets = new Set(
+          resolver.getAliasPathMappings().map(({ originalName }) => originalName),
+        );
 
         if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
           logger.info(`Planned ${this.analysisResult.aliasMappings.length} alias mappings`);
@@ -147,6 +180,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         this.analysisResult = null;
         this.initialized = false;
         this.aliasVersions = new Map();
+        this.targets = new Set();
         logger.error('Error initializing dependencies resolver:', error);
         if (this.config.strict) throw error;
       })
@@ -171,14 +205,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     const { request, contextInfo } = resolveData;
 
     // 跳过非模块请求（相对路径、绝对路径）
-    if (!request || isPathLikeRequest(request)) {
-      return;
-    }
-
-    // 跳过 webpack 内部请求
-    if (isWebpackInternalRequest(request)) {
-      return;
-    }
+    if (!eligible(request)) return;
 
     if (!this.resolver || !this.initialized) {
       return;
@@ -208,7 +235,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     // Resolve the verified alias from the host, preserving Webpack's exports
     // and dependency-type conditions even for linked packages outside it.
     resolveData.context = this.resolver.getOptions().projectRoot;
-    const alias = resolvedModule.match(/^(?:@[^/?#]+\/)?[^/?#]+/)?.[0];
+    const alias = originalPackage(resolvedModule);
     const version = alias && this.aliasVersions.get(alias);
     if (version) {
       const original = resolveData.resolveOptions ?? emptyResolveOptions;
@@ -225,39 +252,23 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     }
   }
 
-  private moduleResolutionVersion(module: NormalModule): string {
+  private moduleResolutionVersion(module: NormalModule, requests?: string[]): string {
     if (!this.initialized || !module.resource || !this.resolver || this.aliasVersions.size === 0)
       return '';
     // Webpack uses nameForCondition() as the issuer when resolving dependencies.
     const importer = module.nameForCondition?.() ?? module.resource;
-    const requests = new Set<string>();
     const versions: string[] = [];
-    const blocks: Array<Pick<NormalModule, 'blocks' | 'dependencies'>> = [module];
-    while (blocks.length > 0) {
-      const block = blocks.pop()!;
-      blocks.push(...block.blocks);
-      for (const dependency of block.dependencies) {
-        if (!('request' in dependency) || typeof dependency.request !== 'string') continue;
-        const request = dependency.request;
-        if (
-          requests.has(request) ||
-          isPathLikeRequest(request) ||
-          isWebpackInternalRequest(request)
-        )
-          continue;
-        requests.add(request);
-        const decision = this.resolver.explainResolution(request, importer, {
-          skipHook: true,
-        });
-        if (!decision.resolved && decision.reason !== 'ambiguous') continue;
-        versions.push(
-          JSON.stringify([
-            request,
-            decision.resolved,
-            decision.aliases.map((alias) => this.aliasVersions.get(alias)),
-          ]),
-        );
-      }
+    for (const request of requests ?? moduleRequests(module)) {
+      if (!this.targets.has(originalPackage(request))) continue;
+      const decision = this.resolver.explainResolution(request, importer, { skipHook: true });
+      if (!decision.resolved && decision.reason !== 'ambiguous') continue;
+      versions.push(
+        JSON.stringify([
+          request,
+          decision.resolved,
+          decision.aliases.map((alias) => this.aliasVersions.get(alias)),
+        ]),
+      );
     }
     return versions.length > 0 ? JSON.stringify(versions.sort()) : '';
   }
@@ -270,6 +281,13 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     logger.info('Applying DepsConflictResolverWebpackPlugin...');
 
     let runPreparation: Promise<void> | undefined;
+    let verifyBuild: (() => void) | undefined;
+    const guarded = Boolean(this.config.strict && compiler.hooks.afterCompile);
+    const guardBuild = () => {
+      if (guarded && this.initialized && this.resolver)
+        verifyBuild ??= getResolverBuild(this.resolver).guardGeneration();
+    };
+    compiler.hooks.afterCompile?.tap(PLUGIN_NAME, () => verifyBuild?.());
     compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, () => {
       runPreparation = this.initialize(compiler);
       return runPreparation;
@@ -289,6 +307,8 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     let legacyCacheHookInstalled = false;
     compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation) => {
+      verifyBuild = undefined;
+      guardBuild();
       const watched = this.resolver && getResolverBuild(this.resolver).snapshot().watchFiles;
       for (const file of watched?.existing ?? this.analysisResult?.watchFiles ?? [])
         compilation.fileDependencies.add(file);
@@ -296,16 +316,23 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       const manifest = join(this.config.projectRoot!, 'package.json');
       if (!watched?.missing.has(manifest)) compilation.fileDependencies.add(manifest);
       compilation.hooks.succeedModule.tap(PLUGIN_NAME, (module) => {
-        if ('resource' in module && module.buildInfo)
-          (module.buildInfo as RedirectBuildInfo).depsConflictResolver =
-            this.moduleResolutionVersion(module as NormalModule);
+        if ('resource' in module && module.buildInfo) {
+          const info = module.buildInfo as RedirectBuildInfo;
+          const requests = moduleRequests(module as NormalModule);
+          info.depsConflictResolverRequests = requests;
+          info.depsConflictResolver = this.moduleResolutionVersion(
+            module as NormalModule,
+            requests,
+          );
+        }
       });
       const hooks = compiler.webpack?.NormalModule?.getCompilationHooks?.(compilation);
       if (hooks?.needBuild) {
         hooks.needBuild.tapAsync(PLUGIN_NAME, (module, _context, callback) => {
-          const previous =
-            (module.buildInfo as RedirectBuildInfo | undefined)?.depsConflictResolver ?? '';
-          if (previous !== this.moduleResolutionVersion(module)) return callback(null, true);
+          const info = module.buildInfo as RedirectBuildInfo | undefined;
+          const previous = info?.depsConflictResolver ?? '';
+          if (previous !== this.moduleResolutionVersion(module, info?.depsConflictResolverRequests))
+            return callback(null, true);
           callback();
         });
       } else if (!legacyCacheHookInstalled && compiler.cache?.hooks?.get?.tap) {
@@ -317,9 +344,12 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
             if (!identifier.includes('Compilation/modules|')) return;
             gotHandlers.push((cached: NormalModule | undefined, callback) => {
               if (cached?.resource && typeof cached.invalidateBuild === 'function') {
-                const previous =
-                  (cached.buildInfo as RedirectBuildInfo | undefined)?.depsConflictResolver ?? '';
-                if (previous !== this.moduleResolutionVersion(cached)) cached.invalidateBuild();
+                const info = cached.buildInfo as RedirectBuildInfo | undefined;
+                if (
+                  (info?.depsConflictResolver ?? '') !==
+                  this.moduleResolutionVersion(cached, info?.depsConflictResolverRequests)
+                )
+                  cached.invalidateBuild();
               }
               callback();
             });
@@ -340,16 +370,29 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       // - 直接修改 resolveData 对象即可
       // - 返回 false 表示跳过该模块
       // - 返回 undefined/void 表示继续处理
-      nmf.hooks.beforeResolve.tapPromise(PLUGIN_NAME, async (resolveData) => {
-        try {
-          // watchRun prepares once per compilation, including permissive failures.
-          if (!compiler.watchMode && !this.initialized) {
-            await (preparation ??= this.initialize(compiler));
+      nmf.hooks.beforeResolve.tapAsync(PLUGIN_NAME, (resolveData, callback) => {
+        const fail = (error: unknown) => {
+          logger.error('Error during module resolution:', error);
+          callback(this.config.strict ? (error as Error) : undefined);
+        };
+        const finish = () => {
+          try {
+            guardBuild();
+            if (
+              (!guarded && this.config.strict) ||
+              this.config.hooks?.beforeResolve ||
+              this.targets.has(originalPackage(resolveData.request))
+            )
+              this.handleResolve(resolveData);
+          } catch (error) {
+            return fail(error);
           }
-          this.handleResolve(resolveData);
-        } catch (err) {
-          logger.error('Error during module resolution:', err);
-          if (this.config.strict) throw err;
+          callback();
+        };
+        if (!compiler.watchMode && !this.initialized) {
+          void (preparation ??= this.initialize(compiler)).then(finish, fail);
+        } else {
+          finish();
         }
       });
     });
