@@ -8,6 +8,7 @@ import {
 import { AliasManager } from './alias-manager';
 import { createWorkspaceDetector, type WorkspaceDetector } from './workspace-detector';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
+import { getEffectivePeerDependencies } from '../utils/peer-overrides';
 import { isValidRange, satisfies } from '../utils/semver';
 import { resolveDependencyRequirement, type VersionSpecResolver } from '../utils/version-spec';
 
@@ -57,9 +58,12 @@ export function validateSharedPeerContexts(
   inheritedMismatchesByAlias?: ReadonlyMap<string, readonly string[]>,
 ): void {
   if (mappings.length === 0) return;
+  const host = readPackageJsonCached(options.projectRoot);
+  const hostConsumers = findHostConsumers(graph, host, options.projectRoot);
   if (
     graph.roots.length < 2 &&
     graph.rootRequests.size < 2 &&
+    hostConsumers.length === 0 &&
     !inheritedMismatchesByAlias?.size &&
     !mappings.some((mapping) => mapping.excludedImporterPaths?.length)
   ) {
@@ -127,8 +131,15 @@ export function validateSharedPeerContexts(
     readManifest,
     getResolver,
   };
-  if (!installationPending)
+  if (!installationPending) {
     validateDescendantProviders(validation, installedMappings, inheritedMismatchesByAlias);
+    validateHostConsumers(
+      validation,
+      installedMappings,
+      host?.name ?? options.projectRoot,
+      hostConsumers,
+    );
+  }
 
   for (const peer of originals) {
     const candidateRoots: ConfiguredPeerRequest[] = [];
@@ -151,6 +162,61 @@ export function validateSharedPeerContexts(
       validateConfiguredImporterAliases(validation, peer, candidateRoots);
     }
     validateSharedContexts(validation, peer, candidateRoots, installedMappings);
+  }
+}
+
+function findHostConsumers(
+  graph: InstalledDependencyGraph,
+  host: PackageJson | null,
+  root: string,
+): Array<{ node: InstalledPackageNode; request: string }> {
+  const dependencies = { ...host?.dependencies, ...host?.optionalDependencies };
+  const roots = new Set(graph.roots);
+  const consumers: Array<{ node: InstalledPackageNode; request: string }> = [];
+  for (const request of Object.keys(dependencies)) {
+    const installed = findPackagePath(request, root);
+    const node = installed ? graph.nodes.get(canonicalPath(installed)) : undefined;
+    if (node && !roots.has(node.id)) consumers.push({ node, request });
+  }
+  return consumers;
+}
+
+function validateHostConsumers(
+  validation: PeerValidation,
+  mappings: readonly AliasMapping[],
+  host: string,
+  consumers: Array<{ node: InstalledPackageNode; request: string }>,
+): void {
+  const { graph, options, diagnostics, detector, aliases, originals, getResolver } = validation;
+  for (const { node, request } of consumers) {
+    const requirements =
+      node.peerDependenciesByName.get(request) ??
+      getEffectivePeerDependencies(node.manifest, request, options.peerOverrides);
+    for (const peer of originals) {
+      if (matchesPackageName(node, options.includeRedirects[peer])) continue;
+      const requirement = requirements.get(peer);
+      if (!requirement || requirement.optional) continue;
+      const providerId = node.resolvedChildren.get(peer);
+      const natural = providerId ? graph.nodes.get(providerId) : undefined;
+      const { range, name } = resolveDependencyRequirement(peer, requirement.range, detector);
+      if (!natural || natural.manifest.name !== name || !satisfies(natural.version, range))
+        continue;
+      const { resolved } = getResolver().explainResolution(
+        peer,
+        join(node.packagePath, '__peer_context__.js'),
+      );
+      const alias = resolved ? aliases.get(resolved) : undefined;
+      if (!alias || alias.path === natural.id) continue;
+      const mapping = mappings.find(({ aliasName }) => aliasName === resolved);
+      diagnostics.push({
+        code: 'SHARED_PEER_CONTEXT',
+        severity: 'warning',
+        packageName: peer,
+        requestedBy: [host + '>' + request, ...(mapping?.usedBy ?? [])],
+        importerPaths: [node.packagePath],
+        message: `Host dependency ${request} shares an installed instance with a redirected subtree. The ${peer} provider changes from ${natural.version} to ${alias.label}. Isolate the package or configure its redirect scope.`,
+      });
+    }
   }
 }
 

@@ -619,7 +619,9 @@ export class DepsConflictResolver {
     for (const diagnostic of this.getDiagnostics()) {
       if (
         diagnostic.severity === 'warning' &&
-        (diagnostic.code === 'SHARED_PEER_CONTEXT' || diagnostic.code === 'ALIAS_PEER_UNSATISFIED')
+        (diagnostic.code === 'SHARED_PEER_CONTEXT' ||
+          diagnostic.code === 'ALIAS_PEER_UNSATISFIED' ||
+          diagnostic.code === 'TRANSITIVE_PEER_CONFLICT')
       ) {
         warnings.add(`[${diagnostic.code}] ${diagnostic.message}`);
       }

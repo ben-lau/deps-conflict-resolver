@@ -53,6 +53,7 @@ import {
 
 import { linkAliasPeers } from './alias-peer-resolver';
 import { validateSharedPeerContexts } from './shared-peer-contexts';
+import { validateInstalledPeerProviders } from './installed-peer-providers';
 import { AliasManager } from './alias-manager';
 
 const logger = createLogger('dependency-analyzer');
@@ -391,6 +392,14 @@ export class DependencyAnalyzer {
       // 4. 生成别名映射（只为需要安装别名的冲突生成）
       //    会收集完整依赖树用于重定向判断
       const aliasMappings = await this.generateAliasMappings(peerConflicts);
+      validateInstalledPeerProviders(
+        this.dependencyGraph,
+        peerConflicts,
+        aliasMappings,
+        this.options,
+        this.workspaceDetector,
+        this.diagnostics,
+      );
       validateSharedPeerContexts(
         this.dependencyGraph,
         aliasMappings,
@@ -789,8 +798,7 @@ export class DependencyAnalyzer {
       const mainVersion = isDeclared ? this.getMainProjectVersion(packageName) : null;
       const isInstalled = mainVersion !== null;
 
-      const conflictingRanges: DependencyPath[] = [];
-      const satisfiedRanges: DependencyPath[] = [];
+      let conflictingRanges: DependencyPath[] = [];
       const undeclaredRequests: DependencyPath[] = [];
 
       for (const request of requestedBy) {
@@ -800,22 +808,14 @@ export class DependencyAnalyzer {
           this.workspaceDetector,
         );
 
-        if (mainVersion && satisfies(mainVersion, resolvedRange)) {
-          satisfiedRanges.push(request);
-        } else if (
-          !isDeclared &&
-          this.isSatisfiedByOwningWorkspace(packageName, request, resolvedRange)
-        ) {
-          satisfiedRanges.push(request);
-        } else {
-          conflictingRanges.push({
-            ...request,
-            requiredRange: resolvedRange,
-          });
-          if (!isDeclared) {
-            undeclaredRequests.push(request);
-          }
-        }
+        if (mainVersion && satisfies(mainVersion, resolvedRange)) continue;
+        if (!isDeclared && this.isSatisfiedByOwningWorkspace(packageName, request, resolvedRange))
+          continue;
+        conflictingRanges.push({ ...request, requiredRange: resolvedRange });
+        if (!isDeclared) undeclaredRequests.push(request);
+      }
+      if (mainVersion && conflictingRanges.length > 0) {
+        conflictingRanges = this.excludeClosedPeerContexts(packageName, conflictingRanges);
       }
 
       if (!isDeclared && undeclaredRequests.length > 0) {
@@ -870,6 +870,104 @@ export class DependencyAnalyzer {
     }
 
     return conflicts;
+  }
+
+  private excludeClosedPeerContexts(
+    packageName: string,
+    conflicts: DependencyPath[],
+  ): DependencyPath[] {
+    const graph = this.dependencyGraph;
+    // Explicit scopes still need an alias. They can include consumers outside
+    // the entry's installed subtree or override the natural provider.
+    if (
+      !graph ||
+      this.options.includeRedirects[packageName]?.length ||
+      this.options.excludeRedirects[packageName]?.length
+    )
+      return conflicts;
+
+    const providersByRange = new Map<string, string | null>();
+    for (const request of conflicts) {
+      const { requiredRange } = request;
+      const provider = this.getCompatibleInstalledPeerProvider(graph, packageName, request);
+      const previous = providersByRange.get(requiredRange);
+      providersByRange.set(
+        requiredRange,
+        previous === undefined || previous === provider ? provider : null,
+      );
+    }
+
+    // Consumers that could share an alias can keep their native resolution
+    // only when they already share the same physical provider.
+    const closed = new Set<string>();
+    const contexts = [...providersByRange];
+    for (const [range, provider] of contexts) {
+      if (
+        provider &&
+        contexts.every(
+          ([otherRange, otherProvider]) =>
+            provider === otherProvider || !rangesIntersect(range, otherRange),
+        )
+      )
+        closed.add(range);
+    }
+    return conflicts.filter(({ requiredRange }) => !closed.has(requiredRange));
+  }
+
+  private getCompatibleInstalledPeerProvider(
+    graph: InstalledDependencyGraph,
+    packageName: string,
+    request: DependencyPath,
+  ): string | null {
+    if (!request.packagePath) return null;
+    const entry = graph.nodes.get(request.packagePath);
+    const provider = entry && this.findGraphChildNode(entry, packageName);
+    if (
+      !provider ||
+      provider.manifest.name !== packageName ||
+      !satisfies(provider.version, request.requiredRange)
+    )
+      return null;
+
+    const scope = this.collectGraphRelatedPackageInstances([entry.id], [packageName], {
+      packageName,
+      aliasVersion: provider.version,
+    });
+    if (!scope || scope.inheritedMismatches.length > 0) return null;
+
+    const closed = scope.collected.every(({ path }) => {
+      if (path === entry.id) return true;
+      const node = graph.nodes.get(path)!;
+      const requirements = getInstalledDependencyRequirements(
+        node,
+        packageName,
+        this.workspaceDetector,
+      );
+      if (requirements.length === 0) {
+        // Descendants can import an inherited peer without declaring it.
+        const visible = findPackagePath(packageName, node.packagePath);
+        return visible !== null && canonicalPath(visible) === provider.id;
+      }
+      const required = requirements.filter(
+        ({ optional, range }) => !optional && isValidRange(range),
+      );
+      if (required.length === 0) return true;
+      const local = this.findGraphChildNode(node, packageName);
+      if (
+        !local ||
+        required.some(
+          ({ name, range: requiredRange }) =>
+            local.manifest.name !== name || !satisfies(local.version, requiredRange),
+        )
+      )
+        return false;
+      const sharesPeer = [...node.peerDependenciesByName.values()].some((peers) => {
+        const peer = peers.get(packageName);
+        return peer && !peer.optional;
+      });
+      return !sharesPeer || local.id === provider.id;
+    });
+    return closed ? provider.id : null;
   }
 
   /**
