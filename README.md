@@ -204,7 +204,7 @@ explainResolution 返回 resolved、reason、aliases 和 matchedPaths。reason �
 
 需要只检查静态重定向规则、避免执行用户回调时，可传入第三个参数 `{ skipHook: true }`。同一实例并发调用 installDependencies() 会共享一次准备；安装未结束时 invalidate() 会抛错，应先等待安装完成。
 
-同一实际安装工程或共享 workspace 的准备会串行执行，等待者重新读取输入后规划名称；同一系统用户的进程通过共享 OS 临时目录中的本地锁协调，参与进程需使用相同临时目录。新生成的 alias 精确保存版本，已有有效 alias 继续复用。包管理器结束后会重建消费方范围、peer 关联和 watch 输入，并重新验证所有 alias；必要时最多进行一次修正安装，输入持续变化则报告 PROJECT_STATE_CHANGED。
+同一实际安装工程或共享 workspace 的准备会串行执行，等待者重新读取输入后规划名称；同一系统用户的进程通过共享 OS 临时目录中的本地锁协调，参与进程需使用相同临时目录。已退出进程的独立锁记录可以回收，不按等待时长抢占活进程。新生成的 alias 精确保存版本，已有有效 alias 继续复用。包管理器结束后会重建消费方范围、peer 关联和 watch 输入，并重新验证所有 alias；必要时最多进行一次修正安装，输入持续变化则报告 PROJECT_STATE_CHANGED。
 
 已初始化实例若因另一轮准备而改变实际规则或 provider，会明确失效；strict 模式拒绝继续解析，应调用 invalidate() 后重新 initialize()，或重启对应构建。并发初始化会等待工程准备队列完成。用户钩子在准备锁外执行，内部重新规划不会重复触发分析通知；onAnalysisComplete 观察的是候选分析，最终结果在 initialize() 完成后通过 getAnalysisResult() 查询。
 

@@ -45,6 +45,158 @@ afterEach(async () => {
 });
 
 describe('project preparation ownership', () => {
+  it.each(['unpublished', 'choosing', 'numbered'] as const)(
+    'recovers a process killed at the %s publication boundary without stealing a live lock',
+    async (phase) => {
+      const root = fixture();
+      const bundle = join(root, 'preparation.cjs');
+      buildSync({
+        entryPoints: [resolve('src/core/project-preparation.ts')],
+        outfile: bundle,
+        bundle: true,
+        platform: 'node',
+        format: 'cjs',
+      });
+      const script = String.raw`
+        const fs=require('node:fs'),path=require('node:path');
+        const [bundle,root,id,phase]=process.argv.slice(1);
+        if(id==='publisher'){
+          for(const method of ['link','rename']){
+            const original=fs.promises[method].bind(fs.promises);
+            fs.promises[method]=async(...args)=>{
+              const pause=()=>{fs.writeFileSync(path.join(root,'paused'),'');return new Promise(()=>{})};
+              if(method==='link'&&phase==='unpublished')await pause();
+              const result=await original(...args);
+              if((method==='link'&&phase==='choosing')||(method==='rename'&&phase==='numbered'))await pause();
+              return result;
+            };
+          }
+        }else{
+          const readdir=fs.promises.readdir.bind(fs.promises);let polls=0;
+          fs.promises.readdir=async(...args)=>{
+            fs.writeFileSync(path.join(root,'polls'),String(++polls));
+            return readdir(...args);
+          };
+        }
+        const {getProjectPreparation,withProjectPreparation}=require(bundle);
+        const timeout=setTimeout(()=>process.exit(3),8000);
+        withProjectPreparation(getProjectPreparation(root),async()=>{
+          fs.writeFileSync(path.join(root,id+'-entered'),'');
+        }).catch(error=>{console.error(error);process.exitCode=1}).finally(()=>clearTimeout(timeout));
+      `;
+      function start(id: string) {
+        const child = spawn(process.execPath, ['-e', script, bundle, root, id, phase], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+        });
+        children.push(child);
+        let stderr = '';
+        child.stderr.on('data', (data) => {
+          stderr += String(data);
+        });
+        const done = new Promise<void>((success, reject) => {
+          child.once('error', reject);
+          child.once('close', (code, signal) => {
+            if (code === 0 || signal === 'SIGKILL') success();
+            else reject(new Error('Child failed: ' + code + ' ' + stderr));
+          });
+        });
+        return { child, done };
+      }
+      const publisher = start('publisher');
+      await until(() => existsSync(join(root, 'paused')));
+      const waiter = start('waiter');
+      if (phase === 'unpublished') {
+        await until(() => existsSync(join(root, 'waiter-entered')));
+      } else {
+        await until(
+          () =>
+            existsSync(join(root, 'polls')) &&
+            Number(readFileSync(join(root, 'polls'), 'utf8')) >= 3,
+        );
+        expect(existsSync(join(root, 'waiter-entered'))).toBe(false);
+      }
+      expect(existsSync(join(root, 'publisher-entered'))).toBe(false);
+      publisher.child.kill('SIGKILL');
+      await publisher.done;
+      await waiter.done;
+      expect(existsSync(join(root, 'waiter-entered'))).toBe(true);
+    },
+    10_000,
+  );
+
+  it('recovers when the process reclaiming an exited holder is also killed', async () => {
+    const root = fixture();
+    const bundle = join(root, 'preparation.cjs');
+    buildSync({
+      entryPoints: [resolve('src/core/project-preparation.ts')],
+      outfile: bundle,
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+    });
+    const script = String.raw`
+      const fs=require('node:fs'),path=require('node:path');
+      const [bundle,root,id,deadPid]=process.argv.slice(1);
+      const unlink=fs.promises.unlink.bind(fs.promises);
+      fs.promises.unlink=async(file)=>{
+        let isDeadOwner=false;
+        try {isDeadOwner=JSON.parse(fs.readFileSync(file,'utf8')).pid===Number(deadPid)} catch {}
+        if(id==='recoverer'&&isDeadOwner){
+          fs.writeFileSync(path.join(root,'recovering'),'');
+          await new Promise(()=>{});
+        }
+        return unlink(file);
+      };
+      const {getProjectPreparation,withProjectPreparation}=require(bundle);
+      const timeout=setTimeout(()=>process.exit(3),8000);
+      withProjectPreparation(getProjectPreparation(root),async()=>{
+        fs.writeFileSync(path.join(root,id+'-entered'),'');
+        if(id==='holder')await new Promise(()=>{});
+        const sentinel=path.join(root,'active');
+        fs.closeSync(fs.openSync(sentinel,'wx'));
+        fs.appendFileSync(path.join(root,'events'),id+' start\n');
+        await new Promise(done=>setTimeout(done,20));
+        fs.appendFileSync(path.join(root,'events'),id+' end\n');
+        fs.unlinkSync(sentinel);
+      }).catch(error=>{console.error(error);process.exitCode=1}).finally(()=>clearTimeout(timeout));
+    `;
+    function start(id: string, deadPid = 0) {
+      const child = spawn(process.execPath, ['-e', script, bundle, root, id, String(deadPid)], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+      });
+      children.push(child);
+      let stderr = '';
+      child.stderr.on('data', (data) => {
+        stderr += String(data);
+      });
+      const done = new Promise<void>((success, reject) => {
+        child.once('error', reject);
+        child.once('close', (code, signal) => {
+          if (code === 0 || signal === 'SIGKILL') success();
+          else reject(new Error('Child failed: ' + code + ' ' + stderr));
+        });
+      });
+      return { child, done };
+    }
+    const holder = start('holder');
+    await until(() => existsSync(join(root, 'holder-entered')));
+    holder.child.kill('SIGKILL');
+    await holder.done;
+    const recoverer = start('recoverer', holder.child.pid);
+    await until(() => existsSync(join(root, 'recovering')));
+    recoverer.child.kill('SIGKILL');
+    await recoverer.done;
+    const waiters = Array.from({ length: 4 }, (_, index) => start('waiter' + index));
+    await Promise.all(waiters.map((waiter) => waiter.done));
+    const events = readFileSync(join(root, 'events'), 'utf8').trim().split('\n');
+    expect(events).toHaveLength(8);
+    for (let index = 0; index < events.length; index += 2) {
+      expect(events[index + 1]).toBe(events[index]!.replace(' start', ' end'));
+    }
+  }, 15_000);
+
   it('coordinates workspace projects and canonical paths while unrelated projects proceed', async () => {
     const root = fixture();
     writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
