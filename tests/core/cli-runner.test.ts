@@ -85,10 +85,78 @@ describe('doctor and prepare commands', () => {
     );
   });
 
+  it.each([false, true])(
+    'only scans an optional dependency automatically when installed: %s',
+    async (installed) => {
+      writeAlias();
+      const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+      manifest.optionalDependencies = { 'platform-addon': '1.0.0' };
+      writeFileSync(join(root, 'package.json'), JSON.stringify(manifest));
+      if (installed) {
+        const directory = join(root, 'node_modules/platform-addon');
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(
+          join(directory, 'package.json'),
+          JSON.stringify({ name: 'platform-addon', version: '1.0.0' }),
+        );
+      }
+      const code = await runCli(
+        ['doctor', '--root', root, '--offline', '--strict', '--json'],
+        output,
+      );
+      const report = JSON.parse(stdout);
+      expect(code).toBe(0);
+      expect(report.dependencies).toEqual(
+        installed ? ['legacy', 'platform-addon', 'vue'] : ['legacy', 'vue'],
+      );
+      expect(report.diagnostics).toEqual([]);
+    },
+  );
+
+  it.each(['optional', 'required'])(
+    'still reports an explicitly requested missing %s dependency',
+    async (kind) => {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({
+          name: 'host',
+          [kind === 'optional' ? 'optionalDependencies' : 'dependencies']: { missing: '1.0.0' },
+        }),
+      );
+      const code = await runCli(
+        ['doctor', 'missing', '--root', root, '--offline', '--strict', '--json'],
+        output,
+      );
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout).diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ code: 'DEPENDENCY_NOT_FOUND', packageName: 'missing' }),
+        ]),
+      );
+    },
+  );
+
   it('allows a non-strict doctor to report issues without failing the command', async () => {
     const code = await runCli(['doctor', 'legacy', '--root', root, '--offline'], output);
     expect(code).toBe(0);
     expect(stdout).toContain('OFFLINE_ALIAS_MISSING');
+  });
+
+  it('still checks missing required dependencies during automatic scanning', async () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'host', dependencies: { missing: '1.0.0' } }),
+    );
+    const code = await runCli(
+      ['doctor', '--root', root, '--offline', '--strict', '--json'],
+      output,
+    );
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout).diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'DEPENDENCY_NOT_FOUND', packageName: 'missing' }),
+      ]),
+    );
   });
 
   it('requires explicit package selection before prepare can write dependencies', async () => {
