@@ -1462,21 +1462,23 @@ export class DependencyAnalyzer {
           missingFirstLevelPeers: [],
         });
       }
-      const { resolved } = resolver.explainResolution(
+      const { reason, aliases } = resolver.explainResolution(
         packageName,
         join(path, '__peer_context__.js'),
       );
-      const scope = resolved ? scopes.get(resolved) : undefined;
-      return Boolean(
-        scope?.paths.has(path) &&
-        requirements.every(
+      if (reason !== 'redirected' && reason !== 'ambiguous') return false;
+      // A tie still shows which compatible aliases can reach this path.
+      return aliases.some((alias) => {
+        const scope = scopes.get(alias);
+        if (!scope?.paths.has(path)) return false;
+        return requirements.every(
           (requirement) =>
             !this.isRequirementIncompatibleWithAlias(requirement, {
               packageName,
               aliasVersion: scope.version,
             }),
-        ),
-      );
+        );
+      });
     };
   }
 

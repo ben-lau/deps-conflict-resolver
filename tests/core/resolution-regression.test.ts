@@ -960,6 +960,59 @@ describe('resolution correctness with installed packages', () => {
     },
   );
 
+  it.each([false, true])(
+    'keeps only compatible aliases in a shared descendant tie (excluded=%s)',
+    async (excluded) => {
+      const root = project({
+        dependencies: {
+          older: '1.0.0',
+          recent: '1.0.0',
+          latest: '1.0.0',
+          runtime: '3.0.0',
+          runtime26: 'npm:runtime@2.6.14',
+          runtime27a: 'npm:runtime@2.7.10',
+          runtime27b: 'npm:runtime@2.7.16',
+        },
+      });
+      for (const [name, version] of [
+        ['older', '2.6.14'],
+        ['recent', '2.7.10'],
+        ['latest', '2.7.16'],
+      ] as const) {
+        pkg(root, name, {
+          dependencies: { descendant: '1.0.0' },
+          peerDependencies: { runtime: version },
+        });
+      }
+      const descendant = pkg(root, 'descendant', { peerDependencies: { runtime: '^2.7.0' } });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      pkg(root, 'runtime26', { name: 'runtime', version: '2.6.14' });
+      pkg(root, 'runtime27a', { name: 'runtime', version: '2.7.10' });
+      pkg(root, 'runtime27b', { name: 'runtime', version: '2.7.16' });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, ['older', 'recent', 'latest']),
+        offline: true,
+        ...(excluded && { excludeRedirects: { runtime: ['descendant'] } }),
+      });
+      const decision = resolver.explainResolution('runtime', join(descendant, 'index.js'));
+      const older = resolver
+        .getAnalysisResult()!
+        .aliasMappings.find(({ aliasName }) => aliasName === 'runtime26')!;
+      if (excluded) {
+        expect(decision).toMatchObject({ reason: 'excluded', resolved: null });
+        expect(older.importerPaths).toContain(descendant);
+      } else {
+        expect(decision).toMatchObject({
+          reason: 'ambiguous',
+          resolved: null,
+          aliases: ['runtime27a', 'runtime27b'],
+        });
+        expect(older.excludedImporterPaths).toContain(descendant);
+      }
+    },
+  );
+
   it('preserves all workspace entry paths sharing a hoisted physical package for Vite SSR and uses shortest BFS paths', async () => {
     const workspace = project({
       name: 'ws-hoisted-shared-root',
