@@ -1072,47 +1072,43 @@ export class DependencyAnalyzer {
     requests: DependencyPath[],
     availableVersions: string[],
   ): DependencyPath[][] {
-    const groups: DependencyPath[][] = [];
-    const orderedRequests = requests
+    // One semver scan per distinct range, scoped to this version universe.
+    // Indices preserve duplicate-version counts and the original tie order.
+    const candidates = new Map<string, Set<number>>();
+    for (const request of requests) {
+      if (candidates.has(request.requiredRange)) continue;
+      const matching = new Set<number>();
+      availableVersions.forEach((version, index) => {
+        if (satisfies(version, request.requiredRange)) matching.add(index);
+      });
+      candidates.set(request.requiredRange, matching);
+    }
+    const ordered = requests
       .map((request, index) => ({
         request,
         index,
-        satisfyingVersionCount: availableVersions.filter((version) =>
-          satisfies(version, request.requiredRange),
-        ).length,
+        matching: candidates.get(request.requiredRange)!,
       }))
-      .sort(
-        (left, right) =>
-          left.satisfyingVersionCount - right.satisfyingVersionCount || left.index - right.index,
-      );
-
-    for (const { request } of orderedRequests) {
+      .sort((a, b) => a.matching.size - b.matching.size || a.index - b.index);
+    const groups: Array<{ requests: DependencyPath[]; matching: Set<number> }> = [];
+    for (const { request, matching } of ordered) {
+      if (matching.size === 0) continue;
       let added = false;
-
-      // 尝试加入现有组
       for (const group of groups) {
-        // 检查合并后的整个范围集合是否有可用版本。两两有交集不代表整个集合有交集。
-        const proposedRanges = [...group, request].map((item) => item.requiredRange);
-        const canJoin = findBestVersion(availableVersions, proposedRanges) !== null;
-
-        if (canJoin) {
-          group.push(request);
+        const common =
+          group.matching === matching
+            ? matching
+            : new Set([...group.matching].filter((index) => matching.has(index)));
+        if (common.size > 0) {
+          group.matching = common;
+          group.requests.push(request);
           added = true;
           break;
         }
       }
-
-      // 没有合适的组，创建新组
-      if (!added) {
-        // 没有任何可用版本满足该请求时，不创建不可安装的 singleton 组。
-        if (findBestVersion(availableVersions, [request.requiredRange]) === null) {
-          continue;
-        }
-        groups.push([request]);
-      }
+      if (!added) groups.push({ requests: [request], matching });
     }
-
-    return groups;
+    return groups.map((group) => group.requests);
   }
 
   /**

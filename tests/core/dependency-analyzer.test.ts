@@ -4,6 +4,7 @@ import { AliasManager } from '../../src/core/alias-manager';
 import type { DependencyPath, ResolvedOptions, PackageJson } from '../../src/types';
 import type { InstalledPackageInfo } from '../../src/types';
 import { findBestVersion } from '../../src/utils/semver';
+import semver from 'semver';
 import { promises as fs, realpathSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -1056,7 +1057,94 @@ const groupRanges = (requests: DependencyPath[], availableVersions: string[]) =>
   ).groupRangesByCompatibility(requests, availableVersions);
 };
 
+function reference(requests: DependencyPath[], versions: string[]): DependencyPath[][] {
+  const groups: DependencyPath[][] = [];
+  const ordered = requests
+    .map((request, index) => ({
+      request,
+      index,
+      count: versions.filter((version) =>
+        semver.satisfies(version, request.requiredRange, { includePrerelease: false }),
+      ).length,
+    }))
+    .sort((a, b) => a.count - b.count || a.index - b.index);
+  for (const { request } of ordered) {
+    const target = groups.find(
+      (group) =>
+        findBestVersion(
+          versions,
+          [...group, request].map((entry) => entry.requiredRange),
+        ) !== null,
+    );
+    if (target) target.push(request);
+    else if (findBestVersion(versions, [request.requiredRange]) !== null) groups.push([request]);
+  }
+  return groups;
+}
+
 describe('DependencyAnalyzer semver grouping', () => {
+  it('evaluates a repeated range only once for the current version set', () => {
+    const requests = Array.from({ length: 20 }, (_, index) => ({
+      path: ['consumer-' + index],
+      requiredRange: '^2',
+    }));
+    const versions = Array.from({ length: 60 }, (_, index) => '2.0.' + index);
+    const matches = vi.spyOn(semver, 'satisfies');
+    try {
+      expect(groupRanges(requests, versions)).toEqual([requests]);
+      expect(matches).toHaveBeenCalledTimes(versions.length);
+    } finally {
+      matches.mockRestore();
+    }
+  });
+
+  it('preserves reference grouping order across duplicate, invalid and prerelease inputs', () => {
+    const ranges = [
+      '',
+      '*',
+      '^1',
+      '^2',
+      '^3',
+      '>=1 <3',
+      '>=2 <=3.1.0',
+      '1.0.0 || 2.0.0',
+      '2.0.0 || 3.0.0',
+      '1.0.0 || 3.0.0',
+      '^9',
+      'invalid',
+      '^2.0.0-beta.1',
+      '=2.0.0-beta.1',
+      '1 - 2',
+      '2.x',
+    ];
+    const versions = [
+      '1.0.0',
+      '1.0.0',
+      '1.1.0',
+      '2.0.0',
+      '2.1.0',
+      '2.0.0-beta.1',
+      '2.0.0-beta.2',
+      '3.0.0',
+      '3.1.0',
+      '4.0.0',
+      'invalid',
+    ];
+    let state = 251114;
+    const rand = (max: number) => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state % max;
+    };
+    for (let index = 0; index < 500; index++) {
+      const available = versions.filter(() => rand(3) > 0);
+      const requests = Array.from({ length: rand(12) }, (_, i) => ({
+        path: ['consumer-' + i],
+        requiredRange: ranges[rand(ranges.length)]!,
+      }));
+      expect(groupRanges(requests, available)).toEqual(reference(requests, available));
+    }
+  });
+
   it('does not create a group for a range with no available version', () => {
     const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: '^2.0.0' }];
 

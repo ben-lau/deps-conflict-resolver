@@ -37,7 +37,8 @@ pnpm test:coverage
 | Command               | Description                                                             |
 | --------------------- | ----------------------------------------------------------------------- |
 | pnpm test:compat:vite | Check cold optimization and SSR with actual Vue runtimes after building |
-| pnpm bench:resolve    | Build and benchmark warm resolution; assert zero realpath calls         |
+| pnpm bench:resolve    | Build and benchmark a resident working set; assert zero realpath calls  |
+| pnpm bench:scale      | Compare grouping work, importer working sets, I/O counts and heap use   |
 | `pnpm build`          | Build with tsup (CJS + ESM + types)                                     |
 | `pnpm dev`            | Build in watch mode                                                     |
 | `pnpm test`           | Run tests in watch mode                                                 |
