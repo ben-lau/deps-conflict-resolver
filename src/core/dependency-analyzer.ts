@@ -22,6 +22,7 @@ import type { InstalledPackageInfo } from '../types';
 import { createWorkspaceDetector, WorkspaceDetector } from './workspace-detector';
 import {
   satisfies,
+  isValidRange,
   isValidVersion,
   rangesIntersect,
   findBestVersion,
@@ -29,14 +30,15 @@ import {
   createAliasInstallSpec,
 } from '../utils/semver';
 import {
+  getDependencyRequirement,
   getRuntimeDependencySpec,
   parseNpmAlias,
   resolveDependencyRequirement,
+  type DependencyRequirement,
 } from '../utils/version-spec';
 import {
   findInvalidPeerOverrideKeys,
   getEffectivePeerDependencies,
-  resolvePeerOverridesForPackage,
   type EffectivePeerEntry,
 } from '../utils/peer-overrides';
 import { clearNpmRegistryCache } from './npm-registry';
@@ -44,12 +46,14 @@ import { npmRegistryClient, type RegistryClient } from './registry-client';
 import {
   buildInstalledDependencyGraph,
   collectWorkspaceEntryNames,
+  getInstalledDependencyRequirements,
   type InstalledDependencyGraph,
   type InstalledPackageNode,
 } from './dependency-graph';
 
 import { linkAliasPeers } from './alias-peer-resolver';
 import { validateSharedPeerContexts } from './shared-peer-contexts';
+import { AliasManager } from './alias-manager';
 
 const logger = createLogger('dependency-analyzer');
 
@@ -82,6 +86,16 @@ interface ReusedAliasGroup {
   requests: DependencyPath[];
 }
 
+interface AliasScopeTarget {
+  packageName: string;
+  aliasVersion: string;
+}
+
+type PruneIncompatibleBranch = (
+  path: string,
+  requirements: readonly DependencyRequirement[],
+) => boolean;
+
 export class DependencyAnalyzer {
   private options: ResolvedOptions;
   /** 主项目声明的依赖（解析后的版本，catalog: 等协议已转换） */
@@ -112,6 +126,7 @@ export class DependencyAnalyzer {
   private collectCache = new Map<string, string[]>();
   /** 当前 analyze 使用的按安装路径区分的依赖图 */
   private dependencyGraph: InstalledDependencyGraph | null = null;
+  private readonly inheritedMismatches = new Map<string, Set<string>>();
   /** 注册表访问适配器（可注入以支持离线分析和确定性测试） */
   private registryClient: RegistryClient;
   private graphPopulated = false;
@@ -383,6 +398,7 @@ export class DependencyAnalyzer {
         this.diagnostics,
         this.watchFiles,
         this.workspaceDetector,
+        this.inheritedMismatches,
       );
 
       const conflictsNeedingAlias = peerConflicts.filter((c) => c.needsAlias).length;
@@ -417,6 +433,7 @@ export class DependencyAnalyzer {
       this.rawDeclaredDeps = {};
       this.declaredDeps = {};
       this.collectCache.clear();
+      this.inheritedMismatches.clear();
       this.dependencyGraph = null;
     }
   }
@@ -1109,19 +1126,37 @@ export class DependencyAnalyzer {
     }
 
     const finalizeMappings = () => {
-      const allAliasVersions = plannedGroups.map((entry) => entry.version);
-      for (const entry of plannedGroups) {
-        mappings.push(
-          this.buildAliasMapping(
-            packageName,
-            entry.aliasName,
-            entry.version,
-            entry.installSpec,
-            entry.requests,
-            allConflictPackageNames,
-            allAliasVersions,
-          ),
+      const buildMapping = (
+        entry: (typeof plannedGroups)[number],
+        pruneIncompatibleBranch?: PruneIncompatibleBranch,
+      ) =>
+        this.buildAliasMapping(
+          packageName,
+          entry.aliasName,
+          entry.version,
+          entry.installSpec,
+          entry.requests,
+          allConflictPackageNames,
+          pruneIncompatibleBranch,
         );
+
+      // Infer a substitute only from a verified alias's independently
+      // compatible scope. Its reachability cannot rely on an incompatible
+      // branch that is itself waiting to decide whether to inherit.
+      const verified = plannedGroups.filter(({ installSpec }) => !installSpec);
+      let findScopedProvider: PruneIncompatibleBranch | undefined;
+      const pruneIncompatibleBranch: PruneIncompatibleBranch | undefined =
+        this.dependencyGraph && plannedGroups.length > 1 && verified.length > 0
+          ? (path, requirements) => {
+              findScopedProvider ??= this.createScopedProviderLookup(
+                packageName,
+                verified.map((entry) => buildMapping(entry, () => true)),
+              );
+              return findScopedProvider(path, requirements);
+            }
+          : undefined;
+      for (const entry of plannedGroups) {
+        mappings.push(buildMapping(entry, pruneIncompatibleBranch));
       }
       return mappings;
     };
@@ -1330,7 +1365,7 @@ export class DependencyAnalyzer {
     installSpec: string,
     group: DependencyPath[],
     allConflictPackageNames: string[],
-    allAliasVersions: string[] = [version],
+    pruneIncompatibleBranch?: PruneIncompatibleBranch,
   ): AliasMapping {
     // usedBy 包含声明 peerDependency 的包路径
     const usedBy = group.map((r) => r.path.join('>'));
@@ -1342,16 +1377,18 @@ export class DependencyAnalyzer {
     const target = {
       packageName,
       aliasVersion: version,
-      hostVersion: this.isDeclaredInMainProject(packageName)
-        ? this.getMainProjectVersion(packageName)
-        : null,
-      allAliasVersions,
     };
     const graphResult = this.collectGraphRelatedPackageInstances(
       rootIds,
       allConflictPackageNames,
       target,
+      pruneIncompatibleBranch,
     );
+    if (graphResult?.inheritedMismatches.length) {
+      const paths = this.inheritedMismatches.get(packageName) ?? new Set<string>();
+      for (const path of graphResult.inheritedMismatches) paths.add(path);
+      this.inheritedMismatches.set(packageName, paths);
+    }
     const graphInstances = graphResult?.collected ?? null;
     const allDependents = graphInstances
       ? [...new Set(graphInstances.map((instance) => instance.name))]
@@ -1379,6 +1416,50 @@ export class DependencyAnalyzer {
       allDependents,
       ...(importerPaths ? { importerPaths } : {}),
       ...(excludedImporterPaths.length > 0 ? { excludedImporterPaths } : {}),
+    };
+  }
+
+  private createScopedProviderLookup(
+    packageName: string,
+    mappings: AliasMapping[],
+  ): PruneIncompatibleBranch {
+    const scopes = new Map(
+      mappings.map((mapping) => [
+        mapping.aliasName,
+        {
+          version: mapping.resolvedVersion,
+          paths: new Set(mapping.importerPaths),
+        },
+      ]),
+    );
+    const coveredPaths = new Set(mappings.flatMap((mapping) => mapping.importerPaths ?? []));
+    let resolver: AliasManager | undefined;
+    return (path, requirements) => {
+      if (!coveredPaths.has(path)) return false;
+      if (!resolver) {
+        resolver = new AliasManager({ ...this.options, strict: false });
+        resolver.initFromAnalysisResult({
+          aliasMappings: mappings,
+          peerConflicts: [],
+          analyzedDependencies: new Map(),
+          missingFirstLevelPeers: [],
+        });
+      }
+      const { resolved } = resolver.explainResolution(
+        packageName,
+        join(path, '__peer_context__.js'),
+      );
+      const scope = resolved ? scopes.get(resolved) : undefined;
+      return Boolean(
+        scope?.paths.has(path) &&
+        requirements.every(
+          (requirement) =>
+            !this.isRequirementIncompatibleWithAlias(requirement, {
+              packageName,
+              aliasVersion: scope.version,
+            }),
+        ),
+      );
     };
   }
 
@@ -1644,73 +1725,41 @@ export class DependencyAnalyzer {
     return childId ? (this.dependencyGraph.nodes.get(childId) ?? null) : null;
   }
 
-  /**
-   * 判断一个非根后代包是否明确声明了仅兼容其自然解析提供方、且与当前目标别名不兼容的约束。
-   * 例如 Vue 2 组件依赖树中通过传递边触达的 Vue 3 图标库（peerDependencies: { vue: "3.x" }），
-   * 或在私有嵌套 node_modules 中自带不兼容版本（dependencies: { foo: "^1.0.0" }）的子包，
-   * 不应被纳入目标别名重定向范围，也不应沿它向下传播该别名规则。
-   */
-  private isDescendantIncompatibleWithAlias(
-    manifest:
-      | Pick<
-          PackageJson,
-          'name' | 'version' | 'dependencies' | 'optionalDependencies' | 'peerDependencies'
-        >
-      | null
-      | undefined,
-    target?: {
-      packageName: string;
-      aliasVersion: string;
-      hostVersion: string | null;
-      allAliasVersions?: string[];
-    },
-    descendantName?: string,
-    descendantVersion?: string,
-    naturalProvider?: { name?: string; version?: string | null },
+  private isRequirementIncompatibleWithAlias(
+    requirement: DependencyRequirement,
+    target: AliasScopeTarget,
   ): boolean {
-    if (!target) return false;
-    const overrides = resolvePeerOverridesForPackage(
-      this.options.peerOverrides,
-      { packageName: descendantName, manifestName: manifest?.name },
-      descendantVersion ?? manifest?.version,
-    );
-    const peerRange =
-      overrides?.[target.packageName] ?? manifest?.peerDependencies?.[target.packageName];
-    const depRange =
-      peerRange === undefined ? getRuntimeDependencySpec(manifest, target.packageName) : undefined;
-    const rawRange = peerRange ?? depRange;
-    if (!rawRange) return false;
-
-    // If dependencies[target.packageName] aliases a different package (e.g.
-    // "vue": "npm:other-pkg@3.5.0"), keep it on its own provider.
-    if (depRange?.startsWith('npm:')) {
-      const parsed = parseNpmAlias(depRange);
-      if (parsed && parsed[0] !== target.packageName) return true;
-    }
-    if (naturalProvider?.name && naturalProvider.name !== target.packageName) {
-      return true;
-    }
-
-    const range =
-      this.workspaceDetector.resolveVersionSpec(target.packageName, rawRange) ?? rawRange;
+    if (requirement.name !== target.packageName) return true;
+    const { range } = requirement;
     const aliasCompatible = isValidVersion(target.aliasVersion)
       ? satisfies(target.aliasVersion, range)
       : rangesIntersect(target.aliasVersion, range);
-    if (aliasCompatible) return false;
+    return !aliasCompatible && isValidRange(range);
+  }
 
-    const naturalVersion =
-      naturalProvider?.version && isValidVersion(naturalProvider.version)
-        ? naturalProvider.version
-        : target.hostVersion;
-    if (naturalVersion && satisfies(naturalVersion, range)) {
-      return true;
-    }
-
-    const otherAliasVersions = (target.allAliasVersions ?? []).filter(
-      (version) => version !== target.aliasVersion,
+  private isDescendantIncompatibleWithAlias(
+    manifest: PackageJson,
+    target: AliasScopeTarget | undefined,
+    name: string,
+    packagePath?: string,
+  ): boolean {
+    if (!target) return false;
+    const peers = getEffectivePeerDependencies(manifest, name, this.options.peerOverrides);
+    const requirement = getDependencyRequirement(
+      manifest,
+      target.packageName,
+      peers.get(target.packageName),
+      this.workspaceDetector,
     );
-    return otherAliasVersions.some((version) =>
-      isValidVersion(version) ? satisfies(version, range) : rangesIntersect(version, range),
+    if (!requirement) return false;
+    if (requirement.name !== target.packageName) return true;
+    if (!packagePath) return false;
+    const { pkgJson: natural } = this.resolvePackageJson(target.packageName, packagePath);
+    if (natural?.name && natural.name !== target.packageName) return true;
+    return Boolean(
+      natural?.version &&
+      this.isRequirementIncompatibleWithAlias(requirement, target) &&
+      satisfies(natural.version, requirement.range),
     );
   }
 
@@ -1722,13 +1771,13 @@ export class DependencyAnalyzer {
   private collectGraphRelatedPackageInstances(
     rootIds: string[],
     excludePackages: string[] = [],
-    target?: {
-      packageName: string;
-      aliasVersion: string;
-      hostVersion: string | null;
-      allAliasVersions?: string[];
-    },
-  ): { collected: Array<{ name: string; path: string }>; excludedPaths: string[] } | null {
+    target?: AliasScopeTarget,
+    pruneIncompatibleBranch?: PruneIncompatibleBranch,
+  ): {
+    collected: Array<{ name: string; path: string }>;
+    excludedPaths: string[];
+    inheritedMismatches: string[];
+  } | null {
     if (!this.dependencyGraph || rootIds.length === 0) return null;
 
     const excludeSet = new Set(excludePackages);
@@ -1736,6 +1785,7 @@ export class DependencyAnalyzer {
     const visited = new Set<string>();
     const collected: Array<{ name: string; path: string }> = [];
     const excludedPaths: string[] = [];
+    const inheritedMismatches: string[] = [];
     const stack = [...rootSet];
 
     while (stack.length > 0) {
@@ -1748,27 +1798,35 @@ export class DependencyAnalyzer {
 
       const isExcludedConflictPackage = excludeSet.has(node.name);
       if (!rootSet.has(node.id) && target) {
-        const naturalNode = this.findGraphChildNode(node, target.packageName);
-        const naturalManifest = naturalNode?.manifest;
-        if (
-          this.isDescendantIncompatibleWithAlias(
-            node.manifest,
-            target,
-            node.name,
-            node.version,
-            naturalNode
-              ? {
-                  name: naturalManifest?.name,
-                  version: naturalManifest?.version ?? naturalNode.version,
-                }
-              : undefined,
-          )
-        ) {
-          logger.debug(
-            `Skipping descendant ${node.name}@${node.version} (${node.packagePath}): declared ${target.packageName} requirement matches its natural provider but not alias ${target.aliasVersion}`,
-          );
+        const requirements = getInstalledDependencyRequirements(
+          node,
+          target.packageName,
+          this.workspaceDetector,
+        );
+        const natural = this.findGraphChildNode(node, target.packageName)?.manifest;
+        const differentTarget =
+          Boolean(natural?.name && natural.name !== target.packageName) ||
+          requirements.some(({ name }) => name !== target.packageName);
+        if (requirements.length > 0 && differentTarget) {
           excludedPaths.push(node.packagePath);
           continue;
+        }
+        if (
+          requirements.some((requirement) =>
+            this.isRequirementIncompatibleWithAlias(requirement, target),
+          )
+        ) {
+          const version = natural?.version;
+          const compatibleNative =
+            version &&
+            requirements.every(({ range }) => !isValidRange(range) || satisfies(version, range));
+          if (compatibleNative || pruneIncompatibleBranch?.(node.packagePath, requirements)) {
+            excludedPaths.push(node.packagePath);
+            continue;
+          }
+          // Preserve inheritance when the manifest cannot be satisfied by any
+          // provider in this scope. An unrelated alias must not change it.
+          inheritedMismatches.push(node.packagePath);
         }
       }
 
@@ -1780,7 +1838,7 @@ export class DependencyAnalyzer {
       }
     }
 
-    return { collected, excludedPaths };
+    return { collected, excludedPaths, inheritedMismatches };
   }
 
   /**
@@ -1804,12 +1862,7 @@ export class DependencyAnalyzer {
     collected: Set<string>,
     baseDir: string,
     excludeTraversal?: Set<string>,
-    target?: {
-      packageName: string;
-      aliasVersion: string;
-      hostVersion: string | null;
-      allAliasVersions?: string[];
-    },
+    target?: AliasScopeTarget,
     rootPackages?: Set<string>,
   ): void {
     const stack: Array<{ name: string; baseDir: string }> = [{ name: packageName, baseDir }];
@@ -1877,7 +1930,7 @@ export class DependencyAnalyzer {
 
       if (
         !rootPackages?.has(name) &&
-        this.isDescendantIncompatibleWithAlias(pkgJson, target, name)
+        this.isDescendantIncompatibleWithAlias(pkgJson, target, name, packagePath)
       ) {
         continue;
       }
@@ -1906,12 +1959,7 @@ export class DependencyAnalyzer {
   private collectAllRelatedPackages(
     packageNames: string[],
     excludePackages: string[] = [],
-    target?: {
-      packageName: string;
-      aliasVersion: string;
-      hostVersion: string | null;
-      allAliasVersions?: string[];
-    },
+    target?: AliasScopeTarget,
   ): string[] {
     const cacheKey = JSON.stringify([
       packageNames.slice().sort(),

@@ -8,7 +8,7 @@ import {
 import { AliasManager } from './alias-manager';
 import { createWorkspaceDetector, type WorkspaceDetector } from './workspace-detector';
 import { canonicalPath, findPackagePath, readPackageJsonCached } from '../utils/fs';
-import { satisfies } from '../utils/semver';
+import { isValidRange, satisfies } from '../utils/semver';
 import { resolveDependencyRequirement, type VersionSpecResolver } from '../utils/version-spec';
 
 interface Provider {
@@ -43,9 +43,9 @@ function matchesPackageName(node: InstalledPackageNode, names: readonly string[]
 }
 
 /**
- * Warn about different incoming runtime contexts in the configured graph.
- * A broad peer range alone cannot prove that mixing runtimes is an error, so
- * this advisory does not reject strict initialization or invent new instances.
+ * Validate provider selection for configured entries and pruned descendants.
+ * Shared contexts and descendant manifest mismatches are advisory before actual
+ * imports are known.
  */
 export function validateSharedPeerContexts(
   graph: InstalledDependencyGraph,
@@ -54,8 +54,16 @@ export function validateSharedPeerContexts(
   diagnostics: ResolverDiagnostic[],
   watchFiles?: Set<string>,
   workspaceDetector?: Pick<WorkspaceDetector, 'resolveVersionSpec'>,
+  inheritedMismatches?: ReadonlyMap<string, ReadonlySet<string>>,
 ): void {
-  if (mappings.length === 0 || graph.roots.length < 2) return;
+  if (mappings.length === 0) return;
+  if (
+    graph.roots.length < 2 &&
+    !inheritedMismatches?.size &&
+    !mappings.some((mapping) => mapping.excludedImporterPaths?.length)
+  ) {
+    return;
+  }
   const detector = workspaceDetector ?? createWorkspaceDetector(options.projectRoot);
   const readManifest = (directory: string): PackageJson | null => {
     watchFiles?.add(join(directory, 'package.json'));
@@ -104,6 +112,8 @@ export function validateSharedPeerContexts(
     return resolver;
   };
 
+  const installationPending =
+    options.autoInstall && !options.offline && mappings.some((mapping) => mapping.installSpec);
   const validation: PeerValidation = {
     graph,
     options,
@@ -115,6 +125,9 @@ export function validateSharedPeerContexts(
     readManifest,
     getResolver,
   };
+  if (!installationPending)
+    validateDescendantProviders(validation, installedMappings, inheritedMismatches);
+
   for (const peer of originals) {
     const candidateRoots: ConfiguredPeerRequest[] = [];
     for (const [nodeId, requestPath] of requests) {
@@ -133,6 +146,73 @@ export function validateSharedPeerContexts(
       });
     }
     validateSharedContexts(validation, peer, candidateRoots, installedMappings);
+  }
+}
+
+function validateDescendantProviders(
+  validation: PeerValidation,
+  installedMappings: readonly AliasMapping[],
+  inheritedMismatches: ReadonlyMap<string, ReadonlySet<string>> | undefined,
+): void {
+  const { graph, options, diagnostics, detector, aliases, getResolver } = validation;
+  const pathsToCheck = new Map<string, Set<string>>();
+  for (const [peer, paths] of inheritedMismatches ?? []) pathsToCheck.set(peer, new Set(paths));
+  for (const mapping of installedMappings) {
+    if (!mapping.excludedImporterPaths?.length) continue;
+    const paths = pathsToCheck.get(mapping.originalName) ?? new Set<string>();
+    for (const path of mapping.excludedImporterPaths) paths.add(path);
+    pathsToCheck.set(mapping.originalName, paths);
+  }
+  for (const [peer, paths] of pathsToCheck) {
+    const singleAlias =
+      installedMappings.filter((mapping) => mapping.originalName === peer).length === 1;
+    const explicit = [
+      ...(options.includeRedirects[peer] ?? []),
+      ...(options.excludeRedirects[peer] ?? []),
+    ];
+    for (const path of paths) {
+      const node = graph.nodes.get(path);
+      if (!node || matchesPackageName(node, explicit)) {
+        continue;
+      }
+
+      const requirements = getInstalledDependencyRequirements(node, peer, detector).filter(
+        (requirement) =>
+          !requirement.optional && requirement.name === peer && isValidRange(requirement.range),
+      );
+      if (requirements.length === 0) continue;
+
+      const providerId = node.resolvedChildren.get(peer);
+      const natural = providerId ? graph.nodes.get(providerId)?.manifest : undefined;
+      const naturalVersion = natural?.version;
+      const naturalMatches =
+        naturalVersion &&
+        (!natural?.name || natural.name === peer) &&
+        requirements.every(({ range }) => satisfies(naturalVersion, range));
+      if (naturalMatches && singleAlias && !inheritedMismatches?.get(peer)?.has(path)) continue;
+
+      const decision = getResolver().explainResolution(peer, join(path, '__peer_context__.js'));
+      if (decision.reason === 'excluded' || decision.reason === 'ambiguous') continue;
+      const provider = decision.resolved ? aliases.get(decision.resolved) : undefined;
+      if (
+        decision.resolved
+          ? provider && requirements.every(({ range }) => satisfies(provider.version, range))
+          : naturalMatches
+      ) {
+        continue;
+      }
+
+      const ranges = [...new Set(requirements.map(({ range }) => range))];
+      diagnostics.push({
+        code: 'ALIAS_PEER_UNSATISFIED',
+        // A manifest can declare a peer that is bundled internally or unused.
+        severity: 'warning',
+        packageName: peer,
+        requestedBy: [node.name],
+        importerPaths: [path],
+        message: `${node.name} requires ${peer} (${ranges.join(', ')}), but no compatible provider is available in its redirect scope or installed dependencies`,
+      });
+    }
   }
 }
 

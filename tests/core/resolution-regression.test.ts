@@ -804,6 +804,8 @@ describe('resolution correctness with installed packages', () => {
 
     // Explicit includeRedirects on legacy-26 must not undo pruning of nested modern-icons,
     // while explicit includeRedirects on modern-icons itself still overrides pruning.
+    // The one-root runs leave child-27 on its own installed Vue 2.7 provider.
+    pkg(child27, 'vue', { version: '2.7.16' });
     const withParentInclude = await createResolver({
       ...baseOptions(root, ['legacy-26']),
       includeRedirects: { vue: ['legacy-26'] },
@@ -820,6 +822,60 @@ describe('resolution correctness with installed packages', () => {
     });
     expect(withTargetInclude.resolveModule('vue', join(modernIcons, 'index.js'))).toBe('vue26');
   });
+
+  it.each(['absent', 'unrelated', 'reachable'] as const)(
+    'keeps inheritance until a compatible alias covers the descendant: %s',
+    async (alternative) => {
+      const root = project({
+        dependencies: {
+          legacy: '1.0.0',
+          recent: '1.0.0',
+          runtime: '3.0.0',
+          runtime26: 'npm:runtime@2.6.14',
+          runtime27: 'npm:runtime@2.7.16',
+        },
+      });
+      pkg(root, 'legacy', {
+        peerDependencies: { runtime: '~2.6.0' },
+        dependencies: { descendant: '1.0.0' },
+      });
+      const reachable = alternative === 'reachable';
+      pkg(root, 'recent', {
+        peerDependencies: { runtime: '~2.7.0' },
+        ...(reachable ? { dependencies: { descendant: '1.0.0' } } : {}),
+      });
+      const descendant = pkg(root, 'descendant', {
+        peerDependencies: { runtime: '~2.7.0' },
+        dependencies: { leaf: '1.0.0' },
+      });
+      const leaf = pkg(root, 'leaf', {});
+      pkg(root, 'runtime', { version: '3.0.0' });
+      pkg(root, 'runtime26', { name: 'runtime', version: '2.6.14' });
+      pkg(root, 'runtime27', { name: 'runtime', version: '2.7.16' });
+
+      const dependencies = alternative === 'absent' ? ['legacy'] : ['legacy', 'recent'];
+      const resolver = await createResolver({
+        ...baseOptions(root, dependencies),
+        offline: true,
+        strict: true,
+      });
+      const expectedAlias = reachable ? 'runtime27' : 'runtime26';
+      expect(resolver.resolveModule('runtime', join(descendant, 'index.js'))).toBe(expectedAlias);
+      expect(resolver.resolveModule('runtime', join(leaf, 'index.js'))).toBe(expectedAlias);
+      if (reachable) {
+        expect(resolver.getDiagnostics()).toEqual([]);
+      } else {
+        expect(resolver.getDiagnostics()).toEqual([
+          expect.objectContaining({
+            code: 'ALIAS_PEER_UNSATISFIED',
+            severity: 'warning',
+            packageName: 'runtime',
+            importerPaths: [descendant],
+          }),
+        ]);
+      }
+    },
+  );
 
   it('preserves all workspace entry paths sharing a hoisted physical package for Vite SSR and uses shortest BFS paths', async () => {
     const workspace = project({

@@ -287,7 +287,7 @@ export class DepsConflictResolver {
           '. Inspect getDiagnostics() or run doctor for details.',
       );
     }
-    this.logSharedPeerWarnings();
+    this.logPeerWarnings();
 
     // 分析器在初始化完成后不再使用，释放以允许 GC 回收其内部状态
     this.analyzer = null;
@@ -360,7 +360,7 @@ export class DepsConflictResolver {
     await waitForProjectPreparation(this.preparation);
     await this.notifyInstallComplete();
     this.assertResolved();
-    if (this.initialized) this.logSharedPeerWarnings();
+    if (this.initialized) this.logPeerWarnings();
   }
 
   private async analyzeCurrent(
@@ -598,11 +598,17 @@ export class DepsConflictResolver {
     return true;
   }
 
-  private logSharedPeerWarnings(): void {
+  private logPeerWarnings(): void {
+    const warnings = new Set<string>();
     for (const diagnostic of this.getDiagnostics()) {
-      if (diagnostic.code === 'SHARED_PEER_CONTEXT')
-        logger.warn(`[${diagnostic.code}] ${diagnostic.message}`);
+      if (
+        diagnostic.severity === 'warning' &&
+        (diagnostic.code === 'SHARED_PEER_CONTEXT' || diagnostic.code === 'ALIAS_PEER_UNSATISFIED')
+      ) {
+        warnings.add(`[${diagnostic.code}] ${diagnostic.message}`);
+      }
     }
+    for (const warning of warnings) logger.warn(warning);
   }
 
   /**

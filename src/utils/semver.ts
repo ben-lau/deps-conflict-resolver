@@ -67,6 +67,10 @@ export function isValidVersion(version: string): boolean {
   }
 }
 
+export function isValidRange(range: string): boolean {
+  return semver.validRange(range) !== null;
+}
+
 /**
  * 检查两个版本范围是否有交集
  */
