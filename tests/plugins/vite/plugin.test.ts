@@ -17,6 +17,7 @@ const mockResolverInstance = {
 
 vi.mock('../../../src/core/resolver', () => ({
   getResolverBuild: () => ({
+    trackInstalledPaths: vi.fn(),
     snapshot: () => ({ analysis: mockResolverInstance.getAnalysisResult() }),
     redirect(request: string, importer?: string) {
       const target = mockResolverInstance.resolveModule(request, importer);

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -41,6 +43,15 @@ function editedHook(source, importer) {
 async function hookVersion(bundle, pass) {
   return (await import(pathToFileURL(bundle.optimized.legacy.file).href + '?' + pass))
     .runtimeVersion;
+}
+function scheduleEdit(change, reject) {
+  return setTimeout(() => {
+    try {
+      change();
+    } catch (error) {
+      reject(error);
+    }
+  }, 250);
 }
 try {
   link(join(engineRoot, 'node_modules/vite'), join(root, 'node_modules/vite'));
@@ -593,23 +604,28 @@ try {
   link(join(watchRoot, 'linked'), join(watchRoot, 'node_modules/legacy'));
   writeFileSync(join(watchRoot, 'linked/index.js'), 'export { version } from "vue";');
   writeFileSync(join(watchRoot, 'entry.mjs'), 'export { version } from "legacy";');
-  const startWatch = () =>
-    vite.build({
-      root: watchRoot,
-      configFile: false,
-      logLevel: 'silent',
-      plugins: [
-        depsConflictResolverVitePlugin({ dependencies: ['legacy'], offline: true, strict }),
-      ],
-      build: {
-        minify: false,
-        outDir: join(watchRoot, 'dist'),
-        lib: { entry: join(watchRoot, 'entry.mjs'), formats: ['cjs'], fileName: () => 'watch.cjs' },
-        rollupOptions: { output: { entryFileNames: 'watch.cjs' } },
-        watch: { chokidar: { usePolling: true, interval: 30 } },
-      },
-    });
-  const watcher = await startWatch();
+  const watchConfig = (preparedPlan = false) => ({
+    root: watchRoot,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [
+      depsConflictResolverVitePlugin({
+        dependencies: ['legacy'],
+        offline: true,
+        strict,
+        preparedPlan,
+        debug: preparedPlan,
+      }),
+    ],
+    build: {
+      minify: false,
+      outDir: join(watchRoot, 'dist'),
+      lib: { entry: join(watchRoot, 'entry.mjs'), formats: ['cjs'], fileName: () => 'watch.cjs' },
+      rollupOptions: { output: { entryFileNames: 'watch.cjs' } },
+      watch: { chokidar: { usePolling: true, interval: 30 } },
+    },
+  });
+  const watcher = await vite.build(watchConfig());
   const watchOutput = join(watchRoot, 'dist/watch.cjs');
   const watchVersions = [];
   let timeout;
@@ -644,6 +660,51 @@ try {
   }
 
   const nativeWatch = Number(vite.version.split('.')[0]) >= 8;
+  const installed = (name) => join(watchRoot, 'node_modules', name);
+  const replaceLink = (name, target) => {
+    const replacement = installed('provider-replacement');
+    const slot = installed(name);
+    link(target, replacement);
+    if (process.platform === 'win32') rmSync(slot);
+    renameSync(replacement, slot);
+  };
+  const readWatchOutput = () => {
+    delete repositoryRequire.cache[watchOutput];
+    return repositoryRequire(watchOutput).version;
+  };
+  const verifyRelink = async (settings, previous, output, change) => {
+    const replacing = await vite.build(settings);
+    let pendingEdit;
+    let deadline;
+    try {
+      const result = await new Promise((complete, reject) => {
+        deadline = setTimeout(() => reject(new Error('Link replacement did not rebuild')), 5000);
+        replacing.on('event', (event) => {
+          try {
+            if (event.code === 'ERROR') {
+              if (!nativeWatch) return reject(event.error);
+              assert.match(String(event.error), /Restart vite build --watch/);
+              assert.equal(readWatchOutput(), previous);
+              return complete('restart required');
+            }
+            if (event.code !== 'END') return;
+            const version = readWatchOutput();
+            if (version === output) return complete(version);
+            assert.equal(version, previous);
+            pendingEdit ??= scheduleEdit(change, reject);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      assert.equal(result, nativeWatch ? 'restart required' : output);
+      return result;
+    } finally {
+      clearTimeout(deadline);
+      clearTimeout(pendingEdit);
+      await replacing.close();
+    }
+  };
   const retargetedProviders = {};
   for (const [name, range, previous, output] of [
     ['vue2', '^2', '2.7.16', 'retargeted'],
@@ -651,14 +712,7 @@ try {
     ['vue', '^3', '3.0.0', 'retargeted'],
   ]) {
     peer(range);
-    const slot = join(watchRoot, 'node_modules', name);
-    const original = realpathSync(slot);
-    const replaceLink = (target) => {
-      const replacement = join(watchRoot, 'node_modules/provider-replacement');
-      link(target, replacement);
-      if (process.platform === 'win32') rmSync(slot);
-      renameSync(replacement, slot);
-    };
+    const original = realpathSync(installed(name));
     const newProvider = join(watchRoot, 'replacement-' + name);
     cpSync(original, newProvider, { recursive: true });
     writeFileSync(
@@ -667,54 +721,142 @@ try {
         ? 'import {version as peer} from "vue"; export const version = "new-entry:" + peer;'
         : 'export const version = "retargeted";',
     );
-    const replacing = await startWatch();
-    edit = undefined;
-    const readOutput = () => {
-      delete repositoryRequire.cache[watchOutput];
-      return repositoryRequire(watchOutput).version;
-    };
     try {
-      retargetedProviders[name] = await new Promise((complete, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(name + ' replacement did not update the build')),
-          5000,
-        );
-        replacing.on('event', (event) => {
-          try {
-            if (event.code === 'ERROR') {
-              if (!nativeWatch || !/Restart vite build --watch/.test(String(event.error))) {
-                reject(event.error);
-                return;
-              }
-              assert.equal(readOutput(), previous);
-              complete('restart required');
-              return;
-            }
-            if (event.code !== 'END') return;
-            const version = readOutput();
-            if (version === output) {
-              complete(version);
-            } else {
-              assert.equal(version, previous);
-              edit ??= setTimeout(() => {
-                try {
-                  replaceLink(newProvider);
-                } catch (error) {
-                  reject(error);
-                }
-              }, 250);
-            }
-          } catch (error) {
-            reject(error);
+      retargetedProviders[name] = await verifyRelink(watchConfig(), previous, output, () =>
+        replaceLink(name, newProvider),
+      );
+    } finally {
+      replaceLink(name, original);
+    }
+  }
+
+  // A valid plan must carry enough path information to detect a moved
+  // transitive dependency even when this compilation never traversed the graph.
+  const linkedEntry = join(watchRoot, 'linked/index.js');
+  const originalAlias = realpathSync(installed('vue2'));
+  const childManifest = {
+    name: 'watch-child',
+    version: '1.0.0',
+    type: 'module',
+    main: 'index.js',
+    peerDependencies: { vue: '^2' },
+  };
+  const childTargets = ['original-child', 'new-child'].map((name) => {
+    const directory = join(watchRoot, name);
+    json(join(directory, 'package.json'), childManifest);
+    writeFileSync(
+      join(directory, 'index.js'),
+      'import { version as peer } from "vue"; export const version = ' +
+        JSON.stringify(name + ':') +
+        ' + peer;',
+    );
+    return directory;
+  });
+  link(childTargets[0], installed('watch-child'));
+  peer('^2');
+  json(watchManifest, {
+    ...JSON.parse(readFileSync(watchManifest, 'utf8')),
+    dependencies: { 'watch-child': '1' },
+  });
+  writeFileSync(linkedEntry, 'export { version } from "watch-child";');
+  const plan = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        join(pluginRoot, 'dist/cli.js'),
+        'prepare',
+        'legacy',
+        '--offline',
+        '--strict',
+        '--write-plan',
+        '--json',
+      ],
+      { cwd: watchRoot, encoding: 'utf8' },
+    ),
+  );
+  assert(plan.preparedPlan);
+  const prepared = watchConfig(true);
+  let planHit = false;
+  prepared.logLevel = 'info';
+  prepared.customLogger = vite.createLogger('silent');
+  prepared.customLogger.info = (message) => {
+    if (/planHits: 1\b/.test(message)) planHit = true;
+  };
+  retargetedProviders.transitive = await verifyRelink(
+    prepared,
+    'original-child:2.7.16',
+    'new-child:2.7.16',
+    () => {
+      replaceLink('watch-child', childTargets[1]);
+      writeFileSync(join(watchRoot, 'entry.mjs'), 'export { version } from "legacy"; // changed');
+    },
+  );
+  assert(planHit, 'The offline plan did not hit');
+  writeFileSync(linkedEntry, 'export { version } from "vue";');
+  peer('^2');
+
+  const reactivating = await vite.build(watchConfig());
+  try {
+    retargetedProviders.reactivated = await new Promise((complete, reject) => {
+      let stage = 0;
+      timeout = setTimeout(() => reject(new Error('Reactivated alias did not rebuild')), 5000);
+      reactivating.on('event', (event) => {
+        try {
+          if (event.code === 'ERROR') {
+            assert(nativeWatch && stage === 2, String(event.error));
+            assert.match(String(event.error), /Restart vite build --watch/);
+            assert.equal(readWatchOutput(), '3.0.0');
+            return complete('restart required');
           }
-        });
+          if (event.code !== 'END') return;
+          const output = readWatchOutput();
+          if (stage === 0) {
+            assert.equal(output, '2.7.16');
+            stage++;
+            edit = scheduleEdit(() => peer('^3'), reject);
+          } else if (stage === 1 && output === '3.0.0') {
+            stage++;
+            edit = scheduleEdit(() => {
+              replaceLink('vue2', join(watchRoot, 'replacement-vue2'));
+              peer('^2');
+            }, reject);
+          } else if (stage === 2 && output === 'retargeted') {
+            complete(output);
+          } else if (stage === 2) {
+            assert.equal(output, '3.0.0');
+          }
+        } catch (error) {
+          reject(error);
+        }
       });
-      assert.equal(retargetedProviders[name], nativeWatch ? 'restart required' : output);
+    });
+    assert.equal(retargetedProviders.reactivated, nativeWatch ? 'restart required' : 'retargeted');
+  } finally {
+    clearTimeout(timeout);
+    clearTimeout(edit);
+    await reactivating.close();
+    replaceLink('vue2', originalAlias);
+  }
+
+  if (nativeWatch) {
+    const original = realpathSync(installed('legacy'));
+    const builder = await vite.createBuilder(watchConfig(), true);
+    rmSync(watchOutput);
+    replaceLink('legacy', join(watchRoot, 'replacement-legacy'));
+    const starting = await builder.build(builder.environments.client);
+    try {
+      await new Promise((complete, reject) => {
+        timeout = setTimeout(() => reject(new Error('First watch build did not settle')), 5000);
+        starting.on('event', (event) => {
+          if (event.code === 'ERROR') complete(event.error);
+          else if (event.code === 'END') reject(new Error('First watch build wrote output'));
+        });
+      }).then((error) => assert.match(String(error), /Restart vite build --watch/));
+      assert.equal(existsSync(watchOutput), false);
     } finally {
       clearTimeout(timeout);
-      clearTimeout(edit);
-      await replacing.close();
-      replaceLink(original);
+      await starting.close();
+      replaceLink('legacy', original);
     }
   }
   process.stdout.write(

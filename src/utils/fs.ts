@@ -53,22 +53,29 @@ export type FileSystemCache = ReturnType<typeof createFileSystemCache>;
 type LookupDirectoryCache = FileSystemCache['lookupDirectories'];
 
 const defaultCaches = createFileSystemCache();
-const cacheScope = new AsyncLocalStorage<FileSystemCache>();
+const cacheScope = new AsyncLocalStorage<{
+  cache: FileSystemCache;
+  installedPaths?: Map<string, string>;
+}>();
 const recordingCaches = new WeakMap<DependencyInputs, FileSystemCache>();
 
-export function withFileSystemCache<T>(cache: FileSystemCache, task: () => T): T {
-  return cacheScope.run(cache, task);
+export function withFileSystemCache<T>(
+  cache: FileSystemCache,
+  task: () => T,
+  installedPaths?: Map<string, string>,
+): T {
+  return cacheScope.run({ cache, installedPaths }, task);
 }
 
 function getCaches(cache?: FileSystemCache): FileSystemCache {
   const inputs = currentDependencyInputs();
-  if (!inputs) return cache ?? cacheScope.getStore() ?? defaultCaches;
+  if (!inputs) return cache ?? cacheScope.getStore()?.cache ?? defaultCaches;
   // A concurrent resolver must never supply a cached answer with no recorded inputs.
   let caches = recordingCaches.get(inputs);
   if (!caches)
     recordingCaches.set(
       inputs,
-      (caches = createFileSystemCache(cache?.metrics ?? cacheScope.getStore()?.metrics)),
+      (caches = createFileSystemCache(cache?.metrics ?? cacheScope.getStore()?.cache.metrics)),
     );
   return caches;
 }
@@ -202,9 +209,10 @@ export function findPackagePath(
   }
 
   const metadataRequest = `${packageName}/package.json`;
+  const scope = cacheScope.getStore();
   // Directory-wide negative answers are valid for one preparation pass.
   const lookupDirectories =
-    (currentDependencyInputs() ?? cacheScope.getStore()) ? caches.lookupDirectories : undefined;
+    (currentDependencyInputs() ?? scope) ? caches.lookupDirectories : undefined;
   try {
     // 使用 createRequire 创建一个基于 baseDir 的 require 函数
     // 这样可以正确处理 ESM 和 CJS，以及各种包管理器的依赖结构
@@ -232,6 +240,13 @@ export function findPackagePath(
         }
       }
       const resolved = visible ? canonicalPath(visible, caches) : null;
+      if (
+        scope?.installedPaths &&
+        visible &&
+        resolved &&
+        caches.canonicalPathCache.get(visible)?.real
+      )
+        scope.installedPaths.set(visible, resolved);
       // Do not fall back to require.resolve on a miss: it can still return a
       // deleted link's old store directory from Node's private path cache.
       packagePathCache.set(cacheKey, resolved);
@@ -248,15 +263,19 @@ export function findPackagePath(
   } catch {
     // 如果 require.resolve 失败，回退到手动查找
     // 这处理了一些边缘情况，比如包没有正确导出 package.json
-    const resolved = findPackagePathFallback(
+    const visible = findPackagePathFallback(
       metadataRequest,
       baseDir,
       lookupDirectories,
       metrics,
       trace,
     );
-    packagePathCache.set(cacheKey, resolved);
-    return resolved;
+    if (visible && scope?.installedPaths) {
+      const physical = canonicalPath(visible, caches);
+      if (caches.canonicalPathCache.get(visible)?.real) scope.installedPaths.set(visible, physical);
+    }
+    packagePathCache.set(cacheKey, visible);
+    return visible;
   }
 }
 

@@ -27,8 +27,8 @@ export interface WatchedFiles {
   existing: Set<string>;
   missing: Set<string>;
   providerFiles: Set<string>;
-  missingProviderParents: Map<string, string>;
-  selectedPackages: Map<string, { manifest?: string; path: string | null }>;
+  missingProviderDirectories: Map<string, string>;
+  installedPaths: Map<string, string>;
 }
 
 export function observeProjectLockfiles(projectRoot: string, owner: string) {
@@ -46,17 +46,25 @@ export function observeProjectLockfiles(projectRoot: string, owner: string) {
   return { existing, missing };
 }
 
-function watchFiles(projectRoot: string, owner: string): WatchedFiles {
+function watchFiles(
+  projectRoot: string,
+  owner: string,
+  installedPaths?: ReadonlyMap<string, string>,
+): WatchedFiles {
   return {
     ...observeProjectLockfiles(projectRoot, owner),
     providerFiles: new Set(),
-    missingProviderParents: new Map(),
-    selectedPackages: new Map(),
+    missingProviderDirectories: new Map(),
+    installedPaths: new Map(installedPaths),
   };
 }
 
-export interface AnalysisSnapshot {
+export interface AnalyzedProject {
   result: AnalysisResult;
+  installedPaths?: ReadonlyMap<string, string>;
+}
+
+export interface AnalysisSnapshot extends AnalyzedProject {
   revision: number;
   key: string;
   inputs: DependencyInputs;
@@ -93,8 +101,9 @@ export class DependencyWatch {
     entries: readonly string[],
     activeAliases: readonly AliasMapping[],
     failed: boolean,
+    installedPaths?: ReadonlyMap<string, string>,
   ): void {
-    const watched = watchFiles(projectRoot, owner);
+    const watched = watchFiles(projectRoot, owner, installedPaths);
     const manifestFiles = analysis?.watchFiles ?? [];
     if (failed) {
       this.addRecoveryWatchFiles(watched, this.files, manifestFiles);
@@ -109,12 +118,13 @@ export class DependencyWatch {
       observed.add(key);
       const trace: PackageLookupTrace = { missing: new Map() };
       const path = findPackagePath(name, base, undefined, trace);
-      if (selected) watched.selectedPackages.set(key, { manifest: trace.manifest, path });
       if (trace.manifest && path) {
         watched.providerFiles.add(trace.manifest);
         watched.existing.add(trace.manifest);
         watched.existing.add(join(path, 'package.json'));
         const installed = dirname(trace.manifest);
+        if (selected && !watched.installedPaths.has(installed))
+          watched.installedPaths.set(installed, path);
         if (installed !== path) watched.existing.add(installed);
       }
       for (const [file, directory] of trace.missing) {
@@ -123,15 +133,15 @@ export class DependencyWatch {
         let parent = dirname(file);
         const boundary = dirname(directory);
         while (parent !== boundary && !observedLookupDirectory(parent)) parent = dirname(parent);
-        // An existing linked consumer can anchor its own missing node_modules.
-        // Avoid recursively watching the host or workspace root for this.
+        // Watch a consumer's missing node_modules directly. Watching the
+        // consumer itself also wakes the build for unrelated source files.
         const linkedConsumer =
           parent === base && directory === join(base, 'node_modules') && !hostDirectories.has(base);
         if (
           (linkedConsumer || /[/\\]node_modules(?:[/\\]|$)/.test(parent)) &&
           observedLookupDirectory(parent)
         ) {
-          watched.missingProviderParents.set(file, parent);
+          watched.missingProviderDirectories.set(file, linkedConsumer ? directory : parent);
         }
       }
     };
@@ -196,9 +206,8 @@ export class DependencyWatch {
       if (watched.existing.has(file) || watched.missing.has(file)) continue;
       (fileExists(file) ? watched.existing : watched.missing).add(file);
     }
-    for (const [file, parent] of previous?.missingProviderParents ?? []) {
-      if (watched.missing.has(file) && observedLookupDirectory(parent))
-        watched.missingProviderParents.set(file, parent);
+    for (const [file, parent] of previous?.missingProviderDirectories ?? []) {
+      if (watched.missing.has(file)) watched.missingProviderDirectories.set(file, parent);
     }
   }
 }

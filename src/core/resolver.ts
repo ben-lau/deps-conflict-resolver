@@ -52,6 +52,7 @@ import {
 import {
   DependencyWatch,
   observeProjectLockfiles,
+  type AnalyzedProject,
   type AnalysisSnapshot,
   type WatchChanges,
   type WatchedFiles,
@@ -81,6 +82,7 @@ interface PlanCapture {
 
 interface ResolutionDraft {
   analysis: AnalysisResult | null;
+  installedPaths?: ReadonlyMap<string, string>;
   matcher: AliasManager | null;
   activeMappings: AliasMapping[];
   installation: InstallReport | null;
@@ -117,11 +119,13 @@ interface ResolverBuild {
   initializeAndSavePreparedPlan(): Promise<PlanWriteResult | undefined>;
   savePreparedPlan(): Promise<PlanWriteResult | undefined>;
   assertWatchCanWait(): void;
+  trackInstalledPaths(): void;
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
   snapshot(): {
     analysis: AnalysisResult | null;
     providers: ReadonlyMap<string, string>;
+    installedPaths?: ReadonlyMap<string, string>;
     watchFiles: WatchedFiles | undefined;
   };
 }
@@ -195,6 +199,7 @@ export class DepsConflictResolver {
   private snapshotGeneration = 0;
   private initialReplanNeeded = false;
   private readonly watch = new DependencyWatch();
+  private tracksInstalledPaths = false;
   private snapshotObserver: WeakRef<PreparationObserver> | null = null;
   private readonly observer: PreparationObserver = {
     refresh: () => this.withPreparationCache(() => this.refreshSnapshot()),
@@ -206,11 +211,15 @@ export class DepsConflictResolver {
     initializeAndSavePreparedPlan: () => this.initializeAndSavePreparedPlan(),
     savePreparedPlan: () => this.savePreparedPlan(),
     assertWatchCanWait: () => this.assertWatchCanWait(),
+    trackInstalledPaths: () => {
+      this.tracksInstalledPaths = true;
+    },
     refreshForWatch: (changes) => this.refreshForWatch(changes),
     closeWatch: () => this.watch.close(),
     snapshot: () => ({
       analysis: this.visibleRules().analysis,
       providers: this.published?.providers ?? new Map(),
+      installedPaths: this.watch.files?.installedPaths ?? this.visibleRules().installedPaths,
       watchFiles: this.watch.files,
     }),
   };
@@ -532,15 +541,16 @@ export class DepsConflictResolver {
       preparation,
       async () => {
         const key = inputKey(this.options);
-        if (key === undefined) return { result: await this.analyzeCurrent() };
+        if (key === undefined) return { result: (await this.analyzeCurrent()).result };
         const inputs = new DependencyInputs();
         const analysis = await inputs.record(() => this.analyzeCurrent());
+        const { result: analysisResult } = analysis;
         const reusable =
-          inputs.reusable && analysis.aliasMappings.every(({ installSpec }) => !installSpec);
+          inputs.reusable && analysisResult.aliasMappings.every(({ installSpec }) => !installSpec);
         return {
-          result: analysis,
+          result: analysisResult,
           candidate: reusable
-            ? { result: analysis, inputs, key, revision: preparation.revision }
+            ? { ...analysis, inputs, key, revision: preparation.revision }
             : undefined,
         };
       },
@@ -566,14 +576,15 @@ export class DepsConflictResolver {
       const planFile = plan && (await this.beginPreparedPlan(plan));
       const registryClient = new NpmRegistryClient(this.metrics, this.options);
       const cached = this.hooks.onAnalysisComplete ? undefined : this.loadPreparedPlan();
-      this.draft.analysis =
+      this.setAnalysis(
         cached ??
-        (candidate &&
-        candidate.revision === this.preparation?.revision &&
-        candidate.key === inputKey(this.options) &&
-        candidate.inputs.matches()
-          ? candidate.result
-          : await this.analyzeCurrent({ clearCache: false, registryClient }));
+          (candidate &&
+          candidate.revision === this.preparation?.revision &&
+          candidate.key === inputKey(this.options) &&
+          candidate.inputs.matches()
+            ? candidate
+            : await this.analyzeCurrent({ clearCache: false, registryClient })),
+      );
       this.assertResolved(null);
       if (!this.options.autoInstall) {
         this.publishWithoutInstallation();
@@ -586,17 +597,18 @@ export class DepsConflictResolver {
           this.installationPromise = null;
         }
       }
-      this.logMissingFirstLevelPeers(this.draft.analysis);
+      this.logMissingFirstLevelPeers(this.draft.analysis!);
       this.observeSnapshot();
       if (watch) this.recordWatchFiles();
       if (planFile && !this.generationDiagnostics().some(({ severity }) => severity === 'error')) {
         observeProjectLockfiles(this.options.projectRoot, this.preparation!.owner);
-        plan.result = await this.persistPreparedPlan(planFile, plan.inputs, this.draft.analysis);
+        plan.result = await this.persistPreparedPlan(planFile, plan.inputs, this.draft.analysis!);
       }
       if (watch) {
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
           this.watch.snapshot = {
-            result: this.draft.analysis,
+            result: this.draft.analysis!,
+            installedPaths: this.draft.installedPaths,
             revision: this.published!.revision,
             key: watch.key,
             inputs: watch.inputs,
@@ -668,7 +680,7 @@ export class DepsConflictResolver {
     }
   }
 
-  private loadPreparedPlan(): AnalysisResult | undefined {
+  private loadPreparedPlan(): AnalyzedProject | undefined {
     if (!this.options.preparedPlan) return undefined;
     const file = preparedPlanLocation(this.options, this.preparation!.owner);
     const plan = file
@@ -684,7 +696,10 @@ export class DepsConflictResolver {
     this.metrics.counts.planHits++;
     this.metrics.counts.planObservations += plan.inputs.observationCount;
     currentDependencyInputs()?.merge(plan.inputs);
-    return plan.analysis;
+    return {
+      result: plan.analysis,
+      installedPaths: this.tracksInstalledPaths ? plan.inputs.installedPackagePaths() : undefined,
+    };
   }
 
   private async initializeAndSavePreparedPlan(): Promise<PlanWriteResult | undefined> {
@@ -721,6 +736,7 @@ export class DepsConflictResolver {
       this.options.dependencies,
       this.draft.activeMappings,
       !!this.published?.error,
+      this.draft.installedPaths,
     );
   }
 
@@ -775,7 +791,7 @@ export class DepsConflictResolver {
             const registryClient = new NpmRegistryClient(this.metrics, this.options);
             this.watch.snapshot = undefined;
             this.draft = { ...emptyDraft(), installation: this.draft.installation };
-            this.draft.analysis = await this.analyzeCurrent({ clearCache: false, registryClient });
+            this.setAnalysis(await this.analyzeCurrent({ clearCache: false, registryClient }));
             this.assertResolved(null);
             if (!this.options.offline) await this.installGeneration(markChanged, registryClient);
             else this.publishWithoutInstallation();
@@ -821,7 +837,7 @@ export class DepsConflictResolver {
     preparedAliases?: readonly AliasMapping[];
     clearCache?: boolean;
     registryClient?: RegistryClient;
-  } = {}): Promise<AnalysisResult> {
+  } = {}): Promise<AnalyzedProject> {
     this.metrics.counts.analysisPasses++;
     clearPackageJsonCache();
     const analyzer = createDependencyAnalyzer(
@@ -829,9 +845,20 @@ export class DepsConflictResolver {
       preparedAliases,
       registryClient ?? new NpmRegistryClient(this.metrics, this.options),
     );
-    return this.metrics.measureAsync('analysis', () =>
-      analyzer.analyze({ clearCache, metrics: this.metrics }),
-    );
+    const analyze = () =>
+      this.metrics.measureAsync('analysis', () =>
+        analyzer.analyze({ clearCache, metrics: this.metrics }),
+      );
+    const installedPaths = this.tracksInstalledPaths ? new Map<string, string>() : undefined;
+    const result = await (installedPaths
+      ? withFileSystemCache(this.fileSystemCache, analyze, installedPaths)
+      : analyze());
+    return { result, installedPaths };
+  }
+
+  private setAnalysis({ result, installedPaths }: AnalyzedProject): void {
+    this.draft.analysis = result;
+    this.draft.installedPaths = installedPaths;
   }
 
   private publishWithoutInstallation(): void {
@@ -906,13 +933,15 @@ export class DepsConflictResolver {
 
       // Installation can reconcile the whole tree. Reusing a planned alias
       // also changes the set of verified providers for scopes and diagnostics.
-      this.draft.analysis = await this.analyzeCurrent({
-        offline: !result.success || this.options.offline,
-        preparedAliases: verified,
-        clearCache: false,
-        registryClient,
-      });
-      const fresh = this.draft.analysis.aliasMappings;
+      this.setAnalysis(
+        await this.analyzeCurrent({
+          offline: !result.success || this.options.offline,
+          preparedAliases: verified,
+          clearCache: false,
+          registryClient,
+        }),
+      );
+      const fresh = this.draft.analysis!.aliasMappings;
       const pending = fresh.filter(
         (mapping) => mapping.installSpec && !blocked.has(mapping.aliasName),
       );
@@ -967,7 +996,7 @@ export class DepsConflictResolver {
     let invalidated = false;
     try {
       try {
-        const analysis = await this.analyzeCurrent({
+        const { result: analysis, installedPaths } = await this.analyzeCurrent({
           offline: true,
           preparedAliases: current.rules.activeMappings,
           clearCache: false,
@@ -985,7 +1014,12 @@ export class DepsConflictResolver {
               ' is installed';
           }
         }
-        this.draft = { ...emptyDraft(), analysis, installation: this.draft.installation };
+        this.draft = {
+          ...emptyDraft(),
+          analysis,
+          installedPaths,
+          installation: this.draft.installation,
+        };
         this.setActiveAliasMappings(
           analysis.aliasMappings.filter((mapping) => !mapping.installSpec),
         );

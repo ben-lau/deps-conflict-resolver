@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -17,6 +18,8 @@ import { runInNewContext } from 'node:vm';
 import { build, createBuilder, createLogger, optimizeDeps, resolveConfig, type Plugin } from 'vite';
 import plugin from '../../../src/plugins/vite';
 import * as packageManager from '../../../src/core/package-manager-adapter';
+import { DependencyAnalyzer } from '../../../src/core/dependency-analyzer';
+import { DepsConflictResolver, getResolverBuild } from '../../../src/core/resolver';
 import {
   getProjectPreparation,
   withProjectPreparation,
@@ -77,6 +80,79 @@ afterEach(() => {
 });
 
 describe('Vite final configuration', () => {
+  it.each(['strict build', 'watch', 'prepared watch', 'unchanged watch'] as const)(
+    'validates the configured entry before the first %s',
+    async (mode) => {
+      const root = fixture('2.7.16');
+      const slot = join(root, 'node_modules/legacy');
+      const original = join(root, 'original-legacy');
+      const replacement = join(root, 'new-legacy');
+      const linked = mode !== 'strict build';
+      if (linked) {
+        renameSync(slot, original);
+        symlinkSync(original, slot, 'junction');
+      }
+      mkdirSync(replacement);
+      writeFileSync(join(replacement, 'package.json'), readFileSync(join(slot, 'package.json')));
+      writeFileSync(
+        join(replacement, 'index.js'),
+        'import {version as peer} from "vue"; export const version = "new-entry:" + peer;',
+      );
+      const options = { projectRoot: root, dependencies: ['legacy'], offline: true, strict: true };
+      const preparedPlan = mode === 'prepared watch';
+      if (preparedPlan) {
+        const result = await getResolverBuild(
+          new DepsConflictResolver(options),
+        ).initializeAndSavePreparedPlan();
+        expect(result?.file).toBeDefined();
+      }
+      const analyze = vi.spyOn(DependencyAnalyzer.prototype, 'analyze');
+      const builder = await createBuilder(
+        {
+          root,
+          configFile: false,
+          logLevel: 'silent',
+          plugins: [plugin({ ...options, preparedPlan })],
+          build: {
+            lib: { entry: join(root, 'entry.js'), formats: ['cjs'], fileName: () => 'runtime.cjs' },
+            watch: mode === 'strict build' ? null : {},
+          },
+        },
+        true,
+      );
+      expect(analyze).toHaveBeenCalledTimes(preparedPlan ? 0 : 1);
+      const changed = mode !== 'unchanged watch';
+      if (changed) {
+        if (linked) rmSync(slot);
+        else renameSync(slot, original);
+        symlinkSync(replacement, slot, 'junction');
+      }
+      const output = join(root, 'dist/runtime.cjs');
+      const compile = () => builder.build(builder.environments.client!);
+      if (mode === 'strict build') {
+        await expect(compile()).rejects.toThrow(/changed paths.*Restart the Vite build/s);
+        expect(existsSync(output)).toBe(false);
+        return;
+      }
+      const watcher = await compile();
+      if (!('on' in watcher)) throw new Error('Expected a Vite watcher');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          watcher.on('event', (event) => {
+            if (event.code === 'ERROR') reject(event.error);
+            if (event.code === 'END') resolve();
+          });
+        });
+        expect(createRequire(import.meta.url)(output).version).toBe(
+          changed ? 'new-entry:2.7.16' : '2.7.16',
+        );
+        expect(analyze).toHaveBeenCalledTimes(mode === 'watch' ? 2 : 1);
+      } finally {
+        await watcher.close();
+      }
+    },
+  );
+
   it('rejects publication if preparation completed during a filtered strict build', async () => {
     const root = fixture('2.7.16');
     writeFileSync(join(root, 'entry.js'), 'export {version} from "./plain.js";');
@@ -314,7 +390,7 @@ describe('Vite final configuration', () => {
       writeFileSync(join(second, 'package.json'), readFileSync(join(first, 'package.json')));
       writeFileSync(join(second, 'index.js'), 'export const version = "new-provider";');
       symlinkSync(first, alias, 'junction');
-      const unrelated = join(app, 'unrelated.txt');
+      const unrelated = join(change === 'linked workspace peer' ? consumer : app, 'unrelated.txt');
       const changes: string[] = [];
       const watcher = await build({
         root: app,

@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, promises, readFileSync, realpathSync, statSync } from 'node:fs';
 import { directPathMatches } from './dependency-input-paths';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 
 type Value = string | boolean | undefined;
 type Probe = (path: string) => Value;
@@ -58,6 +58,22 @@ export class DependencyInputs {
     for (const [probe, values] of other.values) {
       for (const [path, value] of values) this.add(probe, path, value);
     }
+  }
+
+  installedPackagePaths(): Map<string, string> {
+    // A successful lookup already recorded the lexical manifest and the
+    // realpath of its containing package. Recover both without probing disk.
+    const paths = new Map<string, string>();
+    const realpaths = this.values.get(realPath);
+    if (realpaths) {
+      for (const [manifest, exists] of this.values.get(isLookupManifest) ?? []) {
+        if (exists !== true) continue;
+        const slot = dirname(manifest);
+        const resolved = realpaths.get(slot);
+        if (typeof resolved === 'string') paths.set(slot, resolved);
+      }
+    }
+    return paths;
   }
 
   serialize(): unknown {
