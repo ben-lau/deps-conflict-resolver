@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.4.0...v1.4.1) (2026-12-27)
+
+
+### Bug Fixes
+
+* **webpack:** invalidate affected watch modules and resolve linked aliases ([23ed4d5](https://github.com/ben-lau/deps-conflict-resolver/commit/23ed4d52cb8e96e749edcb518f2698bac9622e0f))
+
 ## [1.4.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.3.0...v1.4.0) (2026-12-26)
 
 
