@@ -25,9 +25,9 @@ describe('createPackageManagerAdapter', () => {
   });
 
   it.skipIf(process.platform === 'win32').each([
-    ['npm', 'npm', ['install', '--legacy-peer-deps']],
-    ['pnpm', 'pnpm', ['add']],
-    ['yarn', 'yarn', ['add']],
+    ['npm', 'npm', ['install', '--legacy-peer-deps', '--save-exact']],
+    ['pnpm', 'pnpm', ['add', '--save-exact']],
+    ['yarn', 'yarn', ['add', '--exact']],
   ] as const)(
     'passes %s specs as literal child-process arguments on POSIX',
     async (packageManager, command, prefix) => {
@@ -48,11 +48,12 @@ describe('createPackageManagerAdapter', () => {
       });
       expect(spawn).toHaveBeenCalledWith(command, [...prefix, spec], {
         cwd: '/test/project',
-        env: expect.objectContaining(
-          packageManager === 'yarn'
+        env: expect.objectContaining({
+          npm_config_registry: 'https://registry.example.test',
+          ...(packageManager === 'yarn'
             ? { YARN_NPM_REGISTRY_SERVER: 'https://registry.example.test' }
-            : { npm_config_registry: 'https://registry.example.test' },
-        ),
+            : {}),
+        }),
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         ...(process.platform === 'win32' ? {} : { detached: true }),

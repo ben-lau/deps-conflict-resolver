@@ -165,17 +165,17 @@ function buildCommand(
     case 'pnpm':
       return {
         command: invocation.command,
-        args: [...invocation.argsPrefix, 'add', ...specs],
+        args: [...invocation.argsPrefix, 'add', '--save-exact', ...specs],
       };
     case 'yarn':
       return {
         command: invocation.command,
-        args: [...invocation.argsPrefix, 'add', ...specs],
+        args: [...invocation.argsPrefix, 'add', '--exact', ...specs],
       };
     case 'npm':
       return {
         command: invocation.command,
-        args: [...invocation.argsPrefix, 'install', '--legacy-peer-deps', ...specs],
+        args: [...invocation.argsPrefix, 'install', '--legacy-peer-deps', '--save-exact', ...specs],
       };
   }
 
@@ -462,9 +462,9 @@ function registryEnvironment(
 ): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    ...(packageManager === 'yarn'
-      ? { YARN_NPM_REGISTRY_SERVER: registry }
-      : { npm_config_registry: registry }),
+    npm_config_registry: registry,
+    // Classic Yarn reads npm's registry setting; modern Yarn uses this key.
+    ...(packageManager === 'yarn' ? { YARN_NPM_REGISTRY_SERVER: registry } : {}),
   };
 }
 
