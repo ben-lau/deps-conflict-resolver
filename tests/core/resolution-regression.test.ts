@@ -1,24 +1,24 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  mkdtempSync,
   mkdirSync,
-  writeFileSync,
+  mkdtempSync,
   readFileSync,
-  rmSync,
   realpathSync,
   renameSync,
+  rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigEnv, UserConfig } from 'vite';
-import { createResolver } from '../../src/core/resolver';
-import { ResolutionError } from '../../src/core/resolution-error';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { npmRegistryClient } from '../../src/core/registry-client';
+import { ResolutionError } from '../../src/core/resolution-error';
+import { createResolver } from '../../src/core/resolver';
 import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
+import type { AnalysisResult, PackageJson } from '../../src/types';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
-import type { AnalysisResult, PackageJson } from '../../src/types';
 
 const roots: string[] = [];
 
@@ -112,6 +112,47 @@ describe('diagnostics and deterministic offline operation', () => {
     ).rejects.toBeInstanceOf(ResolutionError);
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { workspace: false, sameResolver: true },
+    { workspace: false, sameResolver: false },
+    { workspace: true, sameResolver: true },
+    { workspace: true, sameResolver: false },
+  ])(
+    'reads current declarations before a new generation: workspace=$workspace, sameResolver=$sameResolver',
+    async ({ workspace, sameResolver }) => {
+      const { root } = vueProject();
+      const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+      let projectRoot = root;
+      if (workspace) {
+        manifest.workspaces = ['packages/*'];
+        writeFileSync(join(root, 'package.json'), JSON.stringify(manifest));
+        projectRoot = join(root, 'packages/app');
+        mkdirSync(projectRoot, { recursive: true });
+        writeFileSync(
+          join(projectRoot, 'package.json'),
+          JSON.stringify({ name: 'app', dependencies: { legacy: '1.0.0' } }),
+        );
+      }
+      const options = { ...baseOptions(projectRoot), autoInstall: true, strict: true };
+      const resolver = await createResolver(options);
+      delete manifest.dependencies.vue;
+      writeFileSync(join(root, 'package.json'), JSON.stringify(manifest));
+      if (sameResolver) resolver.invalidate();
+      await expect(
+        sameResolver ? resolver.initialize() : createResolver(options),
+      ).rejects.toMatchObject({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'PEER_NOT_DECLARED', packageName: 'vue' }),
+        ]),
+      });
+      manifest.dependencies.vue = '3.5.0';
+      writeFileSync(join(root, 'package.json'), JSON.stringify(manifest));
+      if (sameResolver) await resolver.initialize();
+      const recovered = sameResolver ? resolver : await createResolver(options);
+      expect(recovered.getDiagnostics()).toEqual([]);
+    },
+  );
 
   it.each([false, true])(
     'rejects the wrong installed package regardless of graph traversal: visited=%s',
