@@ -167,6 +167,19 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 Diagnostics expose stable codes. A failed strict initialization throws the exported `ResolutionError`, which includes `diagnostics`.
 
+## Vite Server-Side Rendering
+
+The Vite plugin supports esbuild pre-bundling in Vite 4–7 and native Rolldown in Vite 8. Set `ssr: 'auto'` to include affected packages and active aliases in SSR builds and development pre-bundling:
+
+```typescript
+depsConflictResolverVitePlugin({
+  dependencies: ['legacy-lib'],
+  ssr: 'auto',
+});
+```
+
+The default is `ssr: 'manual'`. Explicit `ssr.external` entries and SSR optimization exclusions retain Vite's precedence; avoid excluding packages that require redirection. When `projectRoot` is omitted, the plugin uses the final configured Vite `root`.
+
 ## How It Works
 
 ### 1. Dependency Analysis

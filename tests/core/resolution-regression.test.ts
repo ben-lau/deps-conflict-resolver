@@ -10,11 +10,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { ConfigEnv, UserConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { npmRegistryClient } from '../../src/core/registry-client';
 import { ResolutionError } from '../../src/core/resolution-error';
 import { createResolver } from '../../src/core/resolver';
-import type { PackageJson } from '../../src/types';
-import { npmRegistryClient } from '../../src/core/registry-client';
+import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
+import type { AnalysisResult, PackageJson } from '../../src/types';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
 
@@ -751,5 +753,28 @@ describe('resolution correctness with installed packages', () => {
     );
     expect(resolver.resolveModule('vue', join(renderer, 'index.js'))).toBe('vue3');
     expect(resolver.getDiagnostics()).toEqual([]);
+  });
+
+  it('inherits the Vite root when no plugin projectRoot is supplied', async () => {
+    const root = project({
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+    });
+    pkg(root, 'legacy', { peerDependencies: { vue: '^2.0.0' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    let analysis: AnalysisResult | undefined;
+    const plugin = depsConflictResolverVitePlugin({
+      dependencies: ['legacy'],
+      autoInstall: false,
+      hooks: {
+        onAnalysisComplete: (result) => {
+          analysis = result;
+        },
+      },
+    });
+    const hook = plugin.config as (config: UserConfig, env: ConfigEnv) => Promise<unknown>;
+    await hook({ root }, { command: 'build', mode: 'test' });
+
+    expect(analysis?.aliasMappings.map((mapping) => mapping.aliasName)).toEqual(['vue2']);
   });
 });
