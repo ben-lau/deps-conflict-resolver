@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.4.1...v1.4.2) (2026-12-31)
+
+
+### Performance
+
+* **core:** reuse version candidates for repeated ranges ([b658955](https://github.com/ben-lau/deps-conflict-resolver/commit/b658955e40bc1794bd9b4b94b070166d870b2c30))
+
 ## [1.4.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.4.0...v1.4.1) (2026-12-27)
 
 
