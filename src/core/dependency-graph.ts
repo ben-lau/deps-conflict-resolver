@@ -187,8 +187,8 @@ export function buildInstalledDependencyGraph(
     if (!packagePath) continue;
 
     const normalizedPath = canonicalPath(packagePath);
-    watchFiles?.add(join(normalizedPath, 'package.json'));
     const existingNode = nodes.get(normalizedPath);
+    if (!existingNode) watchFiles?.add(join(normalizedPath, 'package.json'));
     const manifest = existingNode?.manifest ?? readPackageJsonCached(normalizedPath);
     if (!manifest) continue;
     if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);

@@ -350,7 +350,8 @@ export class DepsConflictResolver {
     const reused = await withProjectPreparation(
       preparation,
       async () => {
-        if (!isCurrent() || !snapshot.inputs.matches()) return false;
+        if (!isCurrent() || !this.metrics.measure('verify', () => snapshot.inputs.matches()))
+          return false;
         // Build inputs can change an importer's path or owning manifest even
         // when the dependency analysis and its rules are still current.
         clearPackageJsonCache(this.fileSystemCache);
@@ -448,7 +449,9 @@ export class DepsConflictResolver {
 
     // 初始化子模块
     this.aliasManager = createAliasManager(this.options, this.fileSystemCache);
-    this.installer = createPackageInstaller(this.options);
+    this.installer = createPackageInstaller(this.options, () => {
+      this.metrics.counts.packageManagerRuns++;
+    });
 
     this.preparation = getProjectPreparation(this.options.projectRoot);
 

@@ -48,6 +48,7 @@ export class PackageInstaller {
       ...options,
       registry: options.registryOverride,
     }),
+    private readonly onInstall?: () => void,
   ) {
     this.options = options;
     this.packageManager = packageManager;
@@ -308,6 +309,7 @@ export class PackageInstaller {
       return { success: true, errors: [] };
     }
 
+    this.onInstall?.();
     const runResult = await this.packageManager.install(packages);
 
     if (runResult.stdout) {
@@ -334,6 +336,9 @@ export class PackageInstaller {
 /**
  * 创建包安装器实例
  */
-export function createPackageInstaller(options: ResolvedOptions): PackageInstaller {
-  return new PackageInstaller(options);
+export function createPackageInstaller(
+  options: ResolvedOptions,
+  onInstall?: () => void,
+): PackageInstaller {
+  return new PackageInstaller(options, undefined, onInstall);
 }

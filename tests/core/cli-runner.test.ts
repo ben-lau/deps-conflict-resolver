@@ -166,6 +166,7 @@ describe('doctor and prepare commands', () => {
       counts: {
         analysisPasses: 1,
         registryRequests: 0,
+        packageManagerRuns: 0,
         lookupProbes: expect.any(Number),
         realpaths: expect.any(Number),
         manifestReads: expect.any(Number),
@@ -218,6 +219,7 @@ describe('doctor and prepare commands', () => {
       analysisPasses: 0,
       planHits: 1,
       registryRequests: 0,
+      packageManagerRuns: 0,
     });
     expect(hit.getInstallResult()).toBeNull();
 

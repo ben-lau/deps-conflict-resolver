@@ -441,13 +441,22 @@ export class DependencyAnalyzer {
   }
 
   private populateAnalyzedDependenciesFromGraph(): void {
-    if (!this.dependencyGraph) return;
+    const graph = this.dependencyGraph!;
+    const projectRoot = this.options.projectRoot;
+    const hostName = readPackageJsonCached(projectRoot)?.name;
 
     const rootVisibleNodeIds = new Map<string, string | undefined>();
-    for (const { name } of this.dependencyGraph.nodes.values()) {
+    for (const { name } of graph.nodes.values()) {
       if (rootVisibleNodeIds.has(name)) continue;
-      const path = findPackagePath(name, this.options.projectRoot);
-      const node = path ? this.dependencyGraph.nodes.get(canonicalPath(path)) : undefined;
+      const direct = join(projectRoot, 'node_modules', name);
+      // The graph already proved directly installed physical paths. Self
+      // references and alternative layouts still use Node's lookup order.
+      if (!process.versions.pnp && name !== hostName && graph.nodes.has(direct)) {
+        rootVisibleNodeIds.set(name, direct);
+        continue;
+      }
+      const path = findPackagePath(name, projectRoot);
+      const node = path ? graph.nodes.get(canonicalPath(path)) : undefined;
       rootVisibleNodeIds.set(name, node?.id);
     }
 
@@ -455,13 +464,13 @@ export class DependencyAnalyzer {
     const selectedNodeIds = new Set<string>();
     for (const nodeId of rootVisibleNodeIds.values()) {
       if (!nodeId) continue;
-      const node = this.dependencyGraph.nodes.get(nodeId);
+      const node = graph.nodes.get(nodeId);
       if (node && !selectedNodeIds.has(node.id)) {
         selectedNodeIds.add(node.id);
         orderedNodes.push(node);
       }
     }
-    for (const node of this.dependencyGraph.nodes.values()) {
+    for (const node of graph.nodes.values()) {
       if (!selectedNodeIds.has(node.id)) {
         orderedNodes.push(node);
       }
@@ -482,7 +491,7 @@ export class DependencyAnalyzer {
       });
     }
 
-    for (const name of this.dependencyGraph.rootRequests.keys()) {
+    for (const name of graph.rootRequests.keys()) {
       const node = this.findGraphRoot(name);
       if (!node || node.name === name) continue;
       const packageJson = node.manifest;

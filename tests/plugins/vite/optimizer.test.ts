@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OnResolveArgs, OnResolveOptions, OnResolveResult, PluginBuild } from 'esbuild';
+import { build } from 'esbuild';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createResolver } from '../../../src/core/resolver';
+import {
+  getProjectPreparation,
+  withProjectPreparation,
+} from '../../../src/core/project-preparation';
 import { createOptimizerOptions } from '../../../src/plugins/vite/optimizer';
 
 const roots: string[] = [];
@@ -39,6 +44,38 @@ afterEach(() => {
 });
 
 describe('optimizer adapters', () => {
+  it('guards an esbuild pre-bundle even when no imports need resolving by the plugin', async () => {
+    const { root, resolver } = await fixture();
+    const entry = join(root, 'entry.js');
+    writeFileSync(entry, 'export default true');
+    const optimized = createOptimizerOptions(resolver, root, '7.3.5', {
+      filterRequests: true,
+      guardChanges: true,
+    });
+    await expect(
+      build({
+        entryPoints: [entry],
+        bundle: true,
+        write: false,
+        logLevel: 'silent',
+        plugins: [
+          ...optimized.esbuildOptions!.plugins,
+          {
+            name: 'change-preparation',
+            setup(builder) {
+              builder.onLoad({ filter: /entry\.js$/ }, async () => {
+                await withProjectPreparation(getProjectPreparation(root), async (changed) =>
+                  changed(),
+                );
+                return { contents: 'export default true' };
+              });
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow('Dependencies changed during compilation');
+  });
+
   it('keeps SSR external resolution when no Rolldown redirections are active', async () => {
     const { root, resolver } = await fixture();
     vi.spyOn(resolver, 'getAliasPathMappings').mockReturnValue([]);

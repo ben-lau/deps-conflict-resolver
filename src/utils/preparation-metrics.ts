@@ -13,6 +13,7 @@ export interface PreparationTimings {
   counts: {
     analysisPasses: number;
     registryRequests: number;
+    packageManagerRuns: number;
     manifestReads: number;
     lookupProbes: number;
     realpaths: number;
@@ -37,6 +38,7 @@ export class PreparationMetrics {
   readonly counts: PreparationTimings['counts'] = {
     analysisPasses: 0,
     registryRequests: 0,
+    packageManagerRuns: 0,
     manifestReads: 0,
     lookupProbes: 0,
     realpaths: 0,
