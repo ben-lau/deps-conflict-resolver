@@ -8,15 +8,32 @@ import { DependencyInputs } from '../utils/dependency-inputs';
 import { packageLookupPaths } from '../utils/fs';
 
 // Bump this when the on-disk representation or compatible input probes change.
-const FORMAT = 1;
+const FORMAT = 2;
 const MAX_PLAN_BYTES = 32 * 1024 * 1024;
+const CHECKSUM_LENGTH = 64;
 
 export interface PreparedPlan {
   analysis: AnalysisResult;
   inputs: DependencyInputs;
 }
 
-function hash(text: string): string {
+export interface PlanWriteFailure {
+  code:
+    | 'PLAN_UNSUPPORTED'
+    | 'PLAN_INPUT_LIMIT'
+    | 'PLAN_INPUT_CHANGED'
+    | 'PLAN_WRITE_FAILED'
+    | 'PLAN_VERIFICATION_FAILED';
+  message: string;
+  observations?: number;
+  observationLimit?: number;
+}
+
+export type PlanWriteResult =
+  | { file: string; failure?: never }
+  | { file?: never; failure: PlanWriteFailure };
+
+function hash(text: string | Uint8Array): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
@@ -52,7 +69,7 @@ export function preparedPlanLocation(options: ResolvedOptions, owner: string): s
       peerOverrides,
     ]),
   );
-  return join(projectRoot, 'node_modules', '.cache', 'deps-conflict-resolver', key + '.json');
+  return join(projectRoot, 'node_modules', '.cache', 'deps-conflict-resolver', key + '.plan');
 }
 
 export async function preparePlanDirectory(file: string): Promise<void> {
@@ -66,18 +83,18 @@ type StoredAnalysis = Omit<AnalysisResult, 'analyzedDependencies'> & {
 export function readPreparedPlan(file: string): PreparedPlan | undefined {
   try {
     const descriptor = openSync(file, 'r');
-    let text: string;
+    let contents: Buffer;
     try {
       const stat = fstatSync(descriptor);
       if (!stat.isFile() || stat.size > MAX_PLAN_BYTES) return undefined;
-      text = readFileSync(descriptor, 'utf8');
+      contents = readFileSync(descriptor);
     } finally {
       closeSync(descriptor);
     }
-    const envelope = JSON.parse(text) as { payload?: string; checksum?: string };
-    if (typeof envelope?.payload !== 'string' || envelope.checksum !== hash(envelope.payload))
-      return undefined;
-    const stored = JSON.parse(envelope.payload) as {
+    if (contents.length > MAX_PLAN_BYTES || contents[CHECKSUM_LENGTH] !== 0x0a) return undefined;
+    const payload = contents.subarray(CHECKSUM_LENGTH + 1);
+    if (hash(payload) !== contents.toString('ascii', 0, CHECKSUM_LENGTH)) return undefined;
+    const stored = JSON.parse(payload.toString('utf8')) as {
       format: number;
       file: string;
       inputs: unknown;
@@ -115,7 +132,7 @@ export async function writePreparedPlan(
     analysis: { ...analysis, analyzedDependencies: [...analysis.analyzedDependencies] },
     inputs: inputs.serialize(),
   });
-  const contents = JSON.stringify({ payload, checksum: hash(payload) });
+  const contents = hash(payload) + '\n' + payload;
   if (Buffer.byteLength(contents) > MAX_PLAN_BYTES)
     throw new Error('The dependency plan exceeds the cache size limit');
 

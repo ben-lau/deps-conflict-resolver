@@ -47,6 +47,7 @@ import {
   preparedPlanLocation,
   readPreparedPlan,
   writePreparedPlan,
+  type PlanWriteResult,
 } from './prepared-plan';
 import {
   DependencyWatch,
@@ -70,8 +71,11 @@ interface WatchCapture {
   key?: string;
   inputs?: DependencyInputs;
   recoveryFiles?: readonly string[];
-  savePlan?: boolean;
-  planFile?: string;
+}
+
+interface PlanCapture {
+  inputs: DependencyInputs;
+  result?: PlanWriteResult;
 }
 
 export interface ModuleRedirect {
@@ -82,7 +86,8 @@ export interface ModuleRedirect {
 interface ResolverBuild {
   redirect(request: string, importer?: string): ModuleRedirect | null;
   guardGeneration(): () => void;
-  savePreparedPlan(): Promise<string>;
+  initializeAndSavePreparedPlan(): Promise<PlanWriteResult | undefined>;
+  savePreparedPlan(): Promise<PlanWriteResult | undefined>;
   assertWatchCanWait(): void;
   refreshForWatch(changes: WatchChanges): Promise<boolean>;
   closeWatch(): void;
@@ -178,6 +183,7 @@ export class DepsConflictResolver {
   readonly [buildAccess]: ResolverBuild = {
     redirect: (request, importer) => this.redirect(request, importer),
     guardGeneration: () => this.guardGeneration(),
+    initializeAndSavePreparedPlan: () => this.initializeAndSavePreparedPlan(),
     savePreparedPlan: () => this.savePreparedPlan(),
     assertWatchCanWait: () => this.assertWatchCanWait(),
     refreshForWatch: (changes) => this.refreshForWatch(changes),
@@ -263,17 +269,17 @@ export class DepsConflictResolver {
     return this.initializePreparation();
   }
 
-  private async initializePreparation(watch?: WatchCapture): Promise<void> {
+  private async initializePreparation(watch?: WatchCapture, plan?: PlanCapture): Promise<void> {
     if (this.initialized) {
       if (this.preparation) await waitForProjectPreparation(this.preparation);
       this.snapshotCurrent();
       return;
     }
 
+    const inputs = plan?.inputs ?? watch?.inputs;
+    const initialize = () => this.initializeGeneration(watch, plan);
     const initialization = (this.initializationPromise ??= this.withPreparationCache(() =>
-      watch?.inputs
-        ? watch.inputs.record(() => this.initializeGeneration(watch))
-        : this.initializeGeneration(watch),
+      inputs ? inputs.record(initialize) : initialize(),
     ));
     try {
       await initialization;
@@ -419,7 +425,7 @@ export class DepsConflictResolver {
     return withoutDependencyInputs(() => withFileSystemCache(this.fileSystemCache, task));
   }
 
-  private async initializeGeneration(watch?: WatchCapture): Promise<void> {
+  private async initializeGeneration(watch?: WatchCapture, plan?: PlanCapture): Promise<void> {
     // A previous generation may repopulate IO caches during peer linkage or
     // adapter setup. Refresh before environment detection and the first read.
     clearPackageJsonCache();
@@ -470,7 +476,7 @@ export class DepsConflictResolver {
       // Keep the lock through installation and publication.
       await withProjectPreparation(
         preparation,
-        (markChanged) => this.prepareInitialSnapshot(markChanged, watch, analysis),
+        (markChanged) => this.prepareInitialSnapshot(markChanged, analysis, watch, plan),
         this.observer,
         this.options.autoInstall ? 'write' : 'read',
         this.trackLockWait,
@@ -539,16 +545,12 @@ export class DepsConflictResolver {
 
   private async prepareInitialSnapshot(
     markChanged: () => void,
-    watch?: WatchCapture,
     candidate?: AnalysisSnapshot,
+    watch?: WatchCapture,
+    plan?: PlanCapture,
   ): Promise<void> {
     try {
-      const planFile = watch?.savePlan
-        ? preparedPlanLocation(this.options, this.preparation!.owner)
-        : undefined;
-      if (watch?.savePlan && !planFile)
-        throw new Error('Dependency plans require standard node_modules package lookup');
-      if (planFile) await preparePlanDirectory(planFile);
+      const planFile = plan && (await this.beginPreparedPlan(plan));
       const registryClient = new NpmRegistryClient(this.metrics, this.options);
       const cached = this.hooks.onAnalysisComplete ? undefined : this.loadPreparedPlan();
       this.analysisResult =
@@ -573,18 +575,11 @@ export class DepsConflictResolver {
       }
       this.logMissingFirstLevelPeers(this.analysisResult);
       this.observeSnapshot();
+      if (watch || planFile) this.recordWatchFiles();
+      if (planFile && !this.generationDiagnostics().some(({ severity }) => severity === 'error')) {
+        plan.result = await this.persistPreparedPlan(planFile, plan.inputs, this.analysisResult);
+      }
       if (watch) {
-        this.recordWatchFiles();
-        if (planFile) {
-          this.assertResolved();
-          if (!watch.inputs?.matches())
-            throw new Error('Could not record a stable dependency plan for the installed project');
-          await writePreparedPlan(planFile, {
-            analysis: this.analysisResult,
-            inputs: watch.inputs,
-          });
-          watch.planFile = planFile;
-        }
         if (watch.inputs?.reusable && watch.key !== undefined && watch.key === this.watchKey()) {
           this.watch.snapshot = {
             result: this.analysisResult,
@@ -596,6 +591,66 @@ export class DepsConflictResolver {
       }
     } finally {
       clearPackageJsonCache();
+    }
+  }
+
+  private async beginPreparedPlan(plan: PlanCapture): Promise<string | undefined> {
+    // Creating node_modules for a hoisted project changes Node's lookup
+    // observations. Make the output directory before capturing the graph.
+    const file = preparedPlanLocation(this.options, this.preparation!.owner);
+    if (!file) {
+      plan.result = {
+        failure: {
+          code: 'PLAN_UNSUPPORTED',
+          message: 'Dependency plans require standard node_modules package lookup',
+        },
+      };
+      return undefined;
+    }
+    try {
+      await preparePlanDirectory(file);
+      return file;
+    } catch (error) {
+      plan.result = { failure: { code: 'PLAN_WRITE_FAILED', message: String(error) } };
+      return undefined;
+    }
+  }
+
+  private async persistPreparedPlan(
+    file: string,
+    inputs: DependencyInputs,
+    analysis: AnalysisResult,
+  ): Promise<PlanWriteResult> {
+    const observations = inputs.observationCount;
+    this.metrics.counts.planObservations += observations;
+    if (inputs.atCapacity) {
+      return {
+        failure: {
+          code: 'PLAN_INPUT_LIMIT',
+          observations,
+          observationLimit: inputs.limit,
+          message:
+            'Dependency plan exceeded its input limit. This project can use ordinary offline analysis.',
+        },
+      };
+    }
+    if (!this.metrics.measure('planValidation', () => inputs.matches())) {
+      return {
+        failure: {
+          code: 'PLAN_INPUT_CHANGED',
+          observations,
+          message:
+            'Could not verify a stable installed dependency tree. Retry after dependency changes finish.',
+        },
+      };
+    }
+    try {
+      await this.metrics.measureAsync('planWrite', () =>
+        writePreparedPlan(file, { analysis, inputs }),
+      );
+      return { file };
+    } catch (error) {
+      return { failure: { code: 'PLAN_WRITE_FAILED', observations, message: String(error) } };
     }
   }
 
@@ -613,11 +668,20 @@ export class DepsConflictResolver {
       return undefined;
     }
     this.metrics.counts.planHits++;
+    this.metrics.counts.planObservations += plan.inputs.observationCount;
     currentDependencyInputs()?.merge(plan.inputs);
     return plan.analysis;
   }
 
-  private async savePreparedPlan(): Promise<string> {
+  private async initializeAndSavePreparedPlan(): Promise<PlanWriteResult | undefined> {
+    if (!this.userOptions.offline || this.initializationPromise)
+      throw new Error('Write a plan during fresh offline preparation');
+    const plan: PlanCapture = { inputs: new DependencyInputs('plan') };
+    await this.initializePreparation(undefined, plan);
+    return plan.result;
+  }
+
+  private async savePreparedPlan(): Promise<PlanWriteResult | undefined> {
     if (!this.initialized)
       throw new Error('Initialize the resolver before saving a dependency plan');
     const verifier = new DepsConflictResolver({
@@ -628,10 +692,8 @@ export class DepsConflictResolver {
       strict: true,
       preparedPlan: false,
     });
-    const watch: WatchCapture = { inputs: new DependencyInputs(), savePlan: true };
     try {
-      await verifier.initializePreparation(watch);
-      return watch.planFile!;
+      return await verifier.initializeAndSavePreparedPlan();
     } finally {
       this.metrics.add(verifier.metrics);
     }

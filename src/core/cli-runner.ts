@@ -135,26 +135,33 @@ export async function runCli(
       ),
     ];
 
+    const offline = command === 'init' || options.offline === true || options.preparedPlan === true;
     const resolver = new DepsConflictResolver({
       ...options,
       projectRoot,
       dependencies,
       debug: false,
-      offline: command === 'init' || options.offline === true || options.preparedPlan === true,
+      offline,
       strict: command === 'prepare' && strictMode,
       autoInstall: command === 'prepare',
       preparedPlan: false,
     });
+    const build = getResolverBuild(resolver);
+    let plan: Awaited<ReturnType<typeof build.savePreparedPlan>>;
     let failure: ResolutionError['preparation'];
     try {
       // Keep CLI output machine-readable without silencing other resolvers.
-      await withLogLevel(LogLevel.SILENT, () => resolver.initialize());
+      if (offline && writePlan) {
+        plan = await withLogLevel(LogLevel.SILENT, () => build.initializeAndSavePreparedPlan());
+      } else {
+        await withLogLevel(LogLevel.SILENT, () => resolver.initialize());
+      }
     } catch (error) {
       if (!(error instanceof ResolutionError) || !error.preparation) throw error;
       failure = error.preparation;
     }
     const diagnostics = failure?.diagnostics ?? resolver.getDiagnostics();
-    const analysis = getResolverBuild(resolver).snapshot().analysis;
+    const analysis = build.snapshot().analysis;
     const suggestedConfig =
       command === 'init'
         ? {
@@ -173,16 +180,12 @@ export async function runCli(
       });
     }
     const hints = sourceHints ? await findSourceHints(projectRoot, dependencies) : [];
-    let preparedPlan: string | undefined;
-    if (writePlan && !diagnostics.some(({ severity }) => severity === 'error')) {
+    if (!offline && writePlan && !diagnostics.some(({ severity }) => severity === 'error')) {
       try {
-        preparedPlan = await withLogLevel(LogLevel.SILENT, () =>
-          getResolverBuild(resolver).savePreparedPlan(),
-        );
+        plan = await withLogLevel(LogLevel.SILENT, () => build.savePreparedPlan());
       } catch (error) {
-        throw new Error('Cannot save an offline dependency plan: ' + String(error), {
-          cause: error,
-        });
+        if (!(error instanceof ResolutionError)) throw error;
+        plan = { failure: { code: 'PLAN_VERIFICATION_FAILED', message: error.message } };
       }
     }
     const report = {
@@ -197,7 +200,8 @@ export async function runCli(
       actions: diagnoseNextSteps(diagnostics),
       installation: failure ? failure.installation : resolver.getInstallResult(),
       ...(timings && { timings: resolver.getTimings() }),
-      ...(preparedPlan && { preparedPlan }),
+      ...(plan?.file && { preparedPlan: plan.file }),
+      ...(plan?.failure && { planFailure: plan.failure }),
       ...(sourceHints && { sourceHints: hints }),
       ...(suggestedConfig && { suggestedConfig }),
       ...(outputConfig && { configFile: outputConfig }),
@@ -251,10 +255,13 @@ export async function runCli(
           );
       }
       if (report.timings) output.stdout(JSON.stringify(report.timings, null, 2) + '\n');
-      if (preparedPlan) output.stdout('Saved dependency plan to ' + preparedPlan + '\n');
+      if (plan?.file) output.stdout('Saved dependency plan to ' + plan.file + '\n');
+      if (plan?.failure)
+        output.stderr('[' + plan.failure.code + '] ' + plan.failure.message + '\n');
     }
-    return diagnostics.some((diagnostic) => diagnostic.severity === 'error') &&
-      (strictMode || command === 'prepare')
+    return plan?.failure ||
+      (diagnostics.some((diagnostic) => diagnostic.severity === 'error') &&
+        (strictMode || command === 'prepare'))
       ? 1
       : 0;
   } catch (error) {

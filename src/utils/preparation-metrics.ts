@@ -9,6 +9,7 @@ export interface PreparationTimings {
     install: number;
     verify: number;
     planValidation: number;
+    planWrite: number;
   };
   counts: {
     analysisPasses: number;
@@ -19,6 +20,7 @@ export interface PreparationTimings {
     realpaths: number;
     planHits: number;
     planMisses: number;
+    planObservations: number;
   };
 }
 
@@ -34,6 +36,7 @@ export class PreparationMetrics {
     install: 0,
     verify: 0,
     planValidation: 0,
+    planWrite: 0,
   };
   readonly counts: PreparationTimings['counts'] = {
     analysisPasses: 0,
@@ -44,6 +47,7 @@ export class PreparationMetrics {
     realpaths: 0,
     planHits: 0,
     planMisses: 0,
+    planObservations: 0,
   };
 
   measure<T>(phase: Phase, task: () => T): T {

@@ -8,36 +8,50 @@ type Value = string | boolean | undefined;
 type Probe = (path: string) => Value;
 
 const recording = new AsyncLocalStorage<DependencyInputs>();
-const MAX_INPUTS = 65_536;
+const WATCH_INPUT_LIMIT = 65_536;
+const PLAN_INPUT_LIMIT = 196_608;
 
 export class DependencyInputs {
   private values = new Map<Probe, Map<string, Value>>();
   private size = 0;
-  private stable = true;
+  private invalidatedBy?: 'limit' | 'changed' | 'external';
+  readonly limit: number;
+
+  constructor(use: 'watch' | 'plan' = 'watch') {
+    this.limit = use === 'plan' ? PLAN_INPUT_LIMIT : WATCH_INPUT_LIMIT;
+  }
 
   record<T>(task: () => T): T {
     return recording.run(this, task);
   }
 
   add(probe: Probe, path: string, value: Value): void {
-    if (!this.stable) return;
+    if (!this.reusable) return;
     let values = this.values.get(probe);
     if (!values) this.values.set(probe, (values = new Map()));
     if (values.has(path)) {
-      if (values.get(path) !== value) this.invalidate();
+      if (values.get(path) !== value) this.invalidate('changed');
       return;
     }
-    if (++this.size > MAX_INPUTS) this.invalidate();
+    if (++this.size > this.limit) this.invalidate('limit');
     else values.set(path, value);
   }
 
-  invalidate(): void {
-    this.stable = false;
+  invalidate(reason: NonNullable<DependencyInputs['invalidatedBy']> = 'external'): void {
+    this.invalidatedBy ??= reason;
     this.values.clear();
   }
 
   get reusable(): boolean {
-    return this.stable;
+    return this.invalidatedBy === undefined;
+  }
+
+  get observationCount(): number {
+    return this.size;
+  }
+
+  get atCapacity(): boolean {
+    return this.invalidatedBy === 'limit';
   }
 
   merge(other: DependencyInputs): void {
@@ -47,7 +61,7 @@ export class DependencyInputs {
   }
 
   serialize(): unknown {
-    if (!this.stable) return undefined;
+    if (!this.reusable) return undefined;
     return Object.entries(probes).flatMap(([name, probe]) => {
       const values = this.values.get(probe);
       return values ? [[name, [...values].map(([path, value]) => [path, value ?? null])]] : [];
@@ -56,7 +70,7 @@ export class DependencyInputs {
 
   static deserialize(data: unknown): DependencyInputs | undefined {
     if (!Array.isArray(data) || data.length === 0) return undefined;
-    const inputs = new DependencyInputs();
+    const inputs = new DependencyInputs('plan');
     const seen = new Set<string>();
     let count = 0;
     for (const group of data) {
@@ -68,7 +82,7 @@ export class DependencyInputs {
       seen.add(name);
       const probe = probes[name as keyof typeof probes];
       for (const entry of values) {
-        if (!Array.isArray(entry) || entry.length !== 2 || ++count > MAX_INPUTS) return undefined;
+        if (!Array.isArray(entry) || entry.length !== 2 || ++count > inputs.limit) return undefined;
         const [path, value] = entry;
         if (
           typeof path !== 'string' ||
@@ -90,7 +104,7 @@ export class DependencyInputs {
   }
 
   matches(): boolean {
-    if (!this.stable) return false;
+    if (!this.reusable) return false;
     for (const [probe, values] of this.values) {
       const directories = new Map<string, boolean>();
       for (const [path, expected] of values) {

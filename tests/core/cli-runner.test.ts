@@ -194,6 +194,64 @@ describe('doctor and prepare commands', () => {
     return (JSON.parse(stdout) as { preparedPlan: string }).preparedPlan;
   }
 
+  it('records and writes an offline plan during the sole analysis pass', async () => {
+    writeAlias();
+    expect(
+      await runCli(
+        [
+          'prepare',
+          'legacy',
+          '--root',
+          root,
+          '--offline',
+          '--strict',
+          '--write-plan',
+          '--json',
+          '--timings',
+        ],
+        output,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      preparedPlan: expect.any(String),
+      activeAliases: [expect.objectContaining({ aliasName: 'vue2' })],
+      timings: {
+        counts: { analysisPasses: 1, registryRequests: 0, packageManagerRuns: 0 },
+        milliseconds: { planValidation: expect.any(Number), planWrite: expect.any(Number) },
+      },
+    });
+    expect(JSON.parse(stdout).timings.counts.planObservations).toBeGreaterThan(0);
+  });
+
+  it('reports a plan write error without discarding valid offline analysis', async () => {
+    writeAlias();
+    writeFileSync(join(root, 'node_modules/.cache'), 'occupied');
+    expect(
+      await runCli(
+        [
+          'prepare',
+          'legacy',
+          '--root',
+          root,
+          '--offline',
+          '--strict',
+          '--write-plan',
+          '--json',
+          '--timings',
+        ],
+        output,
+      ),
+    ).toBe(1);
+    const report = JSON.parse(stdout);
+    expect(report).toMatchObject({
+      activeAliases: [expect.objectContaining({ aliasName: 'vue2' })],
+      diagnostics: [],
+      planFailure: { code: 'PLAN_WRITE_FAILED', message: expect.any(String) },
+      timings: { counts: { analysisPasses: 1 } },
+    });
+    expect(report).not.toHaveProperty('preparedPlan');
+  });
+
   it.each(['doctor', 'prepare'] as const)(
     'honors the offline contract of a shared prepared-plan config in %s',
     async (command) => {
