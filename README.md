@@ -207,6 +207,22 @@ module.exports = {
 
 offline=true 禁止 registry 查询及包管理器安装，即使同时设置 autoInstall=true 也不会安装。缺少已验证 alias 时会产生 OFFLINE_ALIAS_MISSING；strict=true 会使未解决的必要依赖、安装失败或实际请求中的上下文歧义报错。默认仍保留自动安装和宽松处理方式。autoInstall=false 只关闭安装，本身不会禁止版本查询。
 
+### 生成与复用离线计划
+
+`init` 根据已安装的入口 peer 冲突生成精简配置。默认输出预览，`--write-config` 可以写入一个新 JSON 文件。确认建议的入口后，使用同一份配置完成准备和构建。
+
+```bash
+pnpm exec deps-conflict-resolver init --write-config ./legacy-deps.json
+pnpm exec deps-conflict-resolver prepare --config ./legacy-deps.json --strict --write-plan
+pnpm exec deps-conflict-resolver doctor --config ./legacy-deps.json --offline --strict --json --timings
+```
+
+在 Vite、Webpack 或核心选项中设置 `preparedPlan: true, strict: true`。此模式始终离线。构建会校验包清单、锁文件、真实安装路径和此前未命中的查找输入。计划命中会跳过全图分析，计划缺失或失效会触发离线分析。计划记录当前安装的绝对路径，保存在 `node_modules/.cache/deps-conflict-resolver/` 中。依赖变更后可以重新运行 `prepare --write-plan`。已有有效安装时，可用 `prepare --offline --write-plan` 生成计划。
+
+`doctor --timings` 和核心 `getTimings()` 报告各阶段耗时，包括读写锁等待、依赖图、Registry、安装和计划校验。阶段可以重叠。文件探针计数来自分析过程，计划校验时间另列。Vite 的 `debug: true` 也会输出实际执行的预构建耗时与缓存键。
+
+`doctor` 会给出诊断对应的下一步，已安装且版本不兼容的可选 peer 以告警显示。使用 `doctor --source-hints` 可以查看 Vue 2 编译特征提示和待确认的 `peerOverrides` 配置。`init` 也会输出这些提示。在线元数据查询使用 `.npmrc` 中的 `@scope:registry` 及对应主机和路径下的 `_authToken`，支持环境变量插值。
+
 Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal，开发时也将它们加入 SSR 预构建并使用相同的 alias 解析规则，使 CommonJS 的 require 和 ESM 的 import 都能重定向。默认 ssr='manual'，由使用者配置。已有 noExternal=true 和 SSR 预构建配置会合并保留。显式 ssr.external 仍遵循 Vite 自身的优先级；需要自动重定向时，应避免同时外置这些包或禁用 SSR 预构建。
 
 开发预构建只将有效 alias、直接消费方和 includeRedirects 作为入口，再跟随实际的 import / require，不会提前加载整个依赖清单。显式 ssr.external 和 SSR optimizeDeps.exclude（包括 environments.ssr 的配置）优先于自动生成的配置；外置的依赖也会传给 SSR 优化器。显式排除需要重定向的消费方时，需要手动配置其解析方式。
@@ -214,6 +230,8 @@ Vite 的 ssr='auto' 会把受影响的包和有效 alias 加入 ssr.noExternal�
 ssr.external=true（Vite 5+）也作用于预构建入口内部的依赖；noExternal 中包名或正则匹配的依赖继续内联。外置入口从原消费方解析，保留嵌套版本及 import/require 条件导出，避免优化器缓存目录改变其解析结果。 外置模块通过 Node 原生加载，保留其 namespace 身份、模块缓存及 live bindings，不依赖默认导出探测。
 
 Vite 优先对命中规则的 importer 应用重定向，其他请求仍由 Vite 自己解析，包括用户配置的 `resolve.alias`。预构建缓存随生效规则和已安装 provider 的变更失效。开发服务器会监听分析涉及的项目和 linked workspace 清单。
+
+`vite build --watch` 会随依赖输入刷新规则，并重新解析受影响的模块。如果 `ssr: 'auto'` 生成的外置策略发生变化，Vite 会提示重启 watch。自定义 `beforeResolve` 的返回值从原 importer 解析，插件生成的别名从宿主工程解析。
 
 入口实际使用的嵌套 peer 与要求不符时，可能报告 `PEER_PROVIDER_MISMATCH`，即使宿主另有一个兼容版本。入口和相关 peer 请求已经共用兼容的本地实例时，可以直接使用原生解析。`TRANSITIVE_PEER_CONFLICT` 提示已配置入口漏写的 peer 在其直接子依赖处存在版本冲突，供补充入口或修正声明。
 

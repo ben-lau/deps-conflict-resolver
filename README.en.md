@@ -207,6 +207,22 @@ module.exports = {
 
 offline=true prohibits registry queries and package-manager installation, including when autoInstall=true is also supplied. Missing verified aliases produce OFFLINE_ALIAS_MISSING. strict=true rejects unresolved required dependencies, installation failures, and ambiguous runtime requests. Automatic installation and permissive handling remain the defaults. autoInstall=false alone does not prohibit registry queries.
 
+### Generate and Reuse an Offline Plan
+
+`init` previews a minimal configuration based on peer conflicts in installed entry packages. Use `--write-config` to save it as a new JSON file. Review the entries and use the same options for preparation and builds.
+
+```bash
+pnpm exec deps-conflict-resolver init --write-config ./legacy-deps.json
+pnpm exec deps-conflict-resolver prepare --config ./legacy-deps.json --strict --write-plan
+pnpm exec deps-conflict-resolver doctor --config ./legacy-deps.json --offline --strict --json --timings
+```
+
+Set `preparedPlan: true, strict: true` in the Vite, Webpack, or core options. This mode always runs offline. The resolver validates manifests, lockfiles, physical installation paths, and previously missing lookups. A valid plan skips full analysis. A missing or stale plan falls back to offline analysis. Plans contain absolute installation paths and live in `node_modules/.cache/deps-conflict-resolver/`. Regenerate the plan after dependency changes with `prepare --write-plan`. An existing valid installation can generate one with `prepare --offline --write-plan`.
+
+`doctor --timings` and the core `getTimings()` report phase durations, including lock waiting, graph analysis, registry access, installation, and plan validation. Durations can overlap. Filesystem counts cover analysis probes, and plan validation time is measured separately. Vite's `debug: true` also logs the duration and cache key of optimizer runs.
+
+`doctor` suggests next steps for diagnostics and warns about visible optional peers with incompatible versions. Use `doctor --source-hints` for Vue 2 source patterns and suggested `peerOverrides` to review. `init` includes these hints. Online metadata queries honor `@scope:registry` and `_authToken` settings scoped to the registry host and path in `.npmrc`, including environment variable substitution.
+
 Vite's ssr='auto' adds affected packages and active aliases to ssr.noExternal. During development it also includes them in SSR pre-bundling with the same alias resolution rules, redirecting both CommonJS require and ESM import requests. The default is ssr='manual'. Existing noExternal=true and SSR optimizer settings are preserved and merged. Explicit ssr.external entries retain Vite's own precedence; avoid externalizing affected packages or disabling SSR pre-bundling when automatic redirection is needed.
 
 Development pre-bundling uses active aliases, direct consumers, and includeRedirects as entries, then follows actual import / require requests instead of eagerly loading every declared dependency. Explicit ssr.external and SSR optimizeDeps.exclude settings, including environments.ssr settings, take precedence over generated configuration. Externals are also forwarded to the SSR optimizer. Consumers explicitly excluded from automatic handling require manual resolution configuration.
@@ -214,6 +230,8 @@ Development pre-bundling uses active aliases, direct consumers, and includeRedir
 ssr.external=true (Vite 5+) also applies inside pre-bundled entries; dependencies matching noExternal package names or patterns remain bundled. External entry points resolve from their original consumer, preserving nested versions and import/require conditions instead of resolving from the optimizer cache directory. Native external loading preserves namespace identity, Node's module cache and live bindings without guessing default exports.
 
 Vite applies scoped redirects before global aliases for matching importers. Other requests follow Vite's configured aliases and resolution. Optimizer caches are invalidated when active rules or installed providers change. The development server watches the project and linked workspace manifests used by analysis.
+
+`vite build --watch` refreshes redirects and re-resolves affected modules when dependency inputs change. Vite asks for a watch restart if the generated `ssr: 'auto'` externalization policy changes. Custom `beforeResolve` targets resolve from the original importer. Plugin-generated aliases resolve from the host project.
 
 `PEER_PROVIDER_MISMATCH` reports a nested provider that shadows a compatible host version. An entry can use its installed provider when the affected peer requests already share that compatible instance. `TRANSITIVE_PEER_CONFLICT` points out incompatible peers of direct children when the selected entry omits the declaration.
 
