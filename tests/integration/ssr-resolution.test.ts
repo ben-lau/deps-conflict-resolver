@@ -132,6 +132,7 @@ describe('SSR alias resolution', () => {
     'environment-external',
     'environment-exclude',
     'external-subpath',
+    'mixed-external',
   ])('keeps imported native packages outside SSR optimization: %s', async (mode) => {
     const { root } = fixture();
     nativeDependency(root, true, mode === 'external-subpath');
@@ -148,11 +149,13 @@ describe('SSR alias resolution', () => {
             ? {}
             : { external },
       environments:
-        mode === 'environment-external'
-          ? { ssr: { resolve: { external } } }
-          : mode === 'environment-exclude'
-            ? { ssr: { optimizeDeps: { exclude: external } } }
-            : {},
+        mode === 'mixed-external'
+          ? { ssr: { resolve: { external: ['other-external'] } } }
+          : mode === 'environment-external'
+            ? { ssr: { resolve: { external } } }
+            : mode === 'environment-exclude'
+              ? { ssr: { optimizeDeps: { exclude: external } } }
+              : {},
       plugins: [
         depsConflictResolverVitePlugin({
           dependencies: ['legacy'],
@@ -311,6 +314,49 @@ describe('SSR alias resolution', () => {
       expect(config.ssr.optimizeDeps.include).toEqual(
         mode === 'none' ? [] : expect.arrayContaining(['legacy', 'vue2']),
       );
+    },
+  );
+
+  it.each(['top-array', 'top-pattern', 'top-true', 'environment-true'])(
+    'merges top-level and environment noExternal for CommonJS SSR: %s',
+    async (mode) => {
+      const { root } = fixture(true);
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        server: { middlewareMode: true, hmr: false },
+        ssr: {
+          external: true,
+          noExternal:
+            mode === 'top-true'
+              ? true
+              : mode === 'top-pattern'
+                ? [/^(legacy|vue2)$/]
+                : ['legacy', 'vue2'],
+          optimizeDeps: { include: ['vue'] },
+        },
+        environments: {
+          ssr: { resolve: { noExternal: mode === 'environment-true' ? true : ['other-internal'] } },
+        },
+        plugins: [
+          depsConflictResolverVitePlugin({
+            dependencies: ['legacy'],
+            offline: true,
+            strict: true,
+            ssr: 'auto',
+          }),
+        ],
+      });
+      try {
+        const result = await server.ssrLoadModule('/entry.js');
+        expect(result.runtimeVersion).toBe('2.7.16');
+        expect(result.hostVersion).toBe('3.0.0');
+        expect(result.shared).toBe(true);
+        expect(result.isolated).toBe(true);
+      } finally {
+        await server.close();
+      }
     },
   );
 });

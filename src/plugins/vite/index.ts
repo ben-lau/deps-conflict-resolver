@@ -1,8 +1,8 @@
-import type { Alias, Plugin, UserConfig } from 'vite';
+import type { Alias, Plugin, SSROptions, UserConfig } from 'vite';
 import type { PluginConfig, AliasPathMapping } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
-import { createFilter, version as viteVersion } from 'vite';
+import { createFilter, mergeConfig, version as viteVersion } from 'vite';
 import { createOptimizerOptions } from './optimizer';
 import { escapeRegex } from '../../utils/regex';
 import { isPathLikeRequest, isVirtualModuleRequest } from '../../utils/module-request';
@@ -177,14 +177,20 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       }
 
       const ssrEnvironment = config.environments?.ssr;
-      const external = ssrEnvironment?.resolve?.external ?? config.ssr?.external;
+      // Match Vite's legacy-SSR to environment merge, including array
+      // concatenation and true taking precedence over arrays for these keys.
+      const ssrResolve: Pick<SSROptions, 'external' | 'noExternal'> = mergeConfig(
+        { resolve: { external: config.ssr?.external, noExternal: config.ssr?.noExternal } },
+        { resolve: ssrEnvironment?.resolve ?? {} },
+      ).resolve;
+      const ssrOptimizer: NonNullable<SSROptions['optimizeDeps']> = mergeConfig(
+        config.ssr?.optimizeDeps ?? {},
+        ssrEnvironment?.optimizeDeps ?? {},
+      );
+      const external = ssrResolve.external;
       const ssrExternal = Array.isArray(external) ? external : [];
-      const ssrExcluded = [
-        ...ssrExternal,
-        ...(config.ssr?.optimizeDeps?.exclude ?? []),
-        ...(ssrEnvironment?.optimizeDeps?.exclude ?? []),
-      ];
-      const manualNoExternal = ssrEnvironment?.resolve?.noExternal ?? config.ssr?.noExternal;
+      const ssrExcluded = [...ssrExternal, ...(ssrOptimizer.exclude ?? [])];
+      const manualNoExternal = ssrResolve.noExternal;
       const keepsInternal =
         manualNoExternal === true
           ? () => true
@@ -208,13 +214,13 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
           ? {
               ssr: {
                 noExternal:
-                  config.ssr?.noExternal === true
+                  ssrResolve.noExternal === true
                     ? true
                     : [...ssrPackages].filter(allowsSsrOptimization),
                 ...(command === 'serve'
                   ? {
                       optimizeDeps: {
-                        ...(legacySsrOptimizer && config.ssr?.optimizeDeps?.disabled === undefined
+                        ...(legacySsrOptimizer && ssrOptimizer.disabled === undefined
                           ? { disabled: false as const }
                           : {}),
                         ...optimizeDeps,

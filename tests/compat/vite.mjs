@@ -156,6 +156,9 @@ try {
       plugins: [plugin()],
       optimizeDeps: { force: true },
       ssr: { external: ['native-addon'], optimizeDeps: { force: true } },
+      ...(Number.parseInt(vite.version, 10) >= 6
+        ? { environments: { ssr: { resolve: { external: ['other-external'] } } } }
+        : {}),
     });
     try {
       const result = await server.ssrLoadModule('/entry.js');
@@ -204,6 +207,37 @@ try {
       await server.close();
     }
   }
+  let mixedSsrConfig;
+  if (Number.parseInt(vite.version, 10) >= 6) {
+    const server = await vite.createServer({
+      root: app,
+      configFile: false,
+      logLevel: 'silent',
+      server: { middlewareMode: true, hmr: false },
+      plugins: [plugin()],
+      ssr: {
+        external: true,
+        noExternal: ['legacy', 'vue2'],
+        optimizeDeps: { exclude: ['native-addon'], force: true },
+      },
+      environments: { ssr: { resolve: { noExternal: ['other-internal'] } } },
+    });
+    try {
+      const result = await server.ssrLoadModule('/entry.js');
+      assert.equal(result.runtimeVersion, legacyVersion);
+      assert.equal(result.hostVersion, hostVersion);
+      assert.equal(result.shared, true);
+      assert.equal(result.nativeReady, true);
+      mixedSsrConfig = {
+        host: result.hostVersion,
+        legacy: result.runtimeVersion,
+        shared: result.shared,
+        nativeReady: result.nativeReady,
+      };
+    } finally {
+      await server.close();
+    }
+  }
   process.stdout.write(
     JSON.stringify(
       {
@@ -212,6 +246,7 @@ try {
         dev: { host: host.version, legacy: legacy.runtimeVersion },
         ssr: { host: ssr.hostVersion, legacy: ssr.runtimeVersion },
         ssrDev,
+        mixedSsrConfig,
       },
       null,
       2,
