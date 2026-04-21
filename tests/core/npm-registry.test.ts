@@ -41,7 +41,7 @@ describe('npm-registry', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         'https://registry.npmjs.org/lodash',
         expect.objectContaining({
-          headers: { Accept: 'application/json' },
+          headers: { Accept: 'application/vnd.npm.install-v1+json' },
         }),
       );
     });

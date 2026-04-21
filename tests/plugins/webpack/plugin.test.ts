@@ -207,35 +207,30 @@ describe('Webpack Plugin', () => {
         const nmfCall = mockCompiler.hooks.normalModuleFactory.tap.mock.calls[0]!;
         const nmfCallback = nmfCall[1];
 
-        // 创建 mock NormalModuleFactory
         const mockNmf = {
           hooks: {
             beforeResolve: {
-              tapAsync: vi.fn(),
+              tapPromise: vi.fn(),
             },
           },
         };
 
         nmfCallback(mockNmf);
 
-        expect(mockNmf.hooks.beforeResolve.tapAsync).toHaveBeenCalled();
+        expect(mockNmf.hooks.beforeResolve.tapPromise).toHaveBeenCalled();
 
-        // 获取 beforeResolve callback
-        const beforeResolveCall = mockNmf.hooks.beforeResolve.tapAsync.mock.calls[0]!;
-        const beforeResolveCallback = beforeResolveCall[1];
+        const beforeResolveCall = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]!;
+        const beforeResolveCallback = beforeResolveCall[1] as (data: unknown) => Promise<void>;
 
-        // 测试模块解析
         const resolveData = {
           request: 'vue',
           contextInfo: { issuer: '/some/file.js' },
           context: '/some',
         };
 
-        const callback = vi.fn();
-        await beforeResolveCallback(resolveData, callback);
+        await beforeResolveCallback(resolveData);
 
         expect(resolveData.request).toBe('aliased-vue');
-        expect(callback).toHaveBeenCalled();
       });
 
       it('should skip relative paths', async () => {
@@ -259,10 +254,10 @@ describe('Webpack Plugin', () => {
         await beforeRunCall[1]();
 
         const nmfCall = mockCompiler.hooks.normalModuleFactory.tap.mock.calls[0]!;
-        const mockNmf = { hooks: { beforeResolve: { tapAsync: vi.fn() } } };
+        const mockNmf = { hooks: { beforeResolve: { tapPromise: vi.fn() } } };
         nmfCall[1](mockNmf);
 
-        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapAsync.mock.calls[0]![1];
+        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]![1] as (data: unknown) => Promise<void>;
 
         const resolveData = {
           request: './relative',
@@ -270,8 +265,7 @@ describe('Webpack Plugin', () => {
           context: '/some',
         };
 
-        const callback = vi.fn();
-        await beforeResolveCallback(resolveData, callback);
+        await beforeResolveCallback(resolveData);
 
         expect(resolveData.request).toBe('./relative');
         expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
@@ -298,10 +292,10 @@ describe('Webpack Plugin', () => {
         await beforeRunCall[1]();
 
         const nmfCall = mockCompiler.hooks.normalModuleFactory.tap.mock.calls[0]!;
-        const mockNmf = { hooks: { beforeResolve: { tapAsync: vi.fn() } } };
+        const mockNmf = { hooks: { beforeResolve: { tapPromise: vi.fn() } } };
         nmfCall[1](mockNmf);
 
-        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapAsync.mock.calls[0]![1];
+        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]![1] as (data: unknown) => Promise<void>;
 
         const resolveData = {
           request: 'webpack/runtime',
@@ -309,8 +303,7 @@ describe('Webpack Plugin', () => {
           context: '/some',
         };
 
-        const callback = vi.fn();
-        await beforeResolveCallback(resolveData, callback);
+        await beforeResolveCallback(resolveData);
 
         expect(mockResolverInstance.resolveModule).not.toHaveBeenCalled();
       });

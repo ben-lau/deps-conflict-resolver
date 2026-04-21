@@ -31,8 +31,9 @@ export interface AliasMapping {
 
   /**
    * 所有需要重定向的依赖包名列表
-   * 包含 usedBy 中包的所有运行时子依赖（dependencies）
+   * 包含 usedBy 中包的所有运行时子依赖（dependencies + peerDependencies 递归）
    * 用于判断某个 importer 是否需要重定向到别名版本
+   * 注意：冲突包自身（如 vue、vue-router）已在收集时被排除，避免主工程引用被误重定向
    */
   allDependents: string[];
 }
@@ -57,7 +58,7 @@ export interface AnalysisResult {
   aliasMappings: AliasMapping[];
 
   /**
-   * 第一层依赖中缺失的 peer 依赖（无冲突，需要安装）
+   * 第一层依赖中缺失的 peer 依赖（不自动安装，仅警告提示用户）
    */
   missingFirstLevelPeers: Array<{
     packageName: string;

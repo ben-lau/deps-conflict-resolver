@@ -289,6 +289,42 @@ describe('DepsConflictResolver', () => {
       const options = resolver.getOptions();
       expect(options.aliasPrefix).toBe('custom-');
     });
+
+    it('should include empty includeRedirects by default', async () => {
+      const resolver = new DepsConflictResolver({
+        dependencies: ['lodash'],
+      });
+
+      await resolver.initialize();
+
+      const options = resolver.getOptions();
+      expect(options.includeRedirects).toEqual({});
+    });
+
+    it('should pass through user-provided includeRedirects', async () => {
+      const resolver = new DepsConflictResolver({
+        dependencies: ['vue'],
+        includeRedirects: { vue: ['@kmt/meeting-setting', '@rili/ui'] },
+      });
+
+      await resolver.initialize();
+
+      const options = resolver.getOptions();
+      expect(options.includeRedirects).toEqual({
+        vue: ['@kmt/meeting-setting', '@rili/ui'],
+      });
+    });
+
+    it('should include empty excludeRedirects by default', async () => {
+      const resolver = new DepsConflictResolver({
+        dependencies: ['lodash'],
+      });
+
+      await resolver.initialize();
+
+      const options = resolver.getOptions();
+      expect(options.excludeRedirects).toEqual({});
+    });
   });
 
   describe('installDependencies', () => {

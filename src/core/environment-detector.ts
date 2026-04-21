@@ -23,8 +23,8 @@ export class EnvironmentDetector {
   /**
    * 获取检测到的包管理器类型
    */
-  async getPackageManager(): Promise<PackageManagerType> {
-    const result = await this.detect();
+  getPackageManager(): PackageManagerType {
+    const result = this.detect();
     return result.packageManager;
   }
 
@@ -36,7 +36,7 @@ export class EnvironmentDetector {
       return this.registryCache;
     }
 
-    const result = await this.detect();
+    const result = this.detect();
     this.registryCache = await this.detectRegistry(result.packageManager);
     return this.registryCache;
   }
@@ -51,7 +51,7 @@ export class EnvironmentDetector {
   /**
    * 获取完整的检测结果
    */
-  async getDetectionResult(): Promise<PackageManagerDetectionResult> {
+  getDetectionResult(): PackageManagerDetectionResult {
     return this.detect();
   }
 
@@ -79,17 +79,16 @@ export class EnvironmentDetector {
    * 2. lock 文件存在 - 向上遍历查找（支持 monorepo）
    * 3. 默认为 npm
    */
-  private detect(): Promise<PackageManagerDetectionResult> {
+  private detect(): PackageManagerDetectionResult {
     if (this.detectionResult) {
-      return Promise.resolve(this.detectionResult);
+      return this.detectionResult;
     }
 
     for (const currentDir of iterateParentDirs(this.projectRoot)) {
-      // 1. 检查 package.json 中的 packageManager 字段
       const pkgJsonPath = join(currentDir, 'package.json');
       if (fileExists(pkgJsonPath)) {
         const pkgJson = readPackageJsonCached(currentDir);
-        // eslint(type): 在某些 eslint type-checking 场景下会把可选链结果推断为 any，做一次显式标注避免 no-unsafe 报错
+        // eslint(type): 显式标注避免 no-unsafe 报错
         const pmField: string | undefined = pkgJson?.packageManager;
         if (pmField) {
           const pm = this.parsePackageManagerField(pmField);
@@ -100,12 +99,11 @@ export class EnvironmentDetector {
               detectedFrom: 'packageJson',
               rootDir: currentDir,
             };
-            return Promise.resolve(this.detectionResult);
+            return this.detectionResult;
           }
         }
       }
 
-      // 2. 检查 lock 文件
       for (const [lockFile, pm] of Object.entries(LOCK_FILE_MAP)) {
         if (fileExists(join(currentDir, lockFile))) {
           logger.debug(
@@ -116,18 +114,17 @@ export class EnvironmentDetector {
             detectedFrom: 'lockfile',
             rootDir: currentDir,
           };
-          return Promise.resolve(this.detectionResult);
+          return this.detectionResult;
         }
       }
     }
 
-    // 3. 默认使用 npm
     logger.debug('No lock file found, defaulting to npm');
     this.detectionResult = {
       packageManager: 'npm',
       detectedFrom: 'default',
     };
-    return Promise.resolve(this.detectionResult);
+    return this.detectionResult;
   }
 
   /**
@@ -191,14 +188,16 @@ export class EnvironmentDetector {
         }
       }
 
-      // 检查 yarn 配置（如果是 yarn）
+      // 检查 yarn 配置（如果是 yarn）—— 向上遍历查找 .yarnrc.yml（覆盖 monorepo 子包场景）
       if (packageManager === 'yarn') {
-        const yarnrc = join(this.projectRoot, '.yarnrc.yml');
-        if (fileExists(yarnrc)) {
-          const registry = await this.parseRegistryFromYarnrc(yarnrc);
-          if (registry) {
-            logger.debug(`Detected registry from .yarnrc.yml: ${registry}`);
-            return registry;
+        for (const dir of iterateParentDirs(this.projectRoot)) {
+          const yarnrc = join(dir, '.yarnrc.yml');
+          if (fileExists(yarnrc)) {
+            const registry = await this.parseRegistryFromYarnrc(yarnrc);
+            if (registry) {
+              logger.debug(`Detected registry from .yarnrc.yml: ${registry} (at ${dir})`);
+              return registry;
+            }
           }
         }
       }

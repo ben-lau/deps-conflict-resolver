@@ -150,17 +150,13 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       // - 直接修改 resolveData 对象即可
       // - 返回 false 表示跳过该模块
       // - 返回 undefined/void 表示继续处理
-      nmf.hooks.beforeResolve.tapAsync(PLUGIN_NAME, (resolveData, callback) => {
-        // 确保初始化完成
-        this.initPromise!.then(() => {
+      nmf.hooks.beforeResolve.tapPromise(PLUGIN_NAME, async (resolveData) => {
+        try {
+          await this.initPromise;
           this.handleResolve(resolveData);
-          // 继续执行后续处理
-          callback();
-        }).catch(err => {
+        } catch (err) {
           logger.error('Error during module resolution:', err);
-          // 出错时也继续执行，不阻塞编译
-          callback();
-        });
+        }
       });
     });
 

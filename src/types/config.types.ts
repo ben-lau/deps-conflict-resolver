@@ -50,10 +50,20 @@ export interface DepsConflictResolverOptions {
 
   /**
    * 排除特定依赖包对某些模块的解析重定向
-   * 键为原始包名，值为需要排除重定向的依赖包名列表
+   * 键为原始包名，值为需要从 allDependents 中剔除的包名列表
    * @example { vue: ['vue-demi'] } - vue-demi 中的 import vue 不会被重定向
    */
   excludeRedirects?: Record<string, string[]>;
+
+  /**
+   * 显式纳入特定依赖包对某些模块的解析重定向
+   * 键为原始包名，值为需要强制加入 allDependents 的包名列表
+   * 常用于处理 semver 范围写得过宽（如 ">=2.5.0" 同时满足 Vue 2/3），
+   * 但运行时仍依赖旧版本实现的包
+   * 优先于 excludeRedirects 应用（include 后再 exclude）
+   * @example { vue: ['@rili/ui', '@kmt/meeting-setting'] }
+   */
+  includeRedirects?: Record<string, string[]>;
 }
 
 /**

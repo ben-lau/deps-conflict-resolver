@@ -93,15 +93,24 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 ## 配置选项
 
-| 选项             | 类型                                  | 默认值          | 说明                                       |
-| ---------------- | ------------------------------------- | --------------- | ------------------------------------------ |
-| `dependencies`   | `string[]`                            | -               | **必填**，需要分析的依赖包名列表           |
-| `projectRoot`    | `string`                              | `process.cwd()` | 项目根目录路径                             |
-| `autoInstall`    | `boolean`                             | `true`          | 是否自动安装缺失的别名依赖                 |
-| `packageManager` | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | 包管理器类型，`'auto'` 自动检测            |
-| `registry`       | `string`                              | 自动检测        | NPM 注册表地址，不指定则自动从 .npmrc 读取 |
-| `debug`          | `boolean`                             | `false`         | 是否启用调试日志                           |
-| `aliasPrefix`    | `string`                              | `'aliased-'`    | 别名前缀                                   |
+| 选项                | 类型                                  | 默认值          | 说明                                                                     |
+| ------------------- | ------------------------------------- | --------------- | ------------------------------------------------------------------------ |
+| `dependencies`      | `string[]`                            | -               | **必填**，需要分析的依赖包名列表                                         |
+| `projectRoot`       | `string`                              | `process.cwd()` | 项目根目录路径                                                           |
+| `autoInstall`       | `boolean`                             | `true`          | 是否自动安装缺失的别名依赖                                               |
+| `packageManager`    | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | 包管理器类型，`'auto'` 自动检测                                          |
+| `registry`          | `string`                              | 自动检测        | NPM 注册表地址，不指定则自动从 .npmrc 读取                               |
+| `debug`             | `boolean`                             | `false`         | 是否启用调试日志                                                         |
+| `aliasPrefix`       | `string`                              | `'aliased-'`    | 别名前缀                                                                 |
+| `excludeRedirects`  | `Record<string, string[]>`            | `{}`            | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }` |
+| `includeRedirects`  | `Record<string, string[]>`            | `{}`            | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。适用于 semver 范围写得过宽（如 `>=2.5.0`）但运行时仍依赖旧版本的包。示例：`{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
+
+### Vite 插件专属选项
+
+| 选项            | 类型      | 默认值  | 说明                       |
+| --------------- | --------- | ------- | -------------------------- |
+| `enableInDev`   | `boolean` | `true`  | 是否在开发模式（dev）下启用 |
+| `enableInBuild` | `boolean` | `true`  | 是否在构建模式（build）下启用 |
 
 ### 自动检测
 
@@ -169,6 +178,15 @@ import Vue from 'vue'; // → 解析到 aliased-vue2
 import Vue from 'vue'; // → 解析到 vue (3.x)
 ```
 
+### 行为边界
+
+- **冲突检测范围**：只检测用户指定的 `dependencies` 的第一层 `peerDependencies` 与主工程的版本冲突。子依赖的 `peerDependencies` 不触发别名安装。
+- **重定向范围**：声明冲突 peer 的包及其所有子依赖（`dependencies` + `peerDependencies` 递归）都会被收入重定向候选列表。冲突包自身（如 `vue`、`vue-router`）在收集时会被自动排除，避免主工程的同名引用被错误重定向。
+- **`excludeRedirects`**：从重定向候选列表中剔除指定包，适用于运行时实际使用宿主 Vue 3 版本的共享包（如 `vue-demi`、`pinia`）。
+- **`includeRedirects`**：将指定包强制加入重定向列表，适用于 semver 范围写得过宽（如 `vue: ">=2.5.0"` 同时满足 Vue 2/3），但运行时仍需要使用旧版本的包。`includeRedirects` 在 `excludeRedirects` 之前应用。
+- **别名安装**：只为"主工程已声明且版本冲突"的依赖自动安装别名。未声明的 peer 依赖只会输出警告，不自动安装。
+- **依赖图去重**：依赖树遍历按包名去重（同名包只分析一次）。在极少数情况下，如同一包名存在多个不同版本的嵌套安装，只有第一个被解析到的版本会被分析。这对重定向结果的影响极小，因为重定向判断只基于包名匹配，不涉及版本。
+
 ## 高级用法
 
 ### 钩子函数
@@ -198,6 +216,31 @@ depsConflictResolverVitePlugin({
   },
 });
 ```
+
+### 精细控制重定向范围（includeRedirects + excludeRedirects）
+
+当项目同时包含 Vue 2 依赖和 Vue 3 依赖时，自动检测可能无法准确区分。可以用这两个选项手动调节：
+
+```typescript
+new DepsConflictResolverWebpackPlugin({
+  dependencies: ['@uikit/vue-finder', '@rili/ui'],
+
+  // 强制将这些包（semver 范围过宽，但实际需要 Vue 2）加入重定向列表
+  includeRedirects: {
+    vue: ['@rili/ui', '@kmt/meeting-setting'],
+  },
+
+  // 从重定向列表中排除这些包（它们在运行时使用宿主提供的 Vue 3）
+  excludeRedirects: {
+    vue: ['vue-demi', 'pinia', '@ks-email/editor'],
+  },
+
+  aliasPrefix: 'never-ever-gonna-import-',
+  autoInstall: true,
+});
+```
+
+规则优先级：`includeRedirects` 先执行，`excludeRedirects` 后执行。若同一个包同时出现在两者中，`excludeRedirects` 优先（最终不重定向）。
 
 ### 复用已有别名
 

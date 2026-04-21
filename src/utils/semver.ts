@@ -47,9 +47,13 @@ export function findBestVersion(versions: string[], ranges: string[]): string | 
     return null;
   }
 
-  // 浅拷贝后排序，避免修改传入的 versions 数组
-  const sorted = [...satisfyingVersions].sort((a, b) => compare(b, a));
-  return sorted[0] ?? null;
+  let best = satisfyingVersions[0]!;
+  for (let i = 1; i < satisfyingVersions.length; i++) {
+    if (compare(satisfyingVersions[i]!, best) > 0) {
+      best = satisfyingVersions[i]!;
+    }
+  }
+  return best;
 }
 
 /**

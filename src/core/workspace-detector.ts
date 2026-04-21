@@ -76,13 +76,13 @@ export class WorkspaceDetector {
   /**
    * 获取 workspace 检测结果
    */
-  detect(): Promise<WorkspaceDetectionResult> {
+  detect(): WorkspaceDetectionResult {
     if (this.detectionResult) {
-      return Promise.resolve(this.detectionResult);
+      return this.detectionResult;
     }
 
     this.detectionResult = this.detectWorkspace();
-    return Promise.resolve(this.detectionResult);
+    return this.detectionResult;
   }
 
   /**
@@ -97,10 +97,10 @@ export class WorkspaceDetector {
    * @param packageName 包名
    * @param versionSpec 版本规格（如 "catalog:" 或 "catalog:react17"）
    */
-  async resolveCatalogVersion(
+  resolveCatalogVersion(
     packageName: string,
     versionSpec: string,
-  ): Promise<CatalogResolution> {
+  ): CatalogResolution {
     const result: CatalogResolution = {
       original: versionSpec,
       resolved: null,
@@ -118,8 +118,7 @@ export class WorkspaceDetector {
       return result;
     }
 
-    // 确保 workspace 信息已检测
-    const workspace = await this.detect();
+    const workspace = this.detect();
     if (!workspace.isMonorepo || !workspace.workspaceRoot) {
       logger.warn(`Cannot resolve catalog: protocol - not in a monorepo`);
       return result;
@@ -160,12 +159,12 @@ export class WorkspaceDetector {
    * @param versionSpec 版本规格
    * @returns 解析后的普通版本范围，或 null（如无法解析）
    */
-  async resolveVersionSpec(packageName: string, versionSpec: string): Promise<string | null> {
+  resolveVersionSpec(packageName: string, versionSpec: string): string | null {
     const protocol = this.getVersionProtocol(versionSpec);
 
     switch (protocol) {
       case 'catalog': {
-        const resolution = await this.resolveCatalogVersion(packageName, versionSpec);
+        const resolution = this.resolveCatalogVersion(packageName, versionSpec);
         return resolution.resolved;
       }
       case 'workspace':
@@ -200,8 +199,8 @@ export class WorkspaceDetector {
   /**
    * 从 workspace 根目录和 catalog 中查找已存在的别名
    */
-  async findWorkspaceAliases(targetPackage: string): Promise<WorkspaceAliasInfo[]> {
-    const workspace = await this.detect();
+  findWorkspaceAliases(targetPackage: string): WorkspaceAliasInfo[] {
+    const workspace = this.detect();
 
     if (!workspace.isMonorepo || !workspace.workspaceRoot) {
       return [];
@@ -254,8 +253,8 @@ export class WorkspaceDetector {
   /**
    * 获取 workspace 根目录
    */
-  async getWorkspaceRoot(): Promise<string | null> {
-    const result = await this.detect();
+  getWorkspaceRoot(): string | null {
+    const result = this.detect();
     return result.workspaceRoot;
   }
 

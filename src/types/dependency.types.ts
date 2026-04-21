@@ -68,12 +68,12 @@ export interface PeerConflict {
   conflictingRanges: DependencyPath[];
 
   /**
-   * 是否存在冲突
+   * 是否存在版本范围不兼容（纯粹描述 peer 范围与已安装版本的兼容性，不考虑是否已声明）
    */
   hasConflict: boolean;
 
   /**
-   * 是否需要安装别名
+   * 是否需要安装别名（= hasConflict + 主工程已声明且已安装该包）
    */
   needsAlias: boolean;
 }

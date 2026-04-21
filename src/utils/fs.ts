@@ -126,15 +126,14 @@ export function findPackagePath(packageName: string, baseDir: string): string | 
   try {
     // 使用 createRequire 创建一个基于 baseDir 的 require 函数
     // 这样可以正确处理 ESM 和 CJS，以及各种包管理器的依赖结构
-    let require = requireCache.get(baseDir);
-    if (!require) {
+    let localRequire = requireCache.get(baseDir);
+    if (!localRequire) {
       const baseUrl = pathToFileURL(join(baseDir, 'package.json')).href;
-      require = createRequire(baseUrl);
-      requireCache.set(baseDir, require);
+      localRequire = createRequire(baseUrl);
+      requireCache.set(baseDir, localRequire);
     }
 
-    // 解析包的 package.json 路径，然后获取其目录
-    const pkgJsonPath = require.resolve(`${packageName}/package.json`);
+    const pkgJsonPath = localRequire.resolve(`${packageName}/package.json`);
     const resolved = dirname(pkgJsonPath);
     packagePathCache.set(cacheKey, resolved);
     return resolved;
@@ -152,14 +151,6 @@ export function findPackagePath(packageName: string, baseDir: string): string | 
  * 当 require.resolve 失败时使用（例如包没有导出 package.json）
  */
 function findPackagePathFallback(packageName: string, baseDir: string): string | null {
-  // 处理作用域包
-  const packagePath = join(baseDir, 'node_modules', packageName);
-
-  if (fileExists(packagePath)) {
-    return packagePath;
-  }
-
-  // 向上查找
   for (const dir of iterateParentDirs(baseDir)) {
     const candidatePath = join(dir, 'node_modules', packageName);
     if (fileExists(candidatePath)) {

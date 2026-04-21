@@ -25,10 +25,6 @@ import { fetchAllVersions, clearNpmRegistryCache } from './npm-registry';
 const logger = createLogger('dependency-analyzer');
 
 /**
- * 依赖分析器
- * 负责分析依赖树、找出 peer 依赖冲突
- */
-/**
  * 已存在的别名信息（从 package.json 的 npm: 协议解析得到）
  */
 interface ExistingAliasInfo {
@@ -68,6 +64,8 @@ export class DependencyAnalyzer {
   private workspaceRootDeclaredDeps: Record<string, string> = {};
   /** 是否已加载 workspaceRootDeclaredDeps */
   private workspaceRootDeclaredLoaded = false;
+  /** collectAllRelatedPackages 的 memo 缓存（单次 analyze 生命周期内有效） */
+  private collectCache = new Map<string, string[]>();
 
   constructor(
     options: ResolvedOptions,
@@ -122,13 +120,13 @@ export class DependencyAnalyzer {
    * 目的：在 monorepo/workspace 场景下，“主工程声明”需要合并当前包与 workspace 根的声明，
    * 与 WorkspaceDetector 的 workspaceRoot 判断逻辑保持一致。
    */
-  private async ensureWorkspaceRootDeclaredDepsLoaded(): Promise<void> {
+  private ensureWorkspaceRootDeclaredDepsLoaded(): void {
     if (this.workspaceRootDeclaredLoaded) {
       return;
     }
     this.workspaceRootDeclaredLoaded = true;
 
-    const workspaceRoot = await this.workspaceDetector.getWorkspaceRoot();
+    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
     if (!workspaceRoot || workspaceRoot === this.options.projectRoot) {
       return;
     }
@@ -223,13 +221,13 @@ export class DependencyAnalyzer {
    * 解析所有 catalog: 协议的依赖版本
    * 将 catalog:xxx 转换为实际的版本范围
    */
-  private async resolveCatalogDependencies(): Promise<void> {
+  private resolveCatalogDependencies(): void {
     for (const [pkgName, versionSpec] of Object.entries(this.rawDeclaredDeps)) {
       if (typeof versionSpec !== 'string') continue;
 
       // 检查是否是 catalog 协议
       if (versionSpec.startsWith('catalog:')) {
-        const resolved = await this.workspaceDetector.resolveVersionSpec(pkgName, versionSpec);
+        const resolved = this.workspaceDetector.resolveVersionSpec(pkgName, versionSpec);
         if (resolved) {
           this.declaredDeps[pkgName] = resolved;
           logger.debug(`Resolved catalog dependency: ${pkgName} "${versionSpec}" -> "${resolved}"`);
@@ -239,7 +237,7 @@ export class DependencyAnalyzer {
       }
       // 检查是否是 workspace 协议
       else if (versionSpec.startsWith('workspace:')) {
-        const resolved = await this.workspaceDetector.resolveVersionSpec(pkgName, versionSpec);
+        const resolved = this.workspaceDetector.resolveVersionSpec(pkgName, versionSpec);
         if (resolved) {
           this.declaredDeps[pkgName] = resolved;
           logger.debug(
@@ -258,10 +256,10 @@ export class DependencyAnalyzer {
 
     try {
       // 0. 解析 catalog: 协议的依赖版本
-      await this.resolveCatalogDependencies();
+      this.resolveCatalogDependencies();
 
       // 0.1 预加载 workspaceRoot 的声明依赖（用于后续“已声明”判断合并）
-      await this.ensureWorkspaceRootDeclaredDepsLoaded();
+      this.ensureWorkspaceRootDeclaredDepsLoaded();
 
       // 1. 从用户指定的依赖开始，递归分析所有子依赖（deps + peerDeps）
       //    构建完整依赖树用于后续重定向判断
@@ -274,7 +272,7 @@ export class DependencyAnalyzer {
       const peerDepsMap = this.collectFirstLevelPeerDependencies();
 
       // 3. 分析冲突（只检测与主工程已声明依赖的版本冲突）
-      const peerConflicts = await this.analyzePeerConflicts(peerDepsMap);
+      const peerConflicts = this.analyzePeerConflicts(peerDepsMap);
 
       // 4. 生成别名映射（只为需要安装别名的冲突生成）
       //    会收集完整依赖树用于重定向判断
@@ -297,9 +295,20 @@ export class DependencyAnalyzer {
         missingFirstLevelPeers,
       };
     } finally {
-      // 清理缓存，释放内存
+      // 清理全局 IO 缓存
       clearPackageJsonCache();
       clearNpmRegistryCache();
+
+      // 清理仅在分析期间使用的内部状态，允许 GC 回收
+      // 注意：不能清理 analyzedDependencies，它被返回值直接引用
+      this.visitedPackages.clear();
+      this.installedPackageCache.clear();
+      this.existingAliasesMap.clear();
+      this.workspaceAliasesCache.clear();
+      this.workspaceRootDeclaredDeps = {};
+      this.rawDeclaredDeps = {};
+      this.declaredDeps = {};
+      this.collectCache.clear();
     }
   }
 
@@ -460,9 +469,9 @@ export class DependencyAnalyzer {
    * 分析 peer 依赖冲突
    * 只有当主工程已安装某个依赖，且 peerDeps 要求的版本不兼容时，才需要别名
    */
-  private async analyzePeerConflicts(
+  private analyzePeerConflicts(
     peerDepsMap: Map<string, DependencyPath[]>,
-  ): Promise<PeerConflict[]> {
+  ): PeerConflict[] {
     const conflicts: PeerConflict[] = [];
 
     for (const [packageName, requestedBy] of peerDepsMap) {
@@ -475,15 +484,12 @@ export class DependencyAnalyzer {
       const mainVersion = isDeclared ? this.getMainProjectVersion(packageName) : null;
       const isInstalled = mainVersion !== null;
 
-      // 检查每个请求是否与已安装版本冲突
-      let hasConflict = false;
       const conflictingRanges: DependencyPath[] = [];
       const satisfiedRanges: DependencyPath[] = [];
 
       for (const request of requestedBy) {
-        // 解析 peerDep 的版本范围（支持 catalog: 等协议）
         const resolvedRange =
-          (await this.workspaceDetector.resolveVersionSpec(packageName, request.requiredRange)) ??
+          (this.workspaceDetector.resolveVersionSpec(packageName, request.requiredRange)) ??
           request.requiredRange;
 
         if (mainVersion && satisfies(mainVersion, resolvedRange)) {
@@ -491,22 +497,15 @@ export class DependencyAnalyzer {
         } else {
           conflictingRanges.push({
             ...request,
-            requiredRange: resolvedRange, // 使用解析后的版本范围
+            requiredRange: resolvedRange,
           });
-          // 只有当包在主工程中“已声明且已安装”时，才标记为冲突
-          // 未声明：不算冲突，交由 missing peers 提示
-          // 未安装：不算冲突，属于缺失
-          if (isDeclared && isInstalled) {
-            hasConflict = true;
-          }
         }
       }
 
-      // needsAlias 的条件：
-      // 1. 主工程已声明该包（isDeclared = true）
-      // 2. 包实际已安装（isInstalled = true）
-      // 2. 存在与已安装版本不兼容的 peerDep 请求（conflictingRanges.length > 0）
-      const needsAlias = isDeclared && isInstalled && hasConflict && conflictingRanges.length > 0;
+      // hasConflict: 纯版本兼容性判断——存在不满足的 peer 范围即为 true
+      const hasConflict = conflictingRanges.length > 0;
+      // needsAlias: 可操作条件——冲突 + 主工程已声明且已安装该包
+      const needsAlias = hasConflict && isDeclared && isInstalled;
 
       if (needsAlias) {
         logger.info(
@@ -519,7 +518,7 @@ export class DependencyAnalyzer {
         mainProjectVersion: mainVersion,
         requiredRange: this.mergeRequiredRanges(requestedBy),
         requestedBy,
-        conflictingRanges, // 只记录冲突的范围
+        conflictingRanges,
         hasConflict,
         needsAlias,
       });
@@ -600,10 +599,10 @@ export class DependencyAnalyzer {
     logger.info(`Creating alias for "${packageName}": ${rangeGroups.length} version groups`);
 
     // 输出 workspace 检测结果（使用 info 级别以便用户看到）
-    const workspaceRoot = await this.workspaceDetector.getWorkspaceRoot();
+    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
     if (workspaceRoot) {
       logger.info(`  Workspace root detected: ${workspaceRoot}`);
-      const wsAliases = await this.findWorkspaceAliasesForPackage(packageName);
+      const wsAliases = this.findWorkspaceAliasesForPackage(packageName);
       if (wsAliases.length > 0) {
         logger.info(`  Found ${wsAliases.length} workspace alias(es) for ${packageName}:`);
         for (const a of wsAliases) {
@@ -639,7 +638,7 @@ export class DependencyAnalyzer {
     }
 
     // 3. 获取已存在的别名（用于复用和避免命名冲突）
-    const existingAliasNames = await this.getExistingAliasNames(packageName);
+    const existingAliasNames = this.getExistingAliasNames(packageName);
     // 记录这次已使用的别名，避免重复使用
     const usedAliasNames = new Set<string>();
 
@@ -654,7 +653,7 @@ export class DependencyAnalyzer {
 
       logger.debug(`  Group ${i + 1}: ${groupRanges.join(', ')}`);
 
-      const mapping = await this.createAliasMappingForGroup(
+      const mapping = this.createAliasMappingForGroup(
         packageName,
         group,
         groupRanges,
@@ -710,7 +709,7 @@ export class DependencyAnalyzer {
   /**
    * 为一个兼容组创建别名映射
    */
-  private async createAliasMappingForGroup(
+  private createAliasMappingForGroup(
     packageName: string,
     group: DependencyPath[],
     groupRanges: string[],
@@ -718,9 +717,9 @@ export class DependencyAnalyzer {
     existingAliasNames: Set<string>,
     usedAliasNames: Set<string>,
     allConflictPackageNames: string[],
-  ): Promise<AliasMapping | null> {
+  ): AliasMapping | null {
     // 1. 先检查是否有现有别名可复用（包括 workspace 级别）
-    const existingAlias = await this.findExistingAliasForRanges(
+    const existingAlias = this.findExistingAliasForRanges(
       packageName,
       groupRanges,
       usedAliasNames,
@@ -787,9 +786,9 @@ export class DependencyAnalyzer {
       ...new Set(group.map(r => r.path[0]).filter((p): p is string => p !== undefined)),
     ];
 
-    // 只收集 peerDependencies 链路上的包用于重定向
-    // dependencies 中的引用不需要重定向，由包管理器的正常解析处理
-    // 排除所有冲突包，防止主工程的这些包引用被错误重定向
+    // 收集 usedByRoots 子树（dependencies + peerDependencies 递归）用于重定向。
+    // 排除所有冲突包名（allConflictPackageNames），防止其被纳入 allDependents 后
+    // 导致主工程对这些包的引用也被错误重定向。
     const allDependents = this.collectAllRelatedPackages(usedByRoots, allConflictPackageNames);
 
     return {
@@ -806,15 +805,15 @@ export class DependencyAnalyzer {
    * 查找满足指定范围的现有别名（排除已使用的）
    * 优先查找当前项目的别名，然后查找 workspace 级别的别名
    */
-  private async findExistingAliasForRanges(
+  private findExistingAliasForRanges(
     packageName: string,
     ranges: string[],
     excludeAliases: Set<string>,
-  ): Promise<{
+  ): {
     name: string;
     version: string;
     isWorkspaceAlias?: boolean;
-  } | null> {
+  } | null {
     logger.debug(
       `  Searching for existing alias for ${packageName} satisfying ranges: [${ranges.join(', ')}]`,
     );
@@ -856,8 +855,8 @@ export class DependencyAnalyzer {
     }
 
     // 2. 查找 workspace 级别的别名
-    const workspaceAliases = await this.findWorkspaceAliasesForPackage(packageName);
-    const workspaceRoot = await this.workspaceDetector.getWorkspaceRoot();
+    const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
+    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
 
     if (workspaceAliases.length > 0) {
       logger.debug(`  Checking ${workspaceAliases.length} workspace alias(es)...`);
@@ -942,14 +941,14 @@ export class DependencyAnalyzer {
   /**
    * 查找 workspace 级别的别名（带缓存）
    */
-  private async findWorkspaceAliasesForPackage(packageName: string): Promise<WorkspaceAliasInfo[]> {
+  private findWorkspaceAliasesForPackage(packageName: string): WorkspaceAliasInfo[] {
     // 检查缓存
     if (this.workspaceAliasesCache.has(packageName)) {
       return this.workspaceAliasesCache.get(packageName)!;
     }
 
     // 从 workspace 检测器获取别名
-    const aliases = await this.workspaceDetector.findWorkspaceAliases(packageName);
+    const aliases = this.workspaceDetector.findWorkspaceAliases(packageName);
     this.workspaceAliasesCache.set(packageName, aliases);
 
     return aliases;
@@ -994,7 +993,7 @@ export class DependencyAnalyzer {
    *
    * 包含当前项目和 workspace 级别的别名
    */
-  private async getExistingAliasNames(packageName: string): Promise<Set<string>> {
+  private getExistingAliasNames(packageName: string): Set<string> {
     const names = new Set<string>();
 
     // 1. 从当前项目 package.json 的 npm: 协议解析的别名中获取
@@ -1006,7 +1005,7 @@ export class DependencyAnalyzer {
     }
 
     // 2. 从 workspace 级别获取别名名称
-    const workspaceAliases = await this.findWorkspaceAliasesForPackage(packageName);
+    const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
     for (const wsAlias of workspaceAliases) {
       names.add(wsAlias.aliasName);
     }
@@ -1023,6 +1022,9 @@ export class DependencyAnalyzer {
    * - 冲突检测：只检测第一层依赖的 peerDependencies 与主工程的冲突
    * - 重定向范围：声明冲突 peerDep 的包及其所有子依赖都需要重定向
    *   因为这些子依赖内部引用冲突包时，也需要解析到别名版本
+   * - 遇到冲突包（excludeTraversal）时，不加入 collected 也不遍历其子树，
+   *   因为 analyzedDependencies 中存储的是主项目安装的版本（而非冲突库实际需要的版本），
+   *   遍历它们会引入无关包（如 vue-router@5 的 peerDep pinia）
    *
    * 性能优化：优先从 analyzedDependencies 内存数据中读取，避免重复磁盘 I/O
    */
@@ -1031,6 +1033,7 @@ export class DependencyAnalyzer {
     visited: Set<string>,
     collected: Set<string>,
     baseDir: string,
+    excludeTraversal?: Set<string>,
   ): void {
     const stack: Array<{ name: string; baseDir: string }> = [{ name: packageName, baseDir }];
 
@@ -1040,6 +1043,10 @@ export class DependencyAnalyzer {
 
       const name = item.name;
       const currentBaseDir = item.baseDir;
+
+      if (excludeTraversal?.has(name)) {
+        continue;
+      }
 
       collected.add(name);
 
@@ -1094,7 +1101,13 @@ export class DependencyAnalyzer {
    * 收集多个包的所有子依赖（用于 allDependents）
    * 包括 dependencies 和 peerDependencies 递归下去的所有包
    */
-  collectAllRelatedPackages(packageNames: string[], excludePackages: string[] = []): string[] {
+  private collectAllRelatedPackages(packageNames: string[], excludePackages: string[] = []): string[] {
+    const cacheKey = JSON.stringify([packageNames.slice().sort(), excludePackages.slice().sort()]);
+    const cached = this.collectCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const collected = new Set<string>();
     const visited = new Set<string>();
     const excludeSet = new Set(excludePackages);
@@ -1105,17 +1118,19 @@ export class DependencyAnalyzer {
         visited,
         collected,
         this.options.projectRoot,
+        excludeSet,
       );
     }
 
-    // 从结果中移除需要排除的包
-    // 这是必要的，因为 peerDependencies 中会包含冲突的目标包名（如 "vue"）
-    // 如果不排除，会导致主工程的 vue 引用也被错误重定向
+    // 防御性兜底：即使 excludeTraversal 已在递归中阻止冲突包进入 collected，
+    // 仍在此处做最终清理，避免未来重构时意外引入错误重定向
     for (const excludePkg of excludeSet) {
       collected.delete(excludePkg);
     }
 
-    return Array.from(collected);
+    const result = Array.from(collected);
+    this.collectCache.set(cacheKey, result);
+    return result;
   }
 
   /**

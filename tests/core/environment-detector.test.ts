@@ -28,116 +28,115 @@ describe('EnvironmentDetector', () => {
   });
 
   describe('getDetectionResult', () => {
-    it('should detect pnpm from packageManager field', async () => {
+    it('should detect pnpm from packageManager field', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         return path.toString().endsWith('package.json');
       });
 
       vi.mocked(readFileSync).mockReturnValue('{"packageManager": "pnpm@8.0.0"}');
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('pnpm');
       expect(result.detectedFrom).toBe('packageJson');
     });
 
-    it('should detect yarn from packageManager field', async () => {
+    it('should detect yarn from packageManager field', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         return path.toString().endsWith('package.json');
       });
 
       vi.mocked(readFileSync).mockReturnValue('{"packageManager": "yarn@3.2.0"}');
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('yarn');
       expect(result.detectedFrom).toBe('packageJson');
     });
 
-    it('should detect npm from packageManager field', async () => {
+    it('should detect npm from packageManager field', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         return path.toString().endsWith('package.json');
       });
 
       vi.mocked(readFileSync).mockReturnValue('{"packageManager": "npm@9.0.0"}');
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('npm');
       expect(result.detectedFrom).toBe('packageJson');
     });
 
-    it('should detect pnpm from pnpm-lock.yaml', async () => {
+    it('should detect pnpm from pnpm-lock.yaml', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString();
         return pathStr.endsWith('pnpm-lock.yaml');
       });
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('pnpm');
       expect(result.detectedFrom).toBe('lockfile');
     });
 
-    it('should detect yarn from yarn.lock', async () => {
+    it('should detect yarn from yarn.lock', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString();
         return pathStr.endsWith('yarn.lock');
       });
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('yarn');
       expect(result.detectedFrom).toBe('lockfile');
     });
 
-    it('should detect npm from package-lock.json', async () => {
+    it('should detect npm from package-lock.json', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString();
         return pathStr.endsWith('package-lock.json');
       });
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('npm');
       expect(result.detectedFrom).toBe('lockfile');
     });
 
-    it('should detect npm from npm-shrinkwrap.json', async () => {
+    it('should detect npm from npm-shrinkwrap.json', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString();
         return pathStr.endsWith('npm-shrinkwrap.json');
       });
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('npm');
       expect(result.detectedFrom).toBe('lockfile');
     });
 
-    it('should default to npm when no lock file found', async () => {
+    it('should default to npm when no lock file found', () => {
       vi.mocked(existsSync).mockReturnValue(false);
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('npm');
       expect(result.detectedFrom).toBe('default');
     });
 
-    it('should search parent directories for lock files', async () => {
+    it('should search parent directories for lock files', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString().replace(/\\/g, '/');
-        // 只在父目录找到 yarn.lock
         return pathStr === '/parent/yarn.lock';
       });
 
-      const result = await new EnvironmentDetector('/parent/child').getDetectionResult();
+      const result = new EnvironmentDetector('/parent/child').getDetectionResult();
 
       expect(result.packageManager).toBe('yarn');
       expect(result.rootDir).toBe('/parent');
     });
 
-    it('should handle invalid packageManager field gracefully', async () => {
+    it('should handle invalid packageManager field gracefully', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString();
         return pathStr.endsWith('package.json');
@@ -145,13 +144,13 @@ describe('EnvironmentDetector', () => {
 
       vi.mocked(readFileSync).mockReturnValue('{"packageManager": "invalid-pm"}');
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('npm');
       expect(result.detectedFrom).toBe('default');
     });
 
-    it('should handle JSON parse error gracefully', async () => {
+    it('should handle JSON parse error gracefully', () => {
       vi.mocked(existsSync).mockImplementation(path => {
         const pathStr = path.toString();
         return pathStr.endsWith('package.json');
@@ -159,7 +158,7 @@ describe('EnvironmentDetector', () => {
 
       vi.mocked(readFileSync).mockReturnValue('invalid json');
 
-      const result = await new EnvironmentDetector('/project').getDetectionResult();
+      const result = new EnvironmentDetector('/project').getDetectionResult();
 
       expect(result.packageManager).toBe('npm');
       expect(result.detectedFrom).toBe('default');

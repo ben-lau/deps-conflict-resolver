@@ -7,6 +7,7 @@ import type {
 import { createLogger } from '../utils/logger';
 import { findPackagePath } from '../utils/fs';
 import { join } from 'path';
+import { LruCache } from '../utils/lru-cache';
 
 const logger = createLogger('alias-manager');
 
@@ -43,6 +44,11 @@ export class AliasManager {
    * 用于在 resolveModule 时避免全量遍历所有规则，提升 dev server/HMR 场景下性能。
    */
   private rulesMap: Map<string, AliasRule[]> = new Map();
+  /**
+   * importer 路径 -> 包名列表 的 LRU 缓存
+   * dev server / HMR 场景下同一 importer 会被反复解析，缓存避免重复字符串拆分
+   */
+  private importerCache = new LruCache<string, string[]>({ maxEntries: 1000 });
 
   constructor(options: ResolvedOptions) {
     this.options = options;
@@ -65,19 +71,30 @@ export class AliasManager {
     this.rulesMap = new Map();
 
     for (const mapping of this.aliasMappings) {
-      let dependents = mapping.allDependents ?? [];
+      const dependents = new Set(mapping.allDependents ?? []);
 
-      // 过滤掉配置中排除的依赖包
+      // 1. 先叠加 includeRedirects：显式强制纳入的包（优先于 exclude 执行）
+      const includeList = this.options.includeRedirects[mapping.originalName] ?? [];
+      if (includeList.length > 0) {
+        for (const dep of includeList) {
+          dependents.add(dep);
+        }
+        logger.debug(`Included redirects for ${mapping.originalName}: ${includeList.join(', ')}`);
+      }
+
+      // 2. 再减去 excludeRedirects：显式排除的包
       const excludeList = this.options.excludeRedirects[mapping.originalName] ?? [];
       if (excludeList.length > 0) {
-        dependents = dependents.filter(dep => !excludeList.includes(dep));
+        for (const dep of excludeList) {
+          dependents.delete(dep);
+        }
         logger.debug(`Excluded redirects for ${mapping.originalName}: ${excludeList.join(', ')}`);
       }
 
       const rule: AliasRule = {
         originalName: mapping.originalName,
         aliasName: mapping.aliasName,
-        dependents: new Set(dependents),
+        dependents,
       };
 
       const list = this.rulesMap.get(rule.originalName);
@@ -131,6 +148,11 @@ export class AliasManager {
    * - /p/node_modules/.pnpm/a@1/node_modules/a/ -> ["a"]（会跳过 ".pnpm"）
    */
   private extractImporterPackages(importer: string): string[] {
+    const cached = this.importerCache.get(importer);
+    if (cached) {
+      return cached;
+    }
+
     const normalized = importer.replace(/\\/g, '/');
     const parts = normalized.split('/');
 
@@ -155,6 +177,7 @@ export class AliasManager {
       packages.push(next);
     }
 
+    this.importerCache.set(importer, packages);
     return packages;
   }
 

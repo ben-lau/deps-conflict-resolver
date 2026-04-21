@@ -38,6 +38,7 @@ describe('PackageInstaller', () => {
     debug: false,
     aliasPrefix: 'aliased-',
     excludeRedirects: {},
+    includeRedirects: {},
   };
 
   let installer: PackageInstaller;
@@ -368,6 +369,7 @@ describe('createPackageInstaller', () => {
       debug: false,
       aliasPrefix: 'aliased-',
       excludeRedirects: {},
+      includeRedirects: {},
     };
 
     const installer = createPackageInstaller(options);

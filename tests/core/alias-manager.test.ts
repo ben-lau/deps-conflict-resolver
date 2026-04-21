@@ -16,6 +16,7 @@ describe('AliasManager', () => {
       debug: false,
       aliasPrefix: 'aliased-',
       excludeRedirects: {},
+      includeRedirects: {},
     };
 
     aliasManager = new AliasManager(mockOptions);
@@ -210,6 +211,143 @@ describe('AliasManager', () => {
         importer,
       });
       expect(result).toBe('aliased-kso-util');
+    });
+  });
+
+  describe('excludeRedirects', () => {
+    const baseMapping: AnalysisResult = {
+      analyzedDependencies: new Map(),
+      peerConflicts: [],
+      aliasMappings: [
+        {
+          originalName: 'vue',
+          aliasName: 'aliased-vue2',
+          installSpec: 'aliased-vue2@npm:vue@2.7.14',
+          resolvedVersion: '2.7.14',
+          usedBy: ['legacy-lib'],
+          allDependents: ['legacy-lib', 'vue-demi', 'pinia'],
+        },
+      ],
+      missingFirstLevelPeers: [],
+    };
+
+    it('should redirect packages in allDependents by default', () => {
+      aliasManager.initFromAnalysisResult(baseMapping);
+
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/legacy-lib/index.js',
+        }),
+      ).toBe('aliased-vue2');
+    });
+
+    it('should not redirect excluded packages', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        excludeRedirects: { vue: ['pinia', 'vue-demi'] },
+      });
+      manager.initFromAnalysisResult(baseMapping);
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/pinia/index.js',
+        }),
+      ).toBeNull();
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/vue-demi/index.js',
+        }),
+      ).toBeNull();
+    });
+
+    it('should still redirect non-excluded packages after exclusion', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        excludeRedirects: { vue: ['pinia', 'vue-demi'] },
+      });
+      manager.initFromAnalysisResult(baseMapping);
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/legacy-lib/index.js',
+        }),
+      ).toBe('aliased-vue2');
+    });
+  });
+
+  describe('includeRedirects', () => {
+    const baseMappingWithoutExtra: AnalysisResult = {
+      analyzedDependencies: new Map(),
+      peerConflicts: [],
+      aliasMappings: [
+        {
+          originalName: 'vue',
+          aliasName: 'aliased-vue2',
+          installSpec: 'aliased-vue2@npm:vue@2.7.14',
+          resolvedVersion: '2.7.14',
+          usedBy: ['legacy-lib'],
+          allDependents: ['legacy-lib'],
+        },
+      ],
+      missingFirstLevelPeers: [],
+    };
+
+    it('should redirect explicitly included packages not in allDependents', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        includeRedirects: { vue: ['loose-semver-pkg', '@kmt/meeting-setting'] },
+      });
+      manager.initFromAnalysisResult(baseMappingWithoutExtra);
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/loose-semver-pkg/index.js',
+        }),
+      ).toBe('aliased-vue2');
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/@kmt/meeting-setting/index.js',
+        }),
+      ).toBe('aliased-vue2');
+    });
+
+    it('should not affect packages not in includeRedirects', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        includeRedirects: { vue: ['loose-semver-pkg'] },
+      });
+      manager.initFromAnalysisResult(baseMappingWithoutExtra);
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/unrelated-pkg/index.js',
+        }),
+      ).toBeNull();
+    });
+
+    it('should apply include before exclude (exclude wins when both specify same package)', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        includeRedirects: { vue: ['shared-pkg'] },
+        excludeRedirects: { vue: ['shared-pkg'] },
+      });
+      manager.initFromAnalysisResult(baseMappingWithoutExtra);
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/shared-pkg/index.js',
+        }),
+      ).toBeNull();
     });
   });
 });

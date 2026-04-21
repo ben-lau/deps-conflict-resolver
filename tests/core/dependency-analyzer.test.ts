@@ -21,6 +21,7 @@ describe('DependencyAnalyzer', () => {
       debug: false,
       aliasPrefix: 'aliased-',
       excludeRedirects: {},
+      includeRedirects: {},
     };
 
     mockMainPackageJson = {
@@ -104,6 +105,7 @@ describe('DependencyAnalyzer declared-only peer conflict gating', () => {
       debug: false,
       aliasPrefix: 'aliased-',
       excludeRedirects: {},
+      includeRedirects: {},
     };
 
     // 主工程只声明了 package-a（未声明 peer-x）
@@ -226,9 +228,8 @@ describe('DependencyAnalyzer workspace declared merging', () => {
         debug: false,
         aliasPrefix: 'aliased-',
         excludeRedirects: {},
+        includeRedirects: {},
       };
-
-      // 预填充已安装版本（避免真实 node_modules 查找）
       const installedDeps: Map<string, InstalledPackageInfo> = new Map([
         [
           'peer-x',
@@ -291,6 +292,7 @@ describe('DependencyAnalyzer Edge Cases', () => {
       debug: false,
       aliasPrefix: 'aliased-',
       excludeRedirects: {},
+      includeRedirects: {},
     };
 
     const analyzer = new DependencyAnalyzer(
@@ -317,6 +319,7 @@ describe('DependencyAnalyzer Alias Detection', () => {
     debug: false,
     aliasPrefix: 'aliased-',
     excludeRedirects: {},
+    includeRedirects: {},
   };
 
   describe('findExistingAlias via npm alias (realName)', () => {
@@ -911,5 +914,155 @@ describe('DependencyAnalyzer Alias Detection', () => {
       expect(newResult?.name).toBe('vue2');
       expect(newResult?.version).toBe('2.7.16');
     });
+  });
+});
+
+describe('Regression: collectAllRelatedPackages excludePackages', () => {
+  const baseOptions: ResolvedOptions = {
+    dependencies: ['legacy-lib'],
+    projectRoot: '/test/project',
+    autoInstall: true,
+    packageManager: 'npm',
+    registry: 'https://registry.npmjs.org',
+    debug: false,
+    aliasPrefix: 'aliased-',
+    excludeRedirects: {},
+    includeRedirects: {},
+  };
+
+  it('should never include excludePackages in result (pinia scenario)', () => {
+    const analyzer = new DependencyAnalyzer(
+      baseOptions,
+      { name: 'test', version: '1.0.0', dependencies: { vue: '^3.0.0', 'vue-router': '^5.0.0' } },
+      new Map(),
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ad = (analyzer as any).analyzedDependencies as Map<string, any>;
+
+    ad.set('legacy-lib', {
+      name: 'legacy-lib',
+      version: '1.0.0',
+      dependencyPath: [],
+      dependencies: {},
+      peerDependencies: { vue: '^2.0.0', 'vue-router': '^3.0.0' },
+    });
+    ad.set('vue', {
+      name: 'vue',
+      version: '3.2.0',
+      dependencyPath: [],
+      dependencies: {},
+      peerDependencies: {},
+    });
+    ad.set('vue-router', {
+      name: 'vue-router',
+      version: '5.0.4',
+      dependencyPath: [],
+      dependencies: {},
+      peerDependencies: { vue: '^3.3.0', pinia: '^3.0.0' },
+    });
+    ad.set('pinia', {
+      name: 'pinia',
+      version: '3.0.1',
+      dependencyPath: [],
+      dependencies: {},
+      peerDependencies: { vue: '^3.3.0' },
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
+    const result = (analyzer as any).collectAllRelatedPackages(
+      ['legacy-lib'],
+      ['vue', 'vue-router'],
+    ) as string[];
+
+    expect(result).not.toContain('vue');
+    expect(result).not.toContain('vue-router');
+    // pinia is a sub-dep of vue-router (excluded), so it should NOT be pulled in
+    expect(result).not.toContain('pinia');
+    expect(result).toContain('legacy-lib');
+  });
+
+  it('should still collect non-excluded sub-dependencies', () => {
+    const analyzer = new DependencyAnalyzer(
+      baseOptions,
+      { name: 'test', version: '1.0.0', dependencies: { vue: '^3.0.0' } },
+      new Map(),
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ad = (analyzer as any).analyzedDependencies as Map<string, any>;
+
+    ad.set('legacy-lib', {
+      name: 'legacy-lib',
+      version: '1.0.0',
+      dependencyPath: [],
+      dependencies: { 'sub-a': '^1.0.0' },
+      peerDependencies: { vue: '^2.0.0' },
+    });
+    ad.set('sub-a', {
+      name: 'sub-a',
+      version: '1.0.0',
+      dependencyPath: [],
+      dependencies: { 'sub-b': '^1.0.0' },
+      peerDependencies: {},
+    });
+    ad.set('sub-b', {
+      name: 'sub-b',
+      version: '1.0.0',
+      dependencyPath: [],
+      dependencies: {},
+      peerDependencies: {},
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
+    const result = (analyzer as any).collectAllRelatedPackages(['legacy-lib'], ['vue']) as string[];
+
+    expect(result).toContain('legacy-lib');
+    expect(result).toContain('sub-a');
+    expect(result).toContain('sub-b');
+    expect(result).not.toContain('vue');
+  });
+});
+
+describe('Regression: analysisResult stability after analyze()', () => {
+  it('should return stable analyzedDependencies even after internal cleanup', async () => {
+    const options: ResolvedOptions = {
+      dependencies: ['package-a'],
+      projectRoot: '/test/project',
+      autoInstall: true,
+      packageManager: 'npm',
+      registry: 'https://registry.npmjs.org',
+      debug: false,
+      aliasPrefix: 'aliased-',
+      excludeRedirects: {},
+      includeRedirects: {},
+    };
+
+    const mainPkg: PackageJson = {
+      name: 'test',
+      version: '1.0.0',
+      dependencies: { 'package-a': '^1.0.0' },
+    };
+
+    const analyzer = new DependencyAnalyzer(options, mainPkg, new Map());
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(analyzer as any, 'analyzeDependencyRecursive').mockImplementation(function (this: any) {
+      this.analyzedDependencies.set('package-a', {
+        name: 'package-a',
+        version: '1.0.0',
+        dependencyPath: [],
+        dependencies: {},
+        peerDependencies: {},
+      });
+      return null;
+    });
+
+    const result = await analyzer.analyze();
+
+    expect(result.analyzedDependencies).toBeInstanceOf(Map);
+    expect(result.analyzedDependencies.size).toBe(1);
+    expect(result.analyzedDependencies.get('package-a')).toBeDefined();
+    expect(result.analyzedDependencies.get('package-a')?.version).toBe('1.0.0');
   });
 });

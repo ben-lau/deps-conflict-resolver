@@ -14,10 +14,6 @@ export function clearNpmRegistryCache(): void {
 }
 
 /**
- * 默认的 NPM 注册表地址
- */
-
-/**
  * 带超时的 fetch
  */
 async function fetchWithTimeout(
@@ -64,7 +60,7 @@ async function fetchPackageInfo(
 
     const response = await fetchWithTimeout(url, {
       headers: {
-        Accept: 'application/json',
+        Accept: 'application/vnd.npm.install-v1+json',
       },
     });
 

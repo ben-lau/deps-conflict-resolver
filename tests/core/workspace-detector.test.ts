@@ -26,7 +26,7 @@ describe('WorkspaceDetector', () => {
   });
 
   describe('detect', () => {
-    it('should detect pnpm workspace with catalog', async () => {
+    it('should detect pnpm workspace with catalog', () => {
       // Mock pnpm-workspace.yaml exists at workspace root
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
@@ -53,7 +53,7 @@ catalogs:
         throw new Error('File not found');
       });
 
-      const result = await detector.detect();
+      const result = detector.detect();
 
       expect(result.isMonorepo).toBe(true);
       expect(result.workspaceType).toBe('pnpm');
@@ -71,7 +71,7 @@ catalogs:
       });
     });
 
-    it('should detect yarn workspace', async () => {
+    it('should detect yarn workspace', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'package.json')) return true;
         if (path === join(workspaceRoot, 'yarn.lock')) return true;
@@ -88,14 +88,14 @@ catalogs:
         throw new Error('File not found');
       });
 
-      const result = await detector.detect();
+      const result = detector.detect();
 
       expect(result.isMonorepo).toBe(true);
       expect(result.workspaceType).toBe('yarn');
       expect(result.workspaceRoot).toBe(workspaceRoot);
     });
 
-    it('should detect npm workspace', async () => {
+    it('should detect npm workspace', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'package.json')) return true;
         // No yarn.lock
@@ -113,16 +113,16 @@ catalogs:
         throw new Error('File not found');
       });
 
-      const result = await detector.detect();
+      const result = detector.detect();
 
       expect(result.isMonorepo).toBe(true);
       expect(result.workspaceType).toBe('npm');
     });
 
-    it('should return not monorepo when no workspace config found', async () => {
+    it('should return not monorepo when no workspace config found', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
-      const result = await detector.detect();
+      const result = detector.detect();
 
       expect(result.isMonorepo).toBe(false);
       expect(result.workspaceType).toBe('none');
@@ -158,7 +158,7 @@ catalogs:
     });
 
     it('should resolve catalog: to default catalog', async () => {
-      const result = await detector.resolveCatalogVersion('vue', 'catalog:');
+      const result = detector.resolveCatalogVersion('vue', 'catalog:');
 
       expect(result.success).toBe(true);
       expect(result.resolved).toBe('^3.4.0');
@@ -166,7 +166,7 @@ catalogs:
     });
 
     it('should resolve catalog:default to default catalog', async () => {
-      const result = await detector.resolveCatalogVersion('react', 'catalog:default');
+      const result = detector.resolveCatalogVersion('react', 'catalog:default');
 
       expect(result.success).toBe(true);
       expect(result.resolved).toBe('^18.2.0');
@@ -174,7 +174,7 @@ catalogs:
     });
 
     it('should resolve named catalog (catalog:react17)', async () => {
-      const result = await detector.resolveCatalogVersion('react', 'catalog:react17');
+      const result = detector.resolveCatalogVersion('react', 'catalog:react17');
 
       expect(result.success).toBe(true);
       expect(result.resolved).toBe('^17.0.2');
@@ -182,14 +182,14 @@ catalogs:
     });
 
     it('should fail when package not in catalog', async () => {
-      const result = await detector.resolveCatalogVersion('lodash', 'catalog:');
+      const result = detector.resolveCatalogVersion('lodash', 'catalog:');
 
       expect(result.success).toBe(false);
       expect(result.resolved).toBeNull();
     });
 
     it('should fail when named catalog not found', async () => {
-      const result = await detector.resolveCatalogVersion('vue', 'catalog:unknown');
+      const result = detector.resolveCatalogVersion('vue', 'catalog:unknown');
 
       expect(result.success).toBe(false);
       expect(result.resolved).toBeNull();
@@ -215,27 +215,27 @@ catalog:
     });
 
     it('should resolve catalog: protocol', async () => {
-      const result = await detector.resolveVersionSpec('vue', 'catalog:');
+      const result = detector.resolveVersionSpec('vue', 'catalog:');
       expect(result).toBe('^3.4.0');
     });
 
     it('should resolve workspace: protocol to *', async () => {
-      const result = await detector.resolveVersionSpec('internal-pkg', 'workspace:*');
+      const result = detector.resolveVersionSpec('internal-pkg', 'workspace:*');
       expect(result).toBe('*');
     });
 
     it('should resolve npm: protocol to version', async () => {
-      const result = await detector.resolveVersionSpec('aliased-vue', 'npm:vue@^2.7.0');
+      const result = detector.resolveVersionSpec('aliased-vue', 'npm:vue@^2.7.0');
       expect(result).toBe('^2.7.0');
     });
 
     it('should return normal version as-is', async () => {
-      const result = await detector.resolveVersionSpec('lodash', '^4.17.21');
+      const result = detector.resolveVersionSpec('lodash', '^4.17.21');
       expect(result).toBe('^4.17.21');
     });
 
     it('should return * for file: protocol', async () => {
-      const result = await detector.resolveVersionSpec('local-pkg', 'file:../local');
+      const result = detector.resolveVersionSpec('local-pkg', 'file:../local');
       expect(result).toBe('*');
     });
   });
@@ -270,7 +270,7 @@ catalog:
   });
 
   describe('findWorkspaceAliases', () => {
-    it('should find aliases in pnpm catalog', async () => {
+    it('should find aliases in pnpm catalog', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
@@ -299,7 +299,7 @@ catalog:
         throw new Error('File not found');
       });
 
-      const aliases = await detector.findWorkspaceAliases('vue');
+      const aliases = detector.findWorkspaceAliases('vue');
 
       expect(aliases).toHaveLength(1);
       expect(aliases[0]).toMatchObject({
@@ -310,7 +310,7 @@ catalog:
       });
     });
 
-    it('should find aliases in named catalogs', async () => {
+    it('should find aliases in named catalogs', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
@@ -336,7 +336,7 @@ catalogs:
         throw new Error('File not found');
       });
 
-      const aliases = await detector.findWorkspaceAliases('vue');
+      const aliases = detector.findWorkspaceAliases('vue');
 
       expect(aliases).toHaveLength(1);
       expect(aliases[0]).toMatchObject({
@@ -346,7 +346,7 @@ catalogs:
         isWorkspaceRoot: true,
       });
 
-      const routerAliases = await detector.findWorkspaceAliases('vue-router');
+      const routerAliases = detector.findWorkspaceAliases('vue-router');
       expect(routerAliases).toHaveLength(1);
       expect(routerAliases[0]).toMatchObject({
         aliasName: 'vue-router',
@@ -355,7 +355,7 @@ catalogs:
       });
     });
 
-    it('should find aliases in workspace root package.json', async () => {
+    it('should find aliases in workspace root package.json', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
@@ -378,7 +378,7 @@ catalogs:
         throw new Error('File not found');
       });
 
-      const aliases = await detector.findWorkspaceAliases('vue');
+      const aliases = detector.findWorkspaceAliases('vue');
 
       expect(aliases).toHaveLength(2);
       expect(aliases[0]).toMatchObject({
@@ -395,7 +395,7 @@ catalogs:
       });
     });
 
-    it('should return empty array when no aliases found', async () => {
+    it('should return empty array when no aliases found', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
@@ -416,13 +416,13 @@ catalogs:
         throw new Error('File not found');
       });
 
-      const aliases = await detector.findWorkspaceAliases('vue');
+      const aliases = detector.findWorkspaceAliases('vue');
       expect(aliases).toHaveLength(0);
     });
   });
 
   describe('parseSimpleYaml', () => {
-    it('should parse pnpm-workspace.yaml with quotes', async () => {
+    it('should parse pnpm-workspace.yaml with quotes', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
@@ -443,7 +443,7 @@ catalog:
         throw new Error('File not found');
       });
 
-      const result = await detector.detect();
+      const result = detector.detect();
 
       expect(result.catalog).toEqual({
         vue: '^3.4.0',
@@ -451,7 +451,7 @@ catalog:
       });
     });
 
-    it('should handle empty catalog', async () => {
+    it('should handle empty catalog', () => {
       vi.mocked(fs.existsSync).mockImplementation(path => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
@@ -467,7 +467,7 @@ packages:
         throw new Error('File not found');
       });
 
-      const result = await detector.detect();
+      const result = detector.detect();
 
       expect(result.catalog).toBeUndefined();
     });

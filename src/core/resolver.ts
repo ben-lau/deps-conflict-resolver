@@ -61,10 +61,9 @@ export class DepsConflictResolver {
     // 创建环境检测器
     this.environmentDetector = createEnvironmentDetector(projectRoot);
 
-    // 检测包管理器
     let packageManager: 'npm' | 'yarn' | 'pnpm';
     if (!userOptions.packageManager || userOptions.packageManager === 'auto') {
-      const detected = await this.environmentDetector.getDetectionResult();
+      const detected = this.environmentDetector.getDetectionResult();
       packageManager = detected.packageManager;
       logger.info(
         `Auto-detected package manager: ${packageManager} (from ${detected.detectedFrom})`,
@@ -94,6 +93,7 @@ export class DepsConflictResolver {
       debug: userOptions.debug ?? DEFAULT_OPTIONS.debug,
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
       excludeRedirects: userOptions.excludeRedirects ?? {},
+      includeRedirects: userOptions.includeRedirects ?? {},
     };
   }
 
@@ -151,6 +151,9 @@ export class DepsConflictResolver {
     if (this.options.autoInstall) {
       await this.installDependencies();
     }
+
+    // 分析器在初始化完成后不再使用，释放以允许 GC 回收其内部状态
+    this.analyzer = null;
 
     this.initialized = true;
     logger.info('Dependencies resolver initialized');
