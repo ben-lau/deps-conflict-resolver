@@ -1,5 +1,7 @@
 # deps-conflict-resolver
 
+> [English Documentation](./README.en.md)
+
 一个支持 Webpack 和 Vite 的插件，自动解析 peer 依赖冲突，通过创建别名来支持不同版本的依赖共存。
 
 ## 功能特性
