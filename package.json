@@ -108,7 +108,7 @@
     "oxlint-tsgolint": "^0.23.0",
     "publint": "^0.3.21",
     "tsup": "^8.0.1",
-    "typescript": "^5.3.2",
+    "typescript": "^6.0.3",
     "vite": "^7.2.7",
     "vitest": "^4.0.16",
     "webpack": "^5.103.0"
