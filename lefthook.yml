@@ -1,0 +1,16 @@
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      glob: '*.{ts,js}'
+      run: npx oxlint --type-aware --deny-warnings {staged_files}
+      stage_fixed: true
+    fmt:
+      glob: '*.{ts,js,json,md}'
+      run: npx oxfmt {staged_files}
+      stage_fixed: true
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx commitlint --edit {1}

@@ -9,15 +9,14 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       enabled: false, // 使用 --coverage 标志时启用
-      reporter: ['text'], // 只输出到终端，不生成文件
+      reporter: ['text', 'lcov'],
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.d.ts', 'src/types/**', 'src/**/*.test.ts', 'src/**/__tests__/**'],
-      // 覆盖率阈值（可根据需要逐步提升）
       thresholds: {
-        lines: 30,
-        functions: 40,
-        branches: 20,
-        statements: 30,
+        lines: 70,
+        functions: 75,
+        branches: 60,
+        statements: 70,
       },
       // 清除之前的覆盖率数据
       clean: true,

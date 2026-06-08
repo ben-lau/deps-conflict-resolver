@@ -281,7 +281,7 @@ export class DependencyAnalyzer {
       // 5. 找出缺失的 peer 依赖（仅记录，不自动安装）
       const missingFirstLevelPeers = this.findMissingFirstLevelPeers(peerDepsMap);
 
-      const conflictsNeedingAlias = peerConflicts.filter(c => c.needsAlias).length;
+      const conflictsNeedingAlias = peerConflicts.filter((c) => c.needsAlias).length;
       logger.info(
         `Analysis complete. Found ${conflictsNeedingAlias} first-level peer conflicts needing alias, ` +
           `${missingFirstLevelPeers.length} missing peers (not auto-installing). ` +
@@ -469,9 +469,7 @@ export class DependencyAnalyzer {
    * 分析 peer 依赖冲突
    * 只有当主工程已安装某个依赖，且 peerDeps 要求的版本不兼容时，才需要别名
    */
-  private analyzePeerConflicts(
-    peerDepsMap: Map<string, DependencyPath[]>,
-  ): PeerConflict[] {
+  private analyzePeerConflicts(peerDepsMap: Map<string, DependencyPath[]>): PeerConflict[] {
     const conflicts: PeerConflict[] = [];
 
     for (const [packageName, requestedBy] of peerDepsMap) {
@@ -489,7 +487,7 @@ export class DependencyAnalyzer {
 
       for (const request of requestedBy) {
         const resolvedRange =
-          (this.workspaceDetector.resolveVersionSpec(packageName, request.requiredRange)) ??
+          this.workspaceDetector.resolveVersionSpec(packageName, request.requiredRange) ??
           request.requiredRange;
 
         if (mainVersion && satisfies(mainVersion, resolvedRange)) {
@@ -559,7 +557,7 @@ export class DependencyAnalyzer {
    * 合并多个版本范围为描述字符串
    */
   private mergeRequiredRanges(requests: DependencyPath[]): string {
-    const ranges = [...new Set(requests.map(r => r.requiredRange))];
+    const ranges = [...new Set(requests.map((r) => r.requiredRange))];
     return ranges.join(' || ');
   }
 
@@ -570,10 +568,10 @@ export class DependencyAnalyzer {
     const aliasMappings: AliasMapping[] = [];
 
     // 按包名分组需要别名的冲突
-    const aliasNeeded = conflicts.filter(c => c.needsAlias);
+    const aliasNeeded = conflicts.filter((c) => c.needsAlias);
 
     // 收集所有冲突包的名称
-    const allConflictPackageNames = aliasNeeded.map(c => c.packageName);
+    const allConflictPackageNames = aliasNeeded.map((c) => c.packageName);
 
     // 对于每个需要别名的包
     for (const conflict of aliasNeeded) {
@@ -649,7 +647,7 @@ export class DependencyAnalyzer {
       const group = rangeGroups[i];
       if (!group || group.length === 0) continue;
 
-      const groupRanges = [...new Set(group.map(r => r.requiredRange))];
+      const groupRanges = [...new Set(group.map((r) => r.requiredRange))];
 
       logger.debug(`  Group ${i + 1}: ${groupRanges.join(', ')}`);
 
@@ -686,7 +684,7 @@ export class DependencyAnalyzer {
       // 尝试加入现有组
       for (const group of groups) {
         // 检查是否与组内所有范围都有交集
-        const canJoin = group.every(existing =>
+        const canJoin = group.every((existing) =>
           rangesIntersect(existing.requiredRange, request.requiredRange),
         );
 
@@ -719,11 +717,7 @@ export class DependencyAnalyzer {
     allConflictPackageNames: string[],
   ): AliasMapping | null {
     // 1. 先检查是否有现有别名可复用（包括 workspace 级别）
-    const existingAlias = this.findExistingAliasForRanges(
-      packageName,
-      groupRanges,
-      usedAliasNames,
-    );
+    const existingAlias = this.findExistingAliasForRanges(packageName, groupRanges, usedAliasNames);
 
     if (existingAlias) {
       logger.debug(
@@ -779,11 +773,11 @@ export class DependencyAnalyzer {
     allConflictPackageNames: string[],
   ): AliasMapping {
     // usedBy 包含声明 peerDependency 的包路径
-    const usedBy = group.map(r => r.path.join('>'));
+    const usedBy = group.map((r) => r.path.join('>'));
 
     // 收集 usedBy 中第一层包作为起点
     const usedByRoots = [
-      ...new Set(group.map(r => r.path[0]).filter((p): p is string => p !== undefined)),
+      ...new Set(group.map((r) => r.path[0]).filter((p): p is string => p !== undefined)),
     ];
 
     // 收集 usedByRoots 子树（dependencies + peerDependencies 递归）用于重定向。
@@ -831,9 +825,7 @@ export class DependencyAnalyzer {
         }
 
         // 获取或更新已安装版本
-        if (alias.installedVersion === null) {
-          alias.installedVersion = this.getAliasInstalledVersion(alias.aliasName);
-        }
+        alias.installedVersion ??= this.getAliasInstalledVersion(alias.aliasName);
 
         if (!alias.installedVersion) {
           logger.debug(`    Skip ${alias.aliasName}: not installed`);
@@ -841,7 +833,7 @@ export class DependencyAnalyzer {
         }
 
         // 检查版本是否满足所有范围
-        const allSatisfied = ranges.every(range => satisfies(alias.installedVersion!, range));
+        const allSatisfied = ranges.every((range) => satisfies(alias.installedVersion!, range));
 
         if (allSatisfied) {
           logger.info(`    Reusing local alias: ${alias.aliasName}@${alias.installedVersion}`);
@@ -892,7 +884,7 @@ export class DependencyAnalyzer {
 
       // 如果已安装，用实际版本检查
       if (installedVersion) {
-        const allSatisfied = ranges.every(range => satisfies(installedVersion, range));
+        const allSatisfied = ranges.every((range) => satisfies(installedVersion, range));
         if (allSatisfied) {
           logger.info(`    Reusing workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
           return {
@@ -916,7 +908,7 @@ export class DependencyAnalyzer {
           `    Checking ${wsAlias.aliasName} (declared: ${declaredSpec}) - not installed yet`,
         );
         // 检查声明的版本范围与需求范围是否有交集
-        const hasIntersection = ranges.every(range => rangesIntersect(declaredSpec, range));
+        const hasIntersection = ranges.every((range) => rangesIntersect(declaredSpec, range));
         if (hasIntersection) {
           logger.info(
             `    Can reuse workspace alias: ${wsAlias.aliasName} (declared: ${declaredSpec})`,
@@ -1101,7 +1093,10 @@ export class DependencyAnalyzer {
    * 收集多个包的所有子依赖（用于 allDependents）
    * 包括 dependencies 和 peerDependencies 递归下去的所有包
    */
-  private collectAllRelatedPackages(packageNames: string[], excludePackages: string[] = []): string[] {
+  private collectAllRelatedPackages(
+    packageNames: string[],
+    excludePackages: string[] = [],
+  ): string[] {
     const cacheKey = JSON.stringify([packageNames.slice().sort(), excludePackages.slice().sort()]);
     const cached = this.collectCache.get(cacheKey);
     if (cached) {

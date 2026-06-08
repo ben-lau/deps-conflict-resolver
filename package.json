@@ -2,15 +2,43 @@
   "name": "deps-conflict-resolver",
   "version": "1.1.0",
   "description": "A webpack/vite plugin that automatically resolves peer dependency conflicts by creating aliases for conflicting versions",
+  "keywords": [
+    "alias",
+    "dependency-resolver",
+    "peer-dependencies",
+    "plugin",
+    "vite",
+    "vue2",
+    "vue3",
+    "webpack"
+  ],
+  "license": "MIT",
   "author": {
     "name": "ben-lau",
     "email": "408736066@qq.com",
     "url": "https://github.com/ben-lau"
   },
+  "files": [
+    "dist"
+  ],
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      ".": [
+        "./dist/index.d.ts"
+      ],
+      "webpack": [
+        "./dist/webpack.d.ts"
+      ],
+      "vite": [
+        "./dist/vite.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "import": {
@@ -43,64 +71,47 @@
       }
     }
   },
-  "typesVersions": {
-    "*": {
-      ".": [
-        "./dist/index.d.ts"
-      ],
-      "webpack": [
-        "./dist/webpack.d.ts"
-      ],
-      "vite": [
-        "./dist/vite.d.ts"
-      ]
-    }
+  "publishConfig": {
+    "access": "public"
   },
-  "files": [
-    "dist"
-  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint src --ext .ts",
+    "lint": "oxlint --type-aware --deny-warnings .",
+    "lint:fix": "oxlint --type-aware --fix .",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
     "typecheck": "tsc --noEmit",
-    "release": "release-it",
-    "release:dry": "release-it --dry-run",
+    "publint": "publint",
+    "attw": "attw --pack --entrypoints .",
+    "prepare": "lefthook install",
     "prepublishOnly": "npm run build"
   },
-  "keywords": [
-    "webpack",
-    "vite",
-    "plugin",
-    "peer-dependencies",
-    "dependency-resolver",
-    "vue2",
-    "vue3",
-    "alias"
-  ],
-  "license": "MIT",
+  "dependencies": {
+    "semver": "^7.5.4",
+    "yaml": "^2.8.2"
+  },
   "devDependencies": {
-    "@release-it/conventional-changelog": "^10.0.1",
+    "@arethetypeswrong/cli": "^0.18.3",
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
     "@types/node": "^20.10.0",
     "@types/semver": "^7.5.6",
-    "@typescript-eslint/eslint-plugin": "^6.13.0",
-    "@typescript-eslint/parser": "^6.13.0",
     "@vitest/coverage-v8": "^4.0.16",
     "esbuild": "^0.27.4",
-    "eslint": "^8.55.0",
-    "release-it": "^19.2.4",
+    "lefthook": "^2.1.9",
+    "oxfmt": "^0.53.0",
+    "oxlint": "^1.68.0",
+    "oxlint-tsgolint": "^0.23.0",
+    "publint": "^0.3.21",
     "tsup": "^8.0.1",
     "typescript": "^5.3.2",
     "vite": "^7.2.7",
     "vitest": "^4.0.16",
     "webpack": "^5.103.0"
-  },
-  "dependencies": {
-    "semver": "^7.5.4",
-    "yaml": "^2.8.2"
   },
   "peerDependencies": {
     "vite": ">=4.0.0",

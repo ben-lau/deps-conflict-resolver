@@ -24,13 +24,20 @@ yarn-error.log*
 coverage/
 
 # Environment
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
 
 # Cache
 .cache/
 .npm/
 .eslintcache
 *.tsbuildinfo
+.pnpm-debug.log*
+
+# Local config
+*.local
+
+# Playwright
+**/playwright-report
+**/test-results
 

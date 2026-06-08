@@ -28,12 +28,12 @@ describe('WorkspaceDetector', () => {
   describe('detect', () => {
     it('should detect pnpm workspace with catalog', () => {
       // Mock pnpm-workspace.yaml exists at workspace root
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `
 packages:
@@ -72,13 +72,13 @@ catalogs:
     });
 
     it('should detect yarn workspace', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'package.json')) return true;
         if (path === join(workspaceRoot, 'yarn.lock')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'package.json')) {
           return JSON.stringify({
             name: 'monorepo',
@@ -96,14 +96,14 @@ catalogs:
     });
 
     it('should detect npm workspace', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'package.json')) return true;
         // No yarn.lock
         if (path === join(workspaceRoot, 'yarn.lock')) return false;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'package.json')) {
           return JSON.stringify({
             name: 'monorepo',
@@ -133,12 +133,12 @@ catalogs:
   describe('resolveCatalogVersion', () => {
     beforeEach(() => {
       // Setup pnpm workspace with catalog
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `
 packages:
@@ -198,12 +198,12 @@ catalogs:
 
   describe('resolveVersionSpec', () => {
     beforeEach(() => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `
 catalog:
@@ -271,13 +271,13 @@ catalog:
 
   describe('findWorkspaceAliases', () => {
     it('should find aliases in pnpm catalog', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `packages:
   - packages/*
@@ -311,13 +311,13 @@ catalog:
     });
 
     it('should find aliases in named catalogs', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `packages:
   - packages/*
@@ -356,13 +356,13 @@ catalogs:
     });
 
     it('should find aliases in workspace root package.json', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return 'packages:\n  - packages/*';
         }
@@ -396,13 +396,13 @@ catalogs:
     });
 
     it('should return empty array when no aliases found', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         if (path === join(workspaceRoot, 'package.json')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return 'packages:\n  - packages/*';
         }
@@ -423,12 +423,12 @@ catalogs:
 
   describe('parseSimpleYaml', () => {
     it('should parse pnpm-workspace.yaml with quotes', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `
 packages:
@@ -452,12 +452,12 @@ catalog:
     });
 
     it('should handle empty catalog', () => {
-      vi.mocked(fs.existsSync).mockImplementation(path => {
+      vi.mocked(fs.existsSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) return true;
         return false;
       });
 
-      vi.mocked(fs.readFileSync).mockImplementation(path => {
+      vi.mocked(fs.readFileSync).mockImplementation((path) => {
         if (path === join(workspaceRoot, 'pnpm-workspace.yaml')) {
           return `
 packages:

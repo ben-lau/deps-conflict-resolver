@@ -157,7 +157,7 @@ describe('DependencyAnalyzer declared-only peer conflict gating', () => {
     const result = await analyzer.analyze();
 
     // peer-x 未声明：needsAlias 必须为 false
-    const peerX = result.peerConflicts.find(c => c.packageName === 'peer-x');
+    const peerX = result.peerConflicts.find((c) => c.packageName === 'peer-x');
     expect(peerX).toBeDefined();
     expect(peerX?.needsAlias).toBe(false);
 
@@ -271,7 +271,7 @@ describe('DependencyAnalyzer workspace declared merging', () => {
       // peer-x 虽然没在子包声明，但在 workspace root 声明：不应被标记为 missing
       expect(result.missingFirstLevelPeers).toHaveLength(0);
 
-      const peerX = result.peerConflicts.find(c => c.packageName === 'peer-x');
+      const peerX = result.peerConflicts.find((c) => c.packageName === 'peer-x');
       expect(peerX).toBeDefined();
       expect(peerX?.needsAlias).toBe(false);
       expect(peerX?.mainProjectVersion).toBe('2.0.0');
@@ -1047,16 +1047,18 @@ describe('Regression: analysisResult stability after analyze()', () => {
     const analyzer = new DependencyAnalyzer(options, mainPkg, new Map());
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    vi.spyOn(analyzer as any, 'analyzeDependencyRecursive').mockImplementation(function (this: any) {
-      this.analyzedDependencies.set('package-a', {
-        name: 'package-a',
-        version: '1.0.0',
-        dependencyPath: [],
-        dependencies: {},
-        peerDependencies: {},
-      });
-      return null;
-    });
+    vi.spyOn(analyzer as any, 'analyzeDependencyRecursive').mockImplementation(
+      function (this: any) {
+        this.analyzedDependencies.set('package-a', {
+          name: 'package-a',
+          version: '1.0.0',
+          dependencyPath: [],
+          dependencies: {},
+          peerDependencies: {},
+        });
+        return null;
+      },
+    );
 
     const result = await analyzer.analyze();
 

@@ -44,7 +44,7 @@ function extractAliasesFromDeps(
     if (existingAliases.has(aliasName)) continue;
 
     const parsed = parseNpmAlias(versionSpec);
-    if (parsed && parsed[0] === targetPackage) {
+    if (parsed?.[0] === targetPackage) {
       aliases.push({
         aliasName,
         targetPackage,
@@ -97,10 +97,7 @@ export class WorkspaceDetector {
    * @param packageName 包名
    * @param versionSpec 版本规格（如 "catalog:" 或 "catalog:react17"）
    */
-  resolveCatalogVersion(
-    packageName: string,
-    versionSpec: string,
-  ): CatalogResolution {
+  resolveCatalogVersion(packageName: string, versionSpec: string): CatalogResolution {
     const result: CatalogResolution = {
       original: versionSpec,
       resolved: null,

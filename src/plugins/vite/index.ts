@@ -79,7 +79,7 @@ function createEsbuildAliasPlugin(
 
       // 收敛为一个 onResolve，避免为每个包注册两次 handler
       const originalNames = Array.from(
-        new Set(analysisResult.aliasMappings.map(m => m.originalName)),
+        new Set(analysisResult.aliasMappings.map((m) => m.originalName)),
       );
 
       const filter = new RegExp(`^(${originalNames.map(escapeRegex).join('|')})(?:/.*)?$`);
@@ -87,7 +87,7 @@ function createEsbuildAliasPlugin(
       // 检查 build.resolve 是否可用（esbuild 0.17+）
       const hasResolveApi = typeof build.resolve === 'function';
 
-      build.onResolve({ filter }, async args => {
+      build.onResolve({ filter }, async (args) => {
         if (!args.importer) {
           return null;
         }
@@ -178,7 +178,7 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
       logger.info(`Configured ${aliasMappings.length} alias redirections`);
 
       // 收集需要包含在 optimizeDeps 中的别名包
-      const aliasPackages = Array.from(new Set(aliasMappings.map(m => m.aliasName)));
+      const aliasPackages = Array.from(new Set(aliasMappings.map((m) => m.aliasName)));
 
       logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 

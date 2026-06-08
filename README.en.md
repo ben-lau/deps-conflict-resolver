@@ -1,5 +1,9 @@
 # deps-conflict-resolver
 
+[![npm version](https://img.shields.io/npm/v/deps-conflict-resolver.svg)](https://www.npmjs.com/package/deps-conflict-resolver)
+[![CI](https://github.com/ben-lau/deps-conflict-resolver/actions/workflows/ci.yml/badge.svg)](https://github.com/ben-lau/deps-conflict-resolver/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ben-lau/deps-conflict-resolver/branch/main/graph/badge.svg)](https://codecov.io/gh/ben-lau/deps-conflict-resolver)
+
 > [中文文档](./README.md)
 
 A Webpack and Vite plugin that automatically resolves peer dependency conflicts by creating aliases for conflicting versions, allowing different versions of the same dependency to coexist.
@@ -48,9 +52,9 @@ export default defineConfig({
       dependencies: ['legacy-vue2-library'],
 
       // Optional
-      autoInstall: true,          // Auto-install missing aliased dependencies
-      packageManager: 'npm',      // npm | yarn | pnpm
-      debug: false,               // Enable debug logging
+      autoInstall: true, // Auto-install missing aliased dependencies
+      packageManager: 'npm', // npm | yarn | pnpm
+      debug: false, // Enable debug logging
     }),
   ],
 });
@@ -95,17 +99,17 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 ## Configuration
 
-| Option              | Type                                  | Default         | Description                                                                                                                                                                        |
-| ------------------- | ------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dependencies`      | `string[]`                            | -               | **Required.** List of package names to analyze                                                                                                                                     |
-| `projectRoot`       | `string`                              | `process.cwd()` | Project root directory path                                                                                                                                                        |
-| `autoInstall`       | `boolean`                             | `true`          | Whether to auto-install missing aliased dependencies                                                                                                                               |
-| `packageManager`    | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | Package manager type. `'auto'` detects automatically                                                                                                                               |
-| `registry`          | `string`                              | Auto-detected   | npm registry URL. Falls back to `.npmrc` if not specified                                                                                                                          |
-| `debug`             | `boolean`                             | `false`         | Whether to enable debug logging                                                                                                                                                    |
-| `aliasPrefix`       | `string`                              | `'aliased-'`    | Prefix for generated alias names                                                                                                                                                   |
-| `excludeRedirects`  | `Record<string, string[]>`            | `{}`            | Exclude specific packages from the redirect list. Keys are original package names, values are importer package names to exclude. Example: `{ vue: ['vue-demi', 'pinia'] }`          |
-| `includeRedirects`  | `Record<string, string[]>`            | `{}`            | Force specific packages into the redirect list. Applied before `excludeRedirects`. Useful when semver ranges are too broad (e.g., `>=2.5.0`) but the package still needs the older version at runtime. Example: `{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
+| Option             | Type                                  | Default         | Description                                                                                                                                                                                                                                                     |
+| ------------------ | ------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dependencies`     | `string[]`                            | -               | **Required.** List of package names to analyze                                                                                                                                                                                                                  |
+| `projectRoot`      | `string`                              | `process.cwd()` | Project root directory path                                                                                                                                                                                                                                     |
+| `autoInstall`      | `boolean`                             | `true`          | Whether to auto-install missing aliased dependencies                                                                                                                                                                                                            |
+| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | Package manager type. `'auto'` detects automatically                                                                                                                                                                                                            |
+| `registry`         | `string`                              | Auto-detected   | npm registry URL. Falls back to `.npmrc` if not specified                                                                                                                                                                                                       |
+| `debug`            | `boolean`                             | `false`         | Whether to enable debug logging                                                                                                                                                                                                                                 |
+| `aliasPrefix`      | `string`                              | `'aliased-'`    | Prefix for generated alias names                                                                                                                                                                                                                                |
+| `excludeRedirects` | `Record<string, string[]>`            | `{}`            | Exclude specific packages from the redirect list. Keys are original package names, values are importer package names to exclude. Example: `{ vue: ['vue-demi', 'pinia'] }`                                                                                      |
+| `includeRedirects` | `Record<string, string[]>`            | `{}`            | Force specific packages into the redirect list. Applied before `excludeRedirects`. Useful when semver ranges are too broad (e.g., `>=2.5.0`) but the package still needs the older version at runtime. Example: `{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
 
 ### Vite Plugin Exclusive Options
 
@@ -198,12 +202,12 @@ depsConflictResolverVitePlugin({
   dependencies: ['legacy-lib'],
   hooks: {
     // After analysis completes
-    onAnalysisComplete: result => {
+    onAnalysisComplete: (result) => {
       console.log('Found conflicts:', result.peerConflicts);
     },
 
     // After installation completes
-    onInstallComplete: installed => {
+    onInstallComplete: (installed) => {
       console.log('Installed aliases:', installed);
     },
 
@@ -273,20 +277,38 @@ To minimize the public API surface and improve tree-shaking, internal utility fu
 
 ```bash
 # Install dependencies
-npm install
+pnpm install
 
 # Development mode
-npm run dev
+pnpm dev
 
 # Build
-npm run build
+pnpm build
 
 # Run tests
-npm test
+pnpm test
 
 # Type checking
-npm run typecheck
+pnpm typecheck
+
+# Lint
+pnpm lint
+
+# Format
+pnpm fmt
 ```
+
+## Release Process
+
+This project uses [release-please](https://github.com/googleapis/release-please) for automated releases:
+
+1. Merge commits to `main` following [Conventional Commits](https://www.conventionalcommits.org/)
+2. release-please automatically creates/updates a Release PR with changelog
+3. Review and merge the Release PR
+4. A GitHub Release + tag is automatically created
+5. Manually run `npm publish` to publish to npm
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 
 ## License
 

@@ -10,10 +10,7 @@ describe('version-spec utilities', () => {
     });
 
     it('should parse scoped package alias', () => {
-      expect(parseNpmAlias('npm:@vue/reactivity@^3.0.0')).toEqual([
-        '@vue/reactivity',
-        '^3.0.0',
-      ]);
+      expect(parseNpmAlias('npm:@vue/reactivity@^3.0.0')).toEqual(['@vue/reactivity', '^3.0.0']);
       expect(parseNpmAlias('npm:@scope/pkg@1.2.3')).toEqual(['@scope/pkg', '1.2.3']);
     });
 

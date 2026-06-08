@@ -64,7 +64,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       if (this.config.debug) {
         logger.debug(
           'Alias mappings:',
-          this.analysisResult.aliasMappings.map(m => ({
+          this.analysisResult.aliasMappings.map((m) => ({
             original: m.originalName,
             alias: m.aliasName,
             usedBy: m.usedBy,
@@ -161,7 +161,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     });
 
     // 在编译完成后输出信息
-    compiler.hooks.done.tap(PLUGIN_NAME, stats => {
+    compiler.hooks.done.tap(PLUGIN_NAME, (stats) => {
       if (stats.hasErrors()) {
         return;
       }

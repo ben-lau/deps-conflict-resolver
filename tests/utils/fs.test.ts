@@ -121,7 +121,7 @@ describe('fs utils', () => {
 
   describe('findProjectRoot', () => {
     it('should find project root when package.json exists', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path === join('/project/src', 'package.json')
           ? false
           : path === join('/project', 'package.json')
@@ -135,7 +135,7 @@ describe('fs utils', () => {
     });
 
     it('should return starting directory if package.json is there', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path === join('/project', 'package.json');
       });
 
@@ -173,7 +173,7 @@ describe('fs utils', () => {
       } as unknown as NodeRequire);
 
       // 模拟 node_modules 中存在包
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path === join('/project', 'node_modules', 'some-package');
       });
 
@@ -190,7 +190,7 @@ describe('fs utils', () => {
       } as unknown as NodeRequire);
 
       // 假设包在父目录的 node_modules 目录中
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         // Windows 路径兼容
         const normalizedPath = path.toString().replace(/\\/g, '/');
         return normalizedPath.includes('/parent/node_modules/hoisted-pkg');

@@ -1,5 +1,9 @@
 # deps-conflict-resolver
 
+[![npm version](https://img.shields.io/npm/v/deps-conflict-resolver.svg)](https://www.npmjs.com/package/deps-conflict-resolver)
+[![CI](https://github.com/ben-lau/deps-conflict-resolver/actions/workflows/ci.yml/badge.svg)](https://github.com/ben-lau/deps-conflict-resolver/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ben-lau/deps-conflict-resolver/branch/main/graph/badge.svg)](https://codecov.io/gh/ben-lau/deps-conflict-resolver)
+
 > [English Documentation](./README.en.md)
 
 一个支持 Webpack 和 Vite 的插件，自动解析 peer 依赖冲突，通过创建别名来支持不同版本的依赖共存。
@@ -95,24 +99,24 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 ## 配置选项
 
-| 选项                | 类型                                  | 默认值          | 说明                                                                     |
-| ------------------- | ------------------------------------- | --------------- | ------------------------------------------------------------------------ |
-| `dependencies`      | `string[]`                            | -               | **必填**，需要分析的依赖包名列表                                         |
-| `projectRoot`       | `string`                              | `process.cwd()` | 项目根目录路径                                                           |
-| `autoInstall`       | `boolean`                             | `true`          | 是否自动安装缺失的别名依赖                                               |
-| `packageManager`    | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | 包管理器类型，`'auto'` 自动检测                                          |
-| `registry`          | `string`                              | 自动检测        | NPM 注册表地址，不指定则自动从 .npmrc 读取                               |
-| `debug`             | `boolean`                             | `false`         | 是否启用调试日志                                                         |
-| `aliasPrefix`       | `string`                              | `'aliased-'`    | 别名前缀                                                                 |
-| `excludeRedirects`  | `Record<string, string[]>`            | `{}`            | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }` |
-| `includeRedirects`  | `Record<string, string[]>`            | `{}`            | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。适用于 semver 范围写得过宽（如 `>=2.5.0`）但运行时仍依赖旧版本的包。示例：`{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
+| 选项               | 类型                                  | 默认值          | 说明                                                                                                                                                                                  |
+| ------------------ | ------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dependencies`     | `string[]`                            | -               | **必填**，需要分析的依赖包名列表                                                                                                                                                      |
+| `projectRoot`      | `string`                              | `process.cwd()` | 项目根目录路径                                                                                                                                                                        |
+| `autoInstall`      | `boolean`                             | `true`          | 是否自动安装缺失的别名依赖                                                                                                                                                            |
+| `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | 包管理器类型，`'auto'` 自动检测                                                                                                                                                       |
+| `registry`         | `string`                              | 自动检测        | NPM 注册表地址，不指定则自动从 .npmrc 读取                                                                                                                                            |
+| `debug`            | `boolean`                             | `false`         | 是否启用调试日志                                                                                                                                                                      |
+| `aliasPrefix`      | `string`                              | `'aliased-'`    | 别名前缀                                                                                                                                                                              |
+| `excludeRedirects` | `Record<string, string[]>`            | `{}`            | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                        |
+| `includeRedirects` | `Record<string, string[]>`            | `{}`            | 强制将指定包加入重定向列表，优先于 `excludeRedirects` 执行。适用于 semver 范围写得过宽（如 `>=2.5.0`）但运行时仍依赖旧版本的包。示例：`{ vue: ['@rili/ui', '@kmt/meeting-setting'] }` |
 
 ### Vite 插件专属选项
 
-| 选项            | 类型      | 默认值  | 说明                       |
-| --------------- | --------- | ------- | -------------------------- |
-| `enableInDev`   | `boolean` | `true`  | 是否在开发模式（dev）下启用 |
-| `enableInBuild` | `boolean` | `true`  | 是否在构建模式（build）下启用 |
+| 选项            | 类型      | 默认值 | 说明                          |
+| --------------- | --------- | ------ | ----------------------------- |
+| `enableInDev`   | `boolean` | `true` | 是否在开发模式（dev）下启用   |
+| `enableInBuild` | `boolean` | `true` | 是否在构建模式（build）下启用 |
 
 ### 自动检测
 
@@ -198,12 +202,12 @@ depsConflictResolverVitePlugin({
   dependencies: ['legacy-lib'],
   hooks: {
     // 分析完成后
-    onAnalysisComplete: result => {
+    onAnalysisComplete: (result) => {
       console.log('Found conflicts:', result.peerConflicts);
     },
 
     // 安装完成后
-    onInstallComplete: installed => {
+    onInstallComplete: (installed) => {
       console.log('Installed aliases:', installed);
     },
 
@@ -273,20 +277,38 @@ new DepsConflictResolverWebpackPlugin({
 
 ```bash
 # 安装依赖
-npm install
+pnpm install
 
 # 开发模式
-npm run dev
+pnpm dev
 
 # 构建
-npm run build
+pnpm build
 
 # 运行测试
-npm test
+pnpm test
 
 # 类型检查
-npm run typecheck
+pnpm typecheck
+
+# 代码检查
+pnpm lint
+
+# 代码格式化
+pnpm fmt
 ```
+
+## 发布流程
+
+本项目使用 [release-please](https://github.com/googleapis/release-please) 自动化发版：
+
+1. 遵循 [Conventional Commits](https://www.conventionalcommits.org/) 规范提交代码到 `main` 分支
+2. release-please 自动创建/更新 Release PR，包含版本号和 CHANGELOG
+3. 审核并合并 Release PR
+4. 自动创建 GitHub Release + tag
+5. 手动执行 `npm publish` 发布到 npm
+
+详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ## 许可证
 

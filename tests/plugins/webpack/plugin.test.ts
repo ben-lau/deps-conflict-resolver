@@ -257,7 +257,9 @@ describe('Webpack Plugin', () => {
         const mockNmf = { hooks: { beforeResolve: { tapPromise: vi.fn() } } };
         nmfCall[1](mockNmf);
 
-        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]![1] as (data: unknown) => Promise<void>;
+        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]![1] as (
+          data: unknown,
+        ) => Promise<void>;
 
         const resolveData = {
           request: './relative',
@@ -295,7 +297,9 @@ describe('Webpack Plugin', () => {
         const mockNmf = { hooks: { beforeResolve: { tapPromise: vi.fn() } } };
         nmfCall[1](mockNmf);
 
-        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]![1] as (data: unknown) => Promise<void>;
+        const beforeResolveCallback = mockNmf.hooks.beforeResolve.tapPromise.mock.calls[0]![1] as (
+          data: unknown,
+        ) => Promise<void>;
 
         const resolveData = {
           request: 'webpack/runtime',

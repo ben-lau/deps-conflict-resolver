@@ -32,8 +32,8 @@ export function compare(v1: string, v2: string): -1 | 0 | 1 {
 export function findIntersection(versions: string[], ranges: string[]): string[] {
   if (ranges.length === 0) return versions;
 
-  return versions.filter(version => {
-    return ranges.every(range => satisfies(version, range));
+  return versions.filter((version) => {
+    return ranges.every((range) => satisfies(version, range));
   });
 }
 

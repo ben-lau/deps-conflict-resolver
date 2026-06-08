@@ -107,7 +107,7 @@ describe('PackageInstaller', () => {
     });
 
     it('should reinstall when version mismatch', async () => {
-      vi.mocked(fileExists).mockImplementation(path => {
+      vi.mocked(fileExists).mockImplementation((path) => {
         return path.toString().includes('node_modules');
       });
       vi.mocked(readFileSync).mockReturnValue(
@@ -307,7 +307,7 @@ describe('PackageInstaller', () => {
     });
 
     it('should handle package.json read error in verification', async () => {
-      vi.mocked(fileExists).mockImplementation(path => {
+      vi.mocked(fileExists).mockImplementation((path) => {
         // node_modules/aliased-vue 存在但 package.json 不存在
         return !path.toString().includes('package.json');
       });
@@ -398,9 +398,7 @@ function createMockChildProcess(exitCode: number, stdout = '', stderr = '') {
       }),
     },
     on: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
-      if (!events[event]) {
-        events[event] = [];
-      }
+      events[event] ??= [];
       events[event].push(callback);
 
       if (event === 'close') {
@@ -409,7 +407,7 @@ function createMockChildProcess(exitCode: number, stdout = '', stderr = '') {
     }),
     emit: (event: string, ...args: unknown[]) => {
       if (events[event]) {
-        events[event].forEach(cb => cb(...args));
+        events[event].forEach((cb) => cb(...args));
       }
     },
     kill: vi.fn(),

@@ -70,7 +70,7 @@ export class PackageInstaller {
     }
 
     // 过滤出需要安装的
-    const toInstall = mappings.filter(m => {
+    const toInstall = mappings.filter((m) => {
       // 没有 installSpec 表示复用现有别名，不需要安装
       if (!m.installSpec) {
         logger.debug(`Skipping ${m.aliasName}: reusing existing installation`);
@@ -106,15 +106,15 @@ export class PackageInstaller {
 
     logger.info(`Installing ${toInstall.length} alias packages...`);
 
-    const installSpecs = toInstall.map(m => m.installSpec);
+    const installSpecs = toInstall.map((m) => m.installSpec);
     const installResult = await this.runInstall(installSpecs);
 
     if (installResult.success) {
-      result.installed = toInstall.map(m => m.aliasName);
+      result.installed = toInstall.map((m) => m.aliasName);
       logger.info(`Successfully installed: ${result.installed.join(', ')}`);
     } else {
       result.success = false;
-      result.failed = toInstall.map(m => m.aliasName);
+      result.failed = toInstall.map((m) => m.aliasName);
       result.errors = installResult.errors;
       logger.error(`Failed to install aliases: ${installResult.errors.join(', ')}`);
     }
@@ -203,7 +203,7 @@ export class PackageInstaller {
 
     const startTime = Date.now();
 
-    return new Promise(resolve => {
+    return new Promise((resolve) => {
       let resolved = false;
 
       const child = spawn(command, args, {
@@ -241,7 +241,7 @@ export class PackageInstaller {
         stderr += data.toString();
       });
 
-      child.on('error', error => {
+      child.on('error', (error) => {
         if (!resolved) {
           resolved = true;
           clearTimeout(timeoutId);
@@ -253,7 +253,7 @@ export class PackageInstaller {
         }
       });
 
-      child.on('close', code => {
+      child.on('close', (code) => {
         if (!resolved) {
           resolved = true;
           clearTimeout(timeoutId);

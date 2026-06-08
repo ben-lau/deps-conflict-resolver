@@ -29,7 +29,7 @@ describe('EnvironmentDetector', () => {
 
   describe('getDetectionResult', () => {
     it('should detect pnpm from packageManager field', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('package.json');
       });
 
@@ -42,7 +42,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect yarn from packageManager field', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('package.json');
       });
 
@@ -55,7 +55,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect npm from packageManager field', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('package.json');
       });
 
@@ -68,7 +68,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect pnpm from pnpm-lock.yaml', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.endsWith('pnpm-lock.yaml');
       });
@@ -80,7 +80,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect yarn from yarn.lock', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.endsWith('yarn.lock');
       });
@@ -92,7 +92,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect npm from package-lock.json', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.endsWith('package-lock.json');
       });
@@ -104,7 +104,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect npm from npm-shrinkwrap.json', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.endsWith('npm-shrinkwrap.json');
       });
@@ -125,7 +125,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should search parent directories for lock files', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString().replace(/\\/g, '/');
         return pathStr === '/parent/yarn.lock';
       });
@@ -137,7 +137,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should handle invalid packageManager field gracefully', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.endsWith('package.json');
       });
@@ -151,7 +151,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should handle JSON parse error gracefully', () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.endsWith('package.json');
       });
@@ -177,7 +177,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should detect registry from project .npmrc', async () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.npmrc');
       });
 
@@ -189,7 +189,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should handle registry with spaces and quotes', async () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.npmrc');
       });
 
@@ -201,7 +201,7 @@ describe('EnvironmentDetector', () => {
     });
 
     it('should skip comments in .npmrc', async () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.npmrc');
       });
 
@@ -219,7 +219,7 @@ registry=https://actual.registry.com
     it('should detect registry from user .npmrc', async () => {
       process.env.HOME = '/home/user';
 
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString().replace(/\\/g, '/');
         return pathStr === '/home/user/.npmrc';
       });
@@ -234,7 +234,7 @@ registry=https://actual.registry.com
     it('should detect registry from .pnpmrc for pnpm', async () => {
       process.env.HOME = '/home/user';
 
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString().replace(/\\/g, '/');
         return pathStr === '/home/user/.pnpmrc';
       });
@@ -249,7 +249,7 @@ registry=https://actual.registry.com
     it('should detect registry from .yarnrc.yml for yarn', async () => {
       process.env.HOME = '/home/user';
 
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.yarnrc.yml');
       });
 
@@ -263,7 +263,7 @@ registry=https://actual.registry.com
     it('should handle quoted npmRegistryServer in .yarnrc.yml', async () => {
       process.env.HOME = '/home/user';
 
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.yarnrc.yml');
       });
 
@@ -283,7 +283,7 @@ registry=https://actual.registry.com
     });
 
     it('should return default registry when .npmrc has no registry', async () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.npmrc');
       });
 
@@ -295,7 +295,7 @@ registry=https://actual.registry.com
     });
 
     it('should handle file read error gracefully', async () => {
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         return path.toString().endsWith('.npmrc');
       });
 
@@ -310,7 +310,7 @@ registry=https://actual.registry.com
       delete process.env.HOME;
       process.env.USERPROFILE = 'C:\\Users\\test';
 
-      vi.mocked(existsSync).mockImplementation(path => {
+      vi.mocked(existsSync).mockImplementation((path) => {
         const pathStr = path.toString();
         return pathStr.includes('Users') && pathStr.endsWith('.npmrc');
       });
