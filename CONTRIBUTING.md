@@ -34,20 +34,21 @@ pnpm test:coverage
 
 ## Common Commands
 
-| Command              | Description                              |
-| -------------------- | ---------------------------------------- |
-| `pnpm build`         | Build with tsup (CJS + ESM + types)      |
-| `pnpm dev`           | Build in watch mode                      |
-| `pnpm test`          | Run tests in watch mode                  |
-| `pnpm test:run`      | Run tests once                           |
-| `pnpm test:coverage` | Run tests with coverage report           |
-| `pnpm lint`          | Lint with oxlint                         |
-| `pnpm lint:fix`      | Lint and auto-fix with oxlint            |
-| `pnpm fmt`           | Format with oxfmt                        |
-| `pnpm fmt:check`     | Check formatting                         |
-| `pnpm typecheck`     | TypeScript type checking                 |
-| `pnpm publint`       | Check package publish quality            |
-| `pnpm attw`          | Check type resolution (arethetypeswrong) |
+| Command              | Description                                                     |
+| -------------------- | --------------------------------------------------------------- |
+| `pnpm build`         | Build with tsup (CJS + ESM + types)                             |
+| `pnpm dev`           | Build in watch mode                                             |
+| `pnpm test`          | Run tests in watch mode                                         |
+| `pnpm test:run`      | Run tests once                                                  |
+| `pnpm test:coverage` | Run tests with coverage report                                  |
+| `pnpm lint`          | Lint with oxlint                                                |
+| `pnpm lint:fix`      | Lint and auto-fix with oxlint                                   |
+| `pnpm fmt`           | Format with oxfmt                                               |
+| `pnpm fmt:check`     | Check formatting                                                |
+| `pnpm typecheck`     | TypeScript type checking                                        |
+| `pnpm publint`       | Check package publish quality                                   |
+| `pnpm attw`          | Check type resolution (arethetypeswrong)                        |
+| `pnpm validate`      | Run all checks (lint + fmt + typecheck + test + publint + attw) |
 
 ## Git Hooks
 
@@ -102,13 +103,13 @@ chore(deps): bump vitest to v4
 
 ## Release Process
 
-This project uses [release-please](https://github.com/googleapis/release-please) for automated releases:
+This project uses [release-please](https://github.com/googleapis/release-please) for fully automated releases:
 
 1. Merge commits to `main` following conventional commit format
 2. release-please automatically creates/updates a Release PR with changelog
 3. Review and merge the Release PR
 4. A GitHub Release + tag is automatically created
-5. Manually run `npm publish` from the tagged release to publish to npm
+5. npm publish is triggered automatically via OIDC (no token required)
 
 ## Project Structure
 
@@ -144,5 +145,5 @@ tests/                  # Test files (vitest)
 1. Fork the repository
 2. Create a feature branch from `main`
 3. Make your changes following the conventions above
-4. Ensure all checks pass: `pnpm lint && pnpm fmt:check && pnpm typecheck && pnpm test:run`
+4. Ensure all checks pass: `pnpm validate`
 5. Submit your pull request

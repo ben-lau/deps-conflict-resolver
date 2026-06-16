@@ -12,11 +12,19 @@
     "vue3",
     "webpack"
   ],
+  "homepage": "https://github.com/ben-lau/deps-conflict-resolver#readme",
+  "bugs": {
+    "url": "https://github.com/ben-lau/deps-conflict-resolver/issues"
+  },
   "license": "MIT",
   "author": {
     "name": "ben-lau",
     "email": "408736066@qq.com",
     "url": "https://github.com/ben-lau"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ben-lau/deps-conflict-resolver.git"
   },
   "files": [
     "dist"
@@ -88,7 +96,8 @@
     "publint": "publint",
     "attw": "attw --pack --entrypoints .",
     "prepare": "lefthook install",
-    "prepublishOnly": "npm run build"
+    "validate": "pnpm lint && pnpm fmt:check && pnpm typecheck && pnpm test:run && pnpm publint && pnpm attw",
+    "prepublishOnly": "pnpm build && pnpm publint && pnpm attw"
   },
   "dependencies": {
     "semver": "^7.5.4",
@@ -128,5 +137,11 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "packageManager": "pnpm@10.7.1"
+  "packageManager": "pnpm@10.7.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lefthook"
+    ]
+  }
 }

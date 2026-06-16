@@ -3,14 +3,16 @@ pre-commit:
   commands:
     lint:
       glob: '*.{ts,js}'
-      run: npx oxlint --type-aware --deny-warnings {staged_files}
+      exclude: 'dist|node_modules|coverage'
+      run: pnpm exec oxlint --type-aware --fix --deny-warnings {staged_files}
       stage_fixed: true
     fmt:
-      glob: '*.{ts,js,json,md}'
-      run: npx oxfmt {staged_files}
+      glob: '*.{ts,js,json}'
+      exclude: 'dist|node_modules|coverage|pnpm-lock.yaml'
+      run: pnpm exec oxfmt {staged_files}
       stage_fixed: true
 
 commit-msg:
   commands:
     commitlint:
-      run: npx commitlint --edit {1}
+      run: pnpm exec commitlint --edit {1}
