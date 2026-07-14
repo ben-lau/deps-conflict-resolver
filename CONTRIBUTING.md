@@ -54,7 +54,7 @@ pnpm test:coverage
 
 This project uses [lefthook](https://github.com/evilmartians/lefthook) for git hooks:
 
-- **pre-commit**: Runs `oxlint` and `oxfmt` on staged files. Auto-fixed changes are re-staged.
+- **pre-commit**: Runs `oxlint` (`--fix --deny-warnings`) and `oxfmt` (`--write`) on staged files, then re-stages auto-fixes. Coverage matches CI `pnpm lint` / `pnpm fmt:check` (including `.md` / `.yml`); CI still re-checks the full tree.
 - **commit-msg**: Runs `commitlint` to enforce conventional commit format.
 
 Hooks are automatically installed when you run `pnpm install` (via the `prepare` script).

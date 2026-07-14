@@ -89,7 +89,7 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "oxlint --type-aware --deny-warnings .",
-    "lint:fix": "oxlint --type-aware --fix .",
+    "lint:fix": "oxlint --type-aware --fix --deny-warnings .",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "typecheck": "tsc --noEmit",

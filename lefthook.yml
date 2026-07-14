@@ -1,15 +1,17 @@
 pre-commit:
   parallel: true
   commands:
+    # 与 CI lint job 同一套工具与规则：oxlint --type-aware --deny-warnings / oxfmt（.oxfmtrc.json）
+    # pre-commit 对暂存文件 --fix/--write；CI 再全量检查一次
     lint:
-      glob: '*.{ts,js}'
+      glob: '*.{ts,js,mts,cts,mjs,cjs}'
       exclude: 'dist|node_modules|coverage'
       run: pnpm exec oxlint --type-aware --fix --deny-warnings {staged_files}
       stage_fixed: true
     fmt:
-      glob: '*.{ts,js,json}'
-      exclude: 'dist|node_modules|coverage|pnpm-lock.yaml'
-      run: pnpm exec oxfmt {staged_files}
+      glob: '*.{ts,js,mts,cts,mjs,cjs,json,md,yml,yaml}'
+      exclude: 'dist|node_modules|coverage|pnpm-lock.yaml|CHANGELOG.md'
+      run: pnpm exec oxfmt --write {staged_files}
       stage_fixed: true
 
 commit-msg:
