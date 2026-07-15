@@ -1,0 +1,14 @@
+coverage:
+  status:
+    project:
+      default:
+        # Compare against parent commit coverage
+        target: auto
+        # Allow overall coverage to drop by up to this amount without failing
+        threshold: 5%
+    patch:
+      default:
+        # New/changed lines coverage vs parent patch baseline
+        target: auto
+        # Allow patch coverage to be this much below the target
+        threshold: 20%
