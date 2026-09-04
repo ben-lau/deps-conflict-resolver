@@ -107,10 +107,14 @@
     "@arethetypeswrong/cli": "^0.18.3",
     "@commitlint/cli": "^21.0.2",
     "@commitlint/config-conventional": "^21.0.2",
+    "@types/jsdom": "^21.1.7",
     "@types/node": "^20.10.0",
     "@types/semver": "^7.5.6",
     "@vitest/coverage-v8": "^4.0.16",
+    "element-plus": "^2.0.0",
+    "element-ui": "^2.15.14",
     "esbuild": "^0.27.4",
+    "jsdom": "^26.1.0",
     "lefthook": "^2.1.9",
     "oxfmt": "^0.53.0",
     "oxlint": "^1.68.0",
@@ -120,6 +124,8 @@
     "typescript": "^5.3.2",
     "vite": "^7.2.7",
     "vitest": "^4.0.16",
+    "vue": "^3.5.18",
+    "vue2": "npm:vue@^2.7.16",
     "webpack": "^5.103.0"
   },
   "peerDependencies": {
