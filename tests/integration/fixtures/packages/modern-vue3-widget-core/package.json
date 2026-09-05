@@ -1,0 +1,9 @@
+{
+  "name": "modern-vue3-widget-core",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "peerDependencies": {
+    "vue": "^3.2.0"
+  }
+}

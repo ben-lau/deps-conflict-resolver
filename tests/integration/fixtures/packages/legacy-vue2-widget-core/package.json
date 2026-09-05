@@ -1,0 +1,9 @@
+{
+  "name": "legacy-vue2-widget-core",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "peerDependencies": {
+    "vue": "^2.7.0"
+  }
+}
