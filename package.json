@@ -87,7 +87,7 @@
     "dev": "tsup --watch",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:integration": "vitest run tests/integration/cross-vue-embedding.test.ts",
+    "test:integration": "vitest run tests/integration/cross-vue-embedding.test.ts tests/integration/element-ui-element-plus.test.ts",
     "test:coverage": "vitest run --coverage",
     "lint": "oxlint --type-aware --deny-warnings .",
     "lint:fix": "oxlint --type-aware --fix --deny-warnings .",

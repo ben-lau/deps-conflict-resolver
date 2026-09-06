@@ -1,0 +1,12 @@
+{
+  "name": "legacy-element-ui-widget",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "dependencies": {
+    "legacy-element-ui-widget-core": "1.0.0"
+  },
+  "peerDependencies": {
+    "vue": "^2.7.0"
+  }
+}

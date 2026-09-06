@@ -1,0 +1,12 @@
+{
+  "name": "modern-element-plus-widget-core",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "dependencies": {
+    "element-plus": "^2.0.0"
+  },
+  "peerDependencies": {
+    "vue": "^3.2.0"
+  }
+}
