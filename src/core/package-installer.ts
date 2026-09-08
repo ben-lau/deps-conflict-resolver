@@ -1,9 +1,9 @@
-import { spawn } from 'child_process';
 import type { AliasMapping, ResolvedOptions } from '../types/index';
 import { createLogger } from '../utils/logger';
 import { fileExists, readPackageJsonCached } from '../utils/fs';
 import { join } from 'path';
 import semver from 'semver';
+import { createPackageManagerAdapter, type PackageManagerAdapter } from './package-manager-adapter';
 
 const logger = createLogger('package-installer');
 
@@ -48,9 +48,14 @@ interface InstallResult {
  */
 export class PackageInstaller {
   private options: ResolvedOptions;
+  private packageManager: PackageManagerAdapter;
 
-  constructor(options: ResolvedOptions) {
+  constructor(
+    options: ResolvedOptions,
+    packageManager: PackageManagerAdapter = createPackageManagerAdapter(options),
+  ) {
     this.options = options;
+    this.packageManager = packageManager;
   }
 
   /**
@@ -176,110 +181,25 @@ export class PackageInstaller {
       return { success: true, errors: [] };
     }
 
-    const { packageManager, projectRoot } = this.options;
+    const runResult = await this.packageManager.install(packages);
 
-    let command: string;
-    let args: string[];
-
-    switch (packageManager) {
-      case 'yarn':
-        command = 'yarn';
-        args = ['add', ...packages];
-        break;
-      case 'pnpm':
-        command = 'pnpm';
-        args = ['add', ...packages];
-        break;
-      case 'npm':
-      default:
-        command = 'npm';
-        // 使用 --legacy-peer-deps 跳过 peer 依赖检查，避免卡死
-        args = ['install', '--legacy-peer-deps', ...packages];
-        break;
+    if (runResult.stdout) {
+      logger.debug(`stdout: ${runResult.stdout}`);
+    }
+    if (runResult.stderr) {
+      logger.debug(`stderr: ${runResult.stderr}`);
     }
 
-    const fullCommand = `${command} ${args.join(' ')}`;
-    logger.info(`Running: ${fullCommand}`);
+    if (runResult.success) {
+      logger.info('Install completed');
+      return { success: true, errors: [] };
+    }
 
-    const startTime = Date.now();
-
-    return new Promise((resolve) => {
-      let resolved = false;
-
-      const child = spawn(command, args, {
-        cwd: projectRoot,
-        shell: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      // 超时处理
-      const timeoutId = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          logger.error(`Install timeout after ${INSTALL_TIMEOUT / 1000}s`);
-          child.kill('SIGTERM');
-          setTimeout(() => {
-            if (!child.killed) {
-              child.kill('SIGKILL');
-            }
-          }, 5000);
-          resolve({
-            success: false,
-            errors: [`Install timeout after ${INSTALL_TIMEOUT / 1000}s`],
-          });
-        }
-      }, INSTALL_TIMEOUT);
-
-      child.stdout?.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-
-      child.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
-      });
-
-      child.on('error', (error) => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timeoutId);
-          logger.error(`Install error: ${error.message}`);
-          resolve({
-            success: false,
-            errors: [error.message],
-          });
-        }
-      });
-
-      child.on('close', (code) => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timeoutId);
-          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-          if (code === 0) {
-            if (stdout) {
-              logger.debug(`stdout: ${stdout}`);
-            }
-            logger.info(`Install completed in ${elapsed}s`);
-            resolve({ success: true, errors: [] });
-          } else {
-            logger.error(`Install failed with exit code ${code}`);
-            if (stdout) {
-              logger.debug(`stdout: ${stdout}`);
-            }
-            if (stderr) {
-              logger.debug(`stderr: ${stderr}`);
-            }
-            resolve({
-              success: false,
-              errors: stderr ? [stderr] : [`Process exited with code ${code}`],
-            });
-          }
-        }
-      });
-    });
+    const errorMessage = runResult.timedOut
+      ? `Install timeout after ${INSTALL_TIMEOUT / 1000}s`
+      : runResult.stderr || `Process exited with code ${runResult.exitCode}`;
+    logger.error(`Install failed: ${errorMessage}`);
+    return { success: false, errors: [errorMessage] };
   }
 }
 

@@ -4,6 +4,10 @@ import { clearPackageJsonCache, fileExists } from '../../src/utils/fs';
 import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import type { ResolvedOptions, AliasMapping } from '../../src/types';
+import type {
+  PackageManagerAdapter,
+  PackageManagerRunResult,
+} from '../../src/core/package-manager-adapter';
 
 // Mock 依赖
 vi.mock('fs', async () => {
@@ -354,6 +358,67 @@ describe('PackageInstaller', () => {
 
       // 应该安装
       expect(vi.mocked(spawn)).toHaveBeenCalled();
+    });
+
+    it('should route installation through the supplied package manager adapter', async () => {
+      vi.mocked(fileExists).mockReturnValue(false);
+      const runResult: PackageManagerRunResult = {
+        success: false,
+        exitCode: 1,
+        stdout: 'partial output',
+        stderr: 'Install failed',
+        timedOut: false,
+      };
+      const install = vi.fn().mockResolvedValue(runResult);
+      const packageManager: PackageManagerAdapter = {
+        install,
+      };
+      const injectedInstaller = new PackageInstaller(mockOptions, packageManager);
+      const mapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue',
+        resolvedVersion: '2.7.0',
+        usedBy: ['some-package'],
+        allDependents: ['some-package'],
+        installSpec: 'aliased-vue@npm:vue@2.7.0',
+      };
+
+      const result = await injectedInstaller.installAliases([mapping]);
+
+      expect(install).toHaveBeenCalledWith([mapping.installSpec]);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        success: false,
+        installed: [],
+        failed: ['aliased-vue'],
+        errors: ['Install failed'],
+      });
+    });
+
+    it('should preserve the legacy timeout error when the adapter times out', async () => {
+      vi.mocked(fileExists).mockReturnValue(false);
+      const packageManager: PackageManagerAdapter = {
+        install: vi.fn().mockResolvedValue({
+          success: false,
+          exitCode: null,
+          stdout: '',
+          stderr: 'partial output before timeout',
+          timedOut: true,
+        } satisfies PackageManagerRunResult),
+      };
+      const injectedInstaller = new PackageInstaller(mockOptions, packageManager);
+      const mapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue',
+        resolvedVersion: '2.7.0',
+        usedBy: ['some-package'],
+        allDependents: ['some-package'],
+        installSpec: 'aliased-vue@npm:vue@2.7.0',
+      };
+
+      const result = await injectedInstaller.installAliases([mapping]);
+
+      expect(result.errors).toEqual(['Install timeout after 120s']);
     });
   });
 });
