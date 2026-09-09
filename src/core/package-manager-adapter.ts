@@ -99,9 +99,6 @@ export function createPackageManagerAdapter(
 
         child.on('error', (error) => {
           terminalError = error;
-          if (!timedOut) {
-            finish(null);
-          }
         });
 
         child.on('close', (exitCode) => {
@@ -133,16 +130,25 @@ function buildCommand(
   packageManager: PackageManagerType,
   specs: string[],
 ): { command: string; args: string[] } {
+  const command = resolvePackageManagerCommand(packageManager);
+
   switch (packageManager) {
     case 'pnpm':
-      return { command: 'pnpm', args: ['add', ...specs] };
+      return { command, args: ['add', ...specs] };
     case 'yarn':
-      return { command: 'yarn', args: ['add', ...specs] };
+      return { command, args: ['add', ...specs] };
     case 'npm':
-      return { command: 'npm', args: ['install', '--legacy-peer-deps', ...specs] };
+      return { command, args: ['install', '--legacy-peer-deps', ...specs] };
   }
 
   throw new Error(`Unsupported package manager: ${String(packageManager)}`);
+}
+
+export function resolvePackageManagerCommand(
+  packageManager: PackageManagerType,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === 'win32' ? `${packageManager}.cmd` : packageManager;
 }
 
 function registryEnvironment(

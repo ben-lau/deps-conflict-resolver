@@ -4,13 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createPackageManagerAdapter } from '../../src/core/package-manager-adapter';
+import {
+  createPackageManagerAdapter,
+  resolvePackageManagerCommand,
+} from '../../src/core/package-manager-adapter';
 
 vi.mock('child_process', () => ({
   spawn: vi.fn(),
 }));
 
 const options = {
+  packageManager: 'npm',
   projectRoot: '/test/project',
   registry: 'https://registry.example.test',
 } as const;
@@ -55,6 +59,38 @@ describe('createPackageManagerAdapter', () => {
       });
     },
   );
+
+  it.each([
+    ['npm', 'npm.cmd'],
+    ['pnpm', 'pnpm.cmd'],
+    ['yarn', 'yarn.cmd'],
+  ] as const)('selects the Windows executable for %s', (packageManager, command) => {
+    expect(resolvePackageManagerCommand(packageManager, 'win32')).toBe(command);
+  });
+
+  it('waits for close after a non-timeout process error', async () => {
+    const child = createChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as never);
+
+    const adapter = createPackageManagerAdapter(options);
+    const installation = adapter.install(['missing-command']);
+    child.emit('error', new Error('Command not found'));
+
+    const state = await Promise.race([
+      installation.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 20)),
+    ]);
+    expect(state).toBe('pending');
+
+    child.emit('close', null);
+    await expect(installation).resolves.toEqual({
+      success: false,
+      exitCode: null,
+      stdout: '',
+      stderr: 'Command not found',
+      timedOut: false,
+    });
+  });
 
   it.skipIf(process.platform === 'win32')(
     'waits for close after terminating a process that ignores SIGTERM',
@@ -121,7 +157,7 @@ describe('createPackageManagerAdapter', () => {
   );
 });
 
-function createChildProcess(exitCode: number): EventEmitter & {
+function createChildProcess(exitCode?: number): EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
 } {
@@ -131,6 +167,8 @@ function createChildProcess(exitCode: number): EventEmitter & {
   };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  queueMicrotask(() => child.emit('close', exitCode));
+  if (exitCode !== undefined) {
+    queueMicrotask(() => child.emit('close', exitCode));
+  }
   return child;
 }
