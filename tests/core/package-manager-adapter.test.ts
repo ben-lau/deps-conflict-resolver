@@ -6,7 +6,7 @@ import { spawn } from 'child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createPackageManagerAdapter,
-  resolvePackageManagerCommand,
+  resolvePackageManagerInvocation,
 } from '../../src/core/package-manager-adapter';
 
 vi.mock('child_process', () => ({
@@ -61,12 +61,29 @@ describe('createPackageManagerAdapter', () => {
   );
 
   it.each([
-    ['npm', 'npm.cmd'],
-    ['pnpm', 'pnpm.cmd'],
-    ['yarn', 'yarn.cmd'],
-  ] as const)('selects the Windows executable for %s', (packageManager, command) => {
-    expect(resolvePackageManagerCommand(packageManager, 'win32')).toBe(command);
+    ['npm', 'C:\\node\\node_modules\\npm\\bin\\npm-cli.js'],
+    ['pnpm', 'C:\\node\\pnpm.cjs'],
+    ['yarn', 'C:\\node\\yarn.js'],
+  ] as const)('selects a Node entrypoint for Windows %s', (packageManager, entrypoint) => {
+    expect(
+      resolvePackageManagerInvocation(packageManager, 'win32', {
+        npm_execpath: entrypoint,
+      }),
+    ).toEqual({
+      command: process.execPath,
+      argsPrefix: [entrypoint],
+    });
   });
+
+  it.each(['npm', 'pnpm', 'yarn'] as const)(
+    'keeps the direct executable for POSIX %s',
+    (packageManager) => {
+      expect(resolvePackageManagerInvocation(packageManager, 'darwin', {})).toEqual({
+        command: packageManager,
+        argsPrefix: [],
+      });
+    },
+  );
 
   it('waits for close after a non-timeout process error', async () => {
     const child = createChildProcess();

@@ -1,4 +1,6 @@
 import { spawn } from 'child_process';
+import { existsSync, readFileSync } from 'fs';
+import { posix, win32 } from 'path';
 import type { PackageManagerType, ResolvedOptions } from '../types';
 import { createLogger } from '../utils/logger';
 
@@ -21,6 +23,11 @@ interface PackageManagerTiming {
   terminateGraceMs: number;
 }
 
+export interface PackageManagerInvocation {
+  command: string;
+  argsPrefix: string[];
+}
+
 const DEFAULT_TIMING: PackageManagerTiming = {
   timeoutMs: 120_000,
   terminateGraceMs: 5_000,
@@ -32,7 +39,6 @@ export function createPackageManagerAdapter(
 ): PackageManagerAdapter {
   return {
     install: async (specs: string[]): Promise<PackageManagerRunResult> => {
-      const { command, args } = buildCommand(options.packageManager, specs);
       const env = registryEnvironment(options.packageManager, options.registry);
 
       if (specs.length === 0) {
@@ -44,6 +50,8 @@ export function createPackageManagerAdapter(
           timedOut: false,
         };
       }
+
+      const { command, args } = buildCommand(options.packageManager, specs, env);
 
       logger.info(`Running: ${command} ${args.map((arg) => JSON.stringify(arg)).join(' ')}`);
 
@@ -129,16 +137,26 @@ export function createPackageManagerAdapter(
 function buildCommand(
   packageManager: PackageManagerType,
   specs: string[],
+  environment: NodeJS.ProcessEnv,
 ): { command: string; args: string[] } {
-  const command = resolvePackageManagerCommand(packageManager);
+  const invocation = resolvePackageManagerInvocation(packageManager, process.platform, environment);
 
   switch (packageManager) {
     case 'pnpm':
-      return { command, args: ['add', ...specs] };
+      return {
+        command: invocation.command,
+        args: [...invocation.argsPrefix, 'add', ...specs],
+      };
     case 'yarn':
-      return { command, args: ['add', ...specs] };
+      return {
+        command: invocation.command,
+        args: [...invocation.argsPrefix, 'add', ...specs],
+      };
     case 'npm':
-      return { command, args: ['install', '--legacy-peer-deps', ...specs] };
+      return {
+        command: invocation.command,
+        args: [...invocation.argsPrefix, 'install', '--legacy-peer-deps', ...specs],
+      };
   }
 
   throw new Error(`Unsupported package manager: ${String(packageManager)}`);
@@ -149,6 +167,153 @@ export function resolvePackageManagerCommand(
   platform: NodeJS.Platform = process.platform,
 ): string {
   return platform === 'win32' ? `${packageManager}.cmd` : packageManager;
+}
+
+export function resolvePackageManagerInvocation(
+  packageManager: PackageManagerType,
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): PackageManagerInvocation {
+  if (platform !== 'win32') {
+    return {
+      command: resolvePackageManagerCommand(packageManager, platform),
+      argsPrefix: [],
+    };
+  }
+
+  const windowsInvocation = resolveWindowsPackageManagerInvocation(packageManager, environment);
+  if (!windowsInvocation) {
+    throw new Error(`Could not resolve a Node entrypoint for ${packageManager}`);
+  }
+
+  return windowsInvocation;
+}
+
+function resolveWindowsPackageManagerInvocation(
+  packageManager: PackageManagerType,
+  environment: NodeJS.ProcessEnv,
+): PackageManagerInvocation | undefined {
+  const npmExecPath = getEnvironmentValue(environment, 'npm_execpath');
+  if (npmExecPath && matchesPackageManagerPath(packageManager, npmExecPath, 'win32')) {
+    const invocation = invocationFromPackageManagerPath(packageManager, npmExecPath, 'win32');
+    if (invocation) {
+      return invocation;
+    }
+  }
+
+  const pathValue = getEnvironmentValue(environment, 'PATH');
+  if (!pathValue) {
+    return undefined;
+  }
+
+  for (const directory of pathValue.split(';')) {
+    if (!directory) {
+      continue;
+    }
+
+    const shimPath = win32.join(directory, `${packageManager}.cmd`);
+    if (existsSync(shimPath)) {
+      const invocation = invocationFromPackageManagerPath(packageManager, shimPath, 'win32');
+      if (invocation) {
+        return invocation;
+      }
+    }
+
+    const executablePath = win32.join(directory, `${packageManager}.exe`);
+    if (existsSync(executablePath)) {
+      return { command: executablePath, argsPrefix: [] };
+    }
+  }
+
+  return undefined;
+}
+
+function invocationFromPackageManagerPath(
+  packageManager: PackageManagerType,
+  packageManagerPath: string,
+  platform: NodeJS.Platform,
+): PackageManagerInvocation | undefined {
+  const lowerPath = packageManagerPath.toLowerCase();
+  if (lowerPath.endsWith('.exe')) {
+    return { command: packageManagerPath, argsPrefix: [] };
+  }
+
+  if (lowerPath.endsWith('.cmd') || lowerPath.endsWith('.bat')) {
+    const entrypoint = parseWindowsShimEntrypoint(packageManager, packageManagerPath, platform);
+    if (!entrypoint) {
+      return undefined;
+    }
+    return { command: process.execPath, argsPrefix: [entrypoint] };
+  }
+
+  if (isJavaScriptEntrypoint(packageManagerPath)) {
+    return { command: process.execPath, argsPrefix: [packageManagerPath] };
+  }
+
+  return undefined;
+}
+
+function parseWindowsShimEntrypoint(
+  packageManager: PackageManagerType,
+  shimPath: string,
+  platform: NodeJS.Platform,
+): string | undefined {
+  let shimContents: string;
+  try {
+    shimContents = readFileSync(shimPath, 'utf8');
+  } catch (error) {
+    logger.debug(`Failed to read ${packageManager} shim: ${String(error)}`);
+    return undefined;
+  }
+
+  const targetMatch = shimContents.match(/"((?:%~dp0|%dp0%)[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/i);
+  if (!targetMatch?.[1]) {
+    const absoluteMatch = shimContents.match(/"([A-Za-z]:[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/i);
+    return absoluteMatch?.[1];
+  }
+
+  const target = targetMatch[1];
+  const markerMatch = target.match(/^%(?:~dp0|dp0%)[\\/](.*)$/i);
+  if (!markerMatch?.[1]) {
+    return undefined;
+  }
+
+  const pathModule = platform === 'win32' ? win32 : posix;
+  return pathModule.resolve(pathModule.dirname(shimPath), markerMatch[1]);
+}
+
+function matchesPackageManagerPath(
+  packageManager: PackageManagerType,
+  packageManagerPath: string,
+  platform: NodeJS.Platform,
+): boolean {
+  const pathModule = platform === 'win32' ? win32 : posix;
+  const fileName = pathModule.basename(packageManagerPath).toLowerCase();
+  switch (packageManager) {
+    case 'npm':
+      return fileName === 'npm' || fileName === 'npm.cmd' || fileName === 'npm-cli.js';
+    case 'pnpm':
+      return fileName === 'pnpm' || fileName === 'pnpm.cmd' || fileName.startsWith('pnpm.');
+    case 'yarn':
+      return fileName === 'yarn' || fileName === 'yarn.cmd' || fileName.startsWith('yarn.');
+  }
+
+  return false;
+}
+
+function isJavaScriptEntrypoint(filePath: string): boolean {
+  return /\.(?:js|cjs|mjs)$/i.test(filePath);
+}
+
+function getEnvironmentValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  const exactValue = environment[name];
+  if (exactValue !== undefined) {
+    return exactValue;
+  }
+
+  const lowerName = name.toLowerCase();
+  const key = Object.keys(environment).find((candidate) => candidate.toLowerCase() === lowerName);
+  return key ? environment[key] : undefined;
 }
 
 function registryEnvironment(
