@@ -266,20 +266,102 @@ function parseWindowsShimEntrypoint(
     return undefined;
   }
 
-  const targetMatch = shimContents.match(/"((?:%~dp0|%dp0%)[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/i);
-  if (!targetMatch?.[1]) {
-    const absoluteMatch = shimContents.match(/"([A-Za-z]:[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/i);
-    return absoluteMatch?.[1];
+  const assignments = parseWindowsShimAssignments(shimContents);
+  const directTargetPattern = /"((?:%~dp0|%dp0%)[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/gi;
+  for (const match of shimContents.matchAll(directTargetPattern)) {
+    const target = match[1];
+    if (target) {
+      const entrypoint = resolveShimTarget(target, assignments, shimPath, platform);
+      if (entrypoint) {
+        return entrypoint;
+      }
+    }
   }
 
-  const target = targetMatch[1];
-  const markerMatch = target.match(/^%(?:~dp0|dp0%)[\\/](.*)$/i);
-  if (!markerMatch?.[1]) {
-    return undefined;
+  const variableReferencePattern = /%([A-Za-z_][A-Za-z0-9_]*)%/g;
+  for (const match of shimContents.matchAll(variableReferencePattern)) {
+    const variable = match[1];
+    const assignedValue = variable ? assignments.get(variable.toUpperCase()) : undefined;
+    if (!assignedValue) {
+      continue;
+    }
+
+    const entrypoint = resolveShimTarget(assignedValue, assignments, shimPath, platform);
+    if (entrypoint) {
+      return entrypoint;
+    }
   }
 
-  const pathModule = platform === 'win32' ? win32 : posix;
-  return pathModule.resolve(pathModule.dirname(shimPath), markerMatch[1]);
+  const absoluteTargetPattern = /"([A-Za-z]:[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/gi;
+  for (const match of shimContents.matchAll(absoluteTargetPattern)) {
+    const target = match[1];
+    if (target) {
+      const entrypoint = resolveShimTarget(target, assignments, shimPath, platform);
+      if (entrypoint) {
+        return entrypoint;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function parseWindowsShimAssignments(contents: string): Map<string, string> {
+  const assignments = new Map<string, string>();
+  const assignmentPattern =
+    /^\s*@?set\s+(?:"([A-Za-z_][A-Za-z0-9_]*)=([^"\r\n]*)"|([A-Za-z_][A-Za-z0-9_]*)=([^\r\n]*))\s*$/gim;
+
+  for (const match of contents.matchAll(assignmentPattern)) {
+    const name = (match[1] ?? match[3])?.toUpperCase();
+    const value = (match[2] ?? match[4])?.trim();
+    if (name && value !== undefined) {
+      assignments.set(name, value);
+    }
+  }
+
+  return assignments;
+}
+
+function resolveShimTarget(
+  rawTarget: string,
+  assignments: Map<string, string>,
+  shimPath: string,
+  platform: NodeJS.Platform,
+  seenVariables: Set<string> = new Set(),
+): string | undefined {
+  const target = rawTarget.trim().replace(/^"|"$/g, '');
+  const markerMatch = target.match(/^%(?:~dp0|dp0%)([\\/].*)$/i);
+  if (markerMatch?.[1]) {
+    const pathModule = platform === 'win32' ? win32 : posix;
+    const relativeTarget = markerMatch[1].replace(/^[\\/]/, '');
+    const resolvedTarget = pathModule.resolve(pathModule.dirname(shimPath), relativeTarget);
+    return isJavaScriptEntrypoint(resolvedTarget) ? resolvedTarget : undefined;
+  }
+
+  const variableMatch = target.match(/^%([A-Za-z_][A-Za-z0-9_]*)%([\\/].*)?$/);
+  if (variableMatch?.[1]) {
+    const variable = variableMatch[1].toUpperCase();
+    if (seenVariables.has(variable)) {
+      return undefined;
+    }
+
+    const assignedValue = assignments.get(variable);
+    if (!assignedValue) {
+      return undefined;
+    }
+
+    const nextSeenVariables = new Set(seenVariables);
+    nextSeenVariables.add(variable);
+    return resolveShimTarget(
+      `${assignedValue}${variableMatch[2] ?? ''}`,
+      assignments,
+      shimPath,
+      platform,
+      nextSeenVariables,
+    );
+  }
+
+  return isJavaScriptEntrypoint(target) ? target : undefined;
 }
 
 function matchesPackageManagerPath(

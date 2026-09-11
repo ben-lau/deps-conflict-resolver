@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { spawn } from 'child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -24,12 +24,12 @@ describe('createPackageManagerAdapter', () => {
     vi.clearAllMocks();
   });
 
-  it.each([
+  it.skipIf(process.platform === 'win32').each([
     ['npm', 'npm', ['install', '--legacy-peer-deps']],
     ['pnpm', 'pnpm', ['add']],
     ['yarn', 'yarn', ['add']],
   ] as const)(
-    'passes %s specs as literal child-process arguments',
+    'passes %s specs as literal child-process arguments on POSIX',
     async (packageManager, command, prefix) => {
       const child = createChildProcess(0);
       vi.mocked(spawn).mockReturnValue(child as never);
@@ -84,6 +84,58 @@ describe('createPackageManagerAdapter', () => {
       });
     },
   );
+
+  it.each([
+    [
+      'npm',
+      'NPM_CLI_JS',
+      'node_modules\\npm\\bin\\npm-cli.js',
+      'NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js',
+    ],
+    ['pnpm', 'PNPM_CLI_JS', 'pnpm.cjs', 'PNPM_CLI_JS=%~dp0\\pnpm.cjs'],
+    [
+      'yarn',
+      'YARN_CLI_JS',
+      'node_modules\\yarn\\bin\\yarn.js',
+      'YARN_CLI_JS=%~dp0\\node_modules\\yarn\\bin\\yarn.js',
+    ],
+  ] as const)(
+    'resolves the variable-referenced %s Windows shim entrypoint',
+    async (packageManager, variable, relativeTarget, assignment) => {
+      const root = await mkdtemp(join(tmpdir(), 'package-manager-shim-'));
+      const shimPath = join(root, `${packageManager}.cmd`);
+      await writeFile(shimPath, `@SET "${assignment}"\r\n"%~dp0\\node.exe" "%${variable}%" %*\r\n`);
+
+      try {
+        expect(
+          resolvePackageManagerInvocation(packageManager, 'win32', {
+            npm_execpath: shimPath,
+          }),
+        ).toEqual({
+          command: process.execPath,
+          argsPrefix: [win32.resolve(win32.dirname(shimPath), relativeTarget)],
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('rejects an unrecognized Windows package-manager shim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'package-manager-shim-'));
+    const shimPath = join(root, 'npm.cmd');
+    await writeFile(shimPath, '@ECHO off\r\nECHO not a package manager shim\r\n');
+
+    try {
+      expect(() =>
+        resolvePackageManagerInvocation('npm', 'win32', {
+          npm_execpath: shimPath,
+        }),
+      ).toThrow('Could not resolve a Node entrypoint for npm');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it('waits for close after a non-timeout process error', async () => {
     const child = createChildProcess();
