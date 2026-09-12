@@ -121,6 +121,54 @@ describe('createPackageManagerAdapter', () => {
     },
   );
 
+  it('prefers npm-cli.js when the standard npm shim defines prefix and cli variables', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'package-manager-shim-'));
+    const shimPath = join(root, 'npm.cmd');
+    await writeFile(
+      shimPath,
+      [
+        '@SET "NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js"',
+        '@SET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"',
+        '"%~dp0\\node.exe" "%NPM_PREFIX_JS%" %*',
+        '"%~dp0\\node.exe" "%NPM_CLI_JS%" %*',
+      ].join('\r\n'),
+    );
+
+    try {
+      expect(
+        resolvePackageManagerInvocation('npm', 'win32', {
+          npm_execpath: shimPath,
+        }),
+      ).toEqual({
+        command: process.execPath,
+        argsPrefix: [win32.resolve(win32.dirname(shimPath), 'node_modules\\npm\\bin\\npm-cli.js')],
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an unknown npm shim variable pointing to a JavaScript file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'package-manager-shim-'));
+    const shimPath = join(root, 'npm.cmd');
+    await writeFile(
+      shimPath,
+      ['@SET "UNTRUSTED_JS=%~dp0\\payload.js"', '"%~dp0\\node.exe" "%UNTRUSTED_JS%" %*'].join(
+        '\r\n',
+      ),
+    );
+
+    try {
+      expect(() =>
+        resolvePackageManagerInvocation('npm', 'win32', {
+          npm_execpath: shimPath,
+        }),
+      ).toThrow('Could not resolve a Node entrypoint for npm');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects an unrecognized Windows package-manager shim', async () => {
     const root = await mkdtemp(join(tmpdir(), 'package-manager-shim-'));
     const shimPath = join(root, 'npm.cmd');

@@ -28,6 +28,26 @@ export interface PackageManagerInvocation {
   argsPrefix: string[];
 }
 
+interface PackageManagerEntrypointRule {
+  cliVariables: readonly string[];
+  cliBasenames: readonly string[];
+}
+
+const PACKAGE_MANAGER_ENTRYPOINT_RULES: Record<PackageManagerType, PackageManagerEntrypointRule> = {
+  npm: {
+    cliVariables: ['NPM_CLI_JS'],
+    cliBasenames: ['npm-cli.js', 'npm.js'],
+  },
+  pnpm: {
+    cliVariables: ['PNPM_CLI_JS'],
+    cliBasenames: ['pnpm.cjs', 'pnpm.js'],
+  },
+  yarn: {
+    cliVariables: ['YARN_CLI_JS'],
+    cliBasenames: ['yarn.js', 'yarn.cjs'],
+  },
+};
+
 const DEFAULT_TIMING: PackageManagerTiming = {
   timeoutMs: 120_000,
   terminateGraceMs: 5_000,
@@ -267,28 +287,43 @@ function parseWindowsShimEntrypoint(
   }
 
   const assignments = parseWindowsShimAssignments(shimContents);
-  const directTargetPattern = /"((?:%~dp0|%dp0%)[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/gi;
-  for (const match of shimContents.matchAll(directTargetPattern)) {
-    const target = match[1];
-    if (target) {
-      const entrypoint = resolveShimTarget(target, assignments, shimPath, platform);
-      if (entrypoint) {
+  const rule = PACKAGE_MANAGER_ENTRYPOINT_RULES[packageManager];
+  const allowedVariables = new Set(rule.cliVariables);
+
+  for (const variable of rule.cliVariables) {
+    const values = assignments.get(variable);
+    if (!values) {
+      continue;
+    }
+
+    for (const value of values) {
+      const entrypoint = resolveShimTarget(
+        value,
+        assignments,
+        shimPath,
+        platform,
+        allowedVariables,
+      );
+      if (entrypoint && isKnownPackageManagerEntrypoint(packageManager, entrypoint)) {
         return entrypoint;
       }
     }
   }
 
-  const variableReferencePattern = /%([A-Za-z_][A-Za-z0-9_]*)%/g;
-  for (const match of shimContents.matchAll(variableReferencePattern)) {
-    const variable = match[1];
-    const assignedValue = variable ? assignments.get(variable.toUpperCase()) : undefined;
-    if (!assignedValue) {
-      continue;
-    }
-
-    const entrypoint = resolveShimTarget(assignedValue, assignments, shimPath, platform);
-    if (entrypoint) {
-      return entrypoint;
+  const directTargetPattern = /"((?:%~dp0|%dp0%)[\\/][^"\r\n]+\.(?:js|cjs|mjs))"/gi;
+  for (const match of shimContents.matchAll(directTargetPattern)) {
+    const target = match[1];
+    if (target) {
+      const entrypoint = resolveShimTarget(
+        target,
+        assignments,
+        shimPath,
+        platform,
+        allowedVariables,
+      );
+      if (entrypoint && isKnownPackageManagerEntrypoint(packageManager, entrypoint)) {
+        return entrypoint;
+      }
     }
   }
 
@@ -296,8 +331,14 @@ function parseWindowsShimEntrypoint(
   for (const match of shimContents.matchAll(absoluteTargetPattern)) {
     const target = match[1];
     if (target) {
-      const entrypoint = resolveShimTarget(target, assignments, shimPath, platform);
-      if (entrypoint) {
+      const entrypoint = resolveShimTarget(
+        target,
+        assignments,
+        shimPath,
+        platform,
+        allowedVariables,
+      );
+      if (entrypoint && isKnownPackageManagerEntrypoint(packageManager, entrypoint)) {
         return entrypoint;
       }
     }
@@ -306,8 +347,8 @@ function parseWindowsShimEntrypoint(
   return undefined;
 }
 
-function parseWindowsShimAssignments(contents: string): Map<string, string> {
-  const assignments = new Map<string, string>();
+function parseWindowsShimAssignments(contents: string): Map<string, string[]> {
+  const assignments = new Map<string, string[]>();
   const assignmentPattern =
     /^\s*@?set\s+(?:"([A-Za-z_][A-Za-z0-9_]*)=([^"\r\n]*)"|([A-Za-z_][A-Za-z0-9_]*)=([^\r\n]*))\s*$/gim;
 
@@ -315,7 +356,9 @@ function parseWindowsShimAssignments(contents: string): Map<string, string> {
     const name = (match[1] ?? match[3])?.toUpperCase();
     const value = (match[2] ?? match[4])?.trim();
     if (name && value !== undefined) {
-      assignments.set(name, value);
+      const values = assignments.get(name) ?? [];
+      values.push(value);
+      assignments.set(name, values);
     }
   }
 
@@ -324,9 +367,10 @@ function parseWindowsShimAssignments(contents: string): Map<string, string> {
 
 function resolveShimTarget(
   rawTarget: string,
-  assignments: Map<string, string>,
+  assignments: Map<string, string[]>,
   shimPath: string,
   platform: NodeJS.Platform,
+  allowedVariables: ReadonlySet<string>,
   seenVariables: Set<string> = new Set(),
 ): string | undefined {
   const target = rawTarget.trim().replace(/^"|"$/g, '');
@@ -341,27 +385,46 @@ function resolveShimTarget(
   const variableMatch = target.match(/^%([A-Za-z_][A-Za-z0-9_]*)%([\\/].*)?$/);
   if (variableMatch?.[1]) {
     const variable = variableMatch[1].toUpperCase();
+    if (!allowedVariables.has(variable)) {
+      return undefined;
+    }
+
     if (seenVariables.has(variable)) {
       return undefined;
     }
 
-    const assignedValue = assignments.get(variable);
-    if (!assignedValue) {
+    const assignedValues = assignments.get(variable);
+    if (!assignedValues) {
       return undefined;
     }
 
     const nextSeenVariables = new Set(seenVariables);
     nextSeenVariables.add(variable);
-    return resolveShimTarget(
-      `${assignedValue}${variableMatch[2] ?? ''}`,
-      assignments,
-      shimPath,
-      platform,
-      nextSeenVariables,
-    );
+    for (const assignedValue of assignedValues) {
+      const resolved = resolveShimTarget(
+        `${assignedValue}${variableMatch[2] ?? ''}`,
+        assignments,
+        shimPath,
+        platform,
+        allowedVariables,
+        nextSeenVariables,
+      );
+      if (resolved) {
+        return resolved;
+      }
+    }
+    return undefined;
   }
 
   return isJavaScriptEntrypoint(target) ? target : undefined;
+}
+
+function isKnownPackageManagerEntrypoint(
+  packageManager: PackageManagerType,
+  filePath: string,
+): boolean {
+  const fileName = win32.basename(filePath).toLowerCase();
+  return PACKAGE_MANAGER_ENTRYPOINT_RULES[packageManager].cliBasenames.includes(fileName);
 }
 
 function matchesPackageManagerPath(
@@ -371,16 +434,11 @@ function matchesPackageManagerPath(
 ): boolean {
   const pathModule = platform === 'win32' ? win32 : posix;
   const fileName = pathModule.basename(packageManagerPath).toLowerCase();
-  switch (packageManager) {
-    case 'npm':
-      return fileName === 'npm' || fileName === 'npm.cmd' || fileName === 'npm-cli.js';
-    case 'pnpm':
-      return fileName === 'pnpm' || fileName === 'pnpm.cmd' || fileName.startsWith('pnpm.');
-    case 'yarn':
-      return fileName === 'yarn' || fileName === 'yarn.cmd' || fileName.startsWith('yarn.');
-  }
-
-  return false;
+  return (
+    fileName === `${packageManager}.cmd` ||
+    fileName === `${packageManager}.exe` ||
+    isKnownPackageManagerEntrypoint(packageManager, packageManagerPath)
+  );
 }
 
 function isJavaScriptEntrypoint(filePath: string): boolean {
