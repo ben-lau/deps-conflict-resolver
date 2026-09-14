@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PackageInstaller, createPackageInstaller } from '../../src/core/package-installer';
 import { clearPackageJsonCache, fileExists } from '../../src/utils/fs';
-import { readFileSync } from 'fs';
+import { promises as fs, readFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { ResolvedOptions, AliasMapping } from '../../src/types';
 import type {
   PackageManagerAdapter,
@@ -110,36 +112,59 @@ describe('PackageInstaller', () => {
       expect(result.installed).toEqual([]);
     });
 
-    it('should reinstall when version mismatch', async () => {
-      vi.mocked(fileExists).mockImplementation((path) => {
-        return path.toString().includes('node_modules');
-      });
-      vi.mocked(readFileSync).mockReturnValue(
-        JSON.stringify({
-          name: 'vue',
-          version: '2.6.0', // 版本不匹配
-        }),
+    it('should report an occupied alias without replacing it', async () => {
+      const projectRoot = await fs.mkdtemp(
+        join(tmpdir(), 'deps-conflict-resolver-alias-collision-'),
       );
+      const aliasPath = join(projectRoot, 'node_modules', 'aliased-vue2');
 
-      // Mock spawn 成功
-      const mockChild = createMockChildProcess(0);
-      vi.mocked(spawn).mockReturnValue(mockChild as never);
+      try {
+        await fs.mkdir(aliasPath, { recursive: true });
+        await fs.writeFile(
+          join(aliasPath, 'package.json'),
+          JSON.stringify({ name: 'different-package', version: '1.0.0' }),
+          'utf8',
+        );
 
-      const mappings: AliasMapping[] = [
-        {
+        vi.mocked(fileExists).mockReturnValue(true);
+        vi.mocked(readFileSync).mockReturnValue(
+          JSON.stringify({
+            name: 'different-package',
+            version: '1.0.0',
+          }),
+        );
+
+        const install = vi.fn().mockResolvedValue({
+          success: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+        });
+        const collisionInstaller = new PackageInstaller(
+          { ...mockOptions, projectRoot },
+          { install },
+        );
+        const mapping: AliasMapping = {
           originalName: 'vue',
-          aliasName: 'aliased-vue',
+          aliasName: 'aliased-vue2',
           resolvedVersion: '2.7.0',
           usedBy: ['some-package'],
           allDependents: ['some-package'],
-          installSpec: 'aliased-vue@npm:vue@2.7.0',
-        },
-      ];
+          installSpec: 'aliased-vue2@npm:vue@2.7.0',
+        };
 
-      const result = await installer.installAliases(mappings);
+        const result = await collisionInstaller.installAliases([mapping]);
 
-      expect(result.success).toBe(true);
-      expect(result.installed).toContain('aliased-vue');
+        expect(result.success).toBe(false);
+        expect(result.installed).toEqual([]);
+        expect(result.failed).toContain('aliased-vue2');
+        expect(result.errors).toContainEqual(expect.stringContaining('Alias collision'));
+        expect(install).not.toHaveBeenCalled();
+        expect(spawn).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(projectRoot, { recursive: true, force: true });
+      }
     });
 
     it('should install when alias not exists', async () => {
@@ -304,10 +329,13 @@ describe('PackageInstaller', () => {
         },
       ];
 
-      await installer.installAliases(mappings);
+      // 已占用的别名不能被原地替换
+      const result = await installer.installAliases(mappings);
 
-      // 应该重新安装
-      expect(vi.mocked(spawn)).toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.failed).toContain('aliased-vue');
+      expect(result.errors).toContainEqual(expect.stringContaining('Alias collision'));
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     });
 
     it('should handle package.json read error in verification', async () => {
@@ -330,10 +358,12 @@ describe('PackageInstaller', () => {
         },
       ];
 
-      await installer.installAliases(mappings);
+      const result = await installer.installAliases(mappings);
 
-      // 应该安装
-      expect(vi.mocked(spawn)).toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.failed).toContain('aliased-vue');
+      expect(result.errors).toContainEqual(expect.stringContaining('Alias collision'));
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     });
 
     it('should handle JSON parse error in verification', async () => {
@@ -354,10 +384,12 @@ describe('PackageInstaller', () => {
         },
       ];
 
-      await installer.installAliases(mappings);
+      const result = await installer.installAliases(mappings);
 
-      // 应该安装
-      expect(vi.mocked(spawn)).toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.failed).toContain('aliased-vue');
+      expect(result.errors).toContainEqual(expect.stringContaining('Alias collision'));
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     });
 
     it('should route installation through the supplied package manager adapter', async () => {

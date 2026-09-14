@@ -281,6 +281,92 @@ describe('DependencyAnalyzer workspace declared merging', () => {
   });
 });
 
+describe('DependencyAnalyzer optional peer dependencies', () => {
+  it('does not remediate optional peers', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-optional-peer-'));
+    const firstLevelPackage = 'optional-vue-peer-package';
+
+    try {
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'optional-peer-host',
+          version: '1.0.0',
+          dependencies: {
+            [firstLevelPackage]: '1.0.0',
+            vue: '^3.0.0',
+          },
+        }),
+        'utf8',
+      );
+      await fs.mkdir(join(projectRoot, 'node_modules', firstLevelPackage), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', firstLevelPackage, 'package.json'),
+        JSON.stringify({
+          name: firstLevelPackage,
+          version: '1.0.0',
+          peerDependencies: { vue: '^2.7.0' },
+          peerDependenciesMeta: { vue: { optional: true } },
+        }),
+        'utf8',
+      );
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            name: 'vue',
+            versions: { '2.7.16': {} },
+            'dist-tags': { latest: '2.7.16' },
+          }),
+        }),
+      );
+
+      const mainPackageJson: PackageJson = {
+        name: 'optional-peer-host',
+        version: '1.0.0',
+        dependencies: {
+          [firstLevelPackage]: '1.0.0',
+          vue: '^3.0.0',
+        },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [firstLevelPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'npm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(options, mainPackageJson).analyze();
+
+      expect(result.aliasMappings).not.toContainEqual(
+        expect.objectContaining({ originalName: 'vue' }),
+      );
+      expect(result.peerConflicts).not.toContainEqual(
+        expect.objectContaining({ packageName: 'vue' }),
+      );
+      expect(result.missingFirstLevelPeers).not.toContainEqual(
+        expect.objectContaining({ packageName: 'vue' }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('DependencyAnalyzer Edge Cases', () => {
   it('should handle empty dependencies list', async () => {
     const mockOptions: ResolvedOptions = {

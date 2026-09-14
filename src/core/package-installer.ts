@@ -37,6 +37,18 @@ interface InstallResult {
   errors: string[];
 }
 
+interface InstalledAliasVerification {
+  matches: boolean;
+  actualPackageName: string | null;
+  actualVersion: string | null;
+  reason:
+    | 'matched'
+    | 'missing-package-json'
+    | 'invalid-package-json'
+    | 'package-name-mismatch'
+    | 'version-mismatch';
+}
+
 /**
  * 包安装器
  * 负责安装别名依赖
@@ -74,38 +86,57 @@ export class PackageInstaller {
       return result;
     }
 
-    // 过滤出需要安装的
-    const toInstall = mappings.filter((m) => {
+    // 过滤出需要安装的，同时拒绝覆盖已占用但不匹配的别名
+    const toInstall: AliasMapping[] = [];
+    for (const m of mappings) {
       // 没有 installSpec 表示复用现有别名，不需要安装
       if (!m.installSpec) {
         logger.debug(`Skipping ${m.aliasName}: reusing existing installation`);
-        return false;
+        continue;
       }
 
       const aliasPath = join(this.options.projectRoot, 'node_modules', m.aliasName);
 
       // 检查是否已安装
       if (!fileExists(aliasPath)) {
-        return true; // 未安装，需要安装
+        toInstall.push(m); // 未安装，需要安装
+        continue;
       }
 
       // 已安装，验证版本是否正确
-      const versionMatch = this.verifyInstalledVersion(
+      const verification = this.verifyInstalledVersion(
         aliasPath,
         m.originalName,
         m.resolvedVersion,
       );
-      if (!versionMatch) {
-        logger.info(`${m.aliasName} exists but version mismatch, will reinstall`);
-        return true; // 版本不匹配，需要重新安装
+      if (!verification.matches) {
+        const collision = {
+          code: 'ALIAS_NAME_OCCUPIED',
+          aliasName: m.aliasName,
+          expected: {
+            packageName: m.originalName,
+            version: m.resolvedVersion,
+          },
+          actual: {
+            packageName: verification.actualPackageName,
+            version: verification.actualVersion,
+          },
+          reason: verification.reason,
+        };
+        result.success = false;
+        result.failed.push(m.aliasName);
+        result.errors.push(`Alias collision: ${JSON.stringify(collision)}`);
+        logger.warn(`Alias collision: ${JSON.stringify(collision)}`);
+        continue;
       }
 
       logger.debug(`${m.aliasName} already installed with correct version`);
-      return false;
-    });
+    }
 
     if (toInstall.length === 0) {
-      logger.info('All aliases already installed with correct versions');
+      if (result.success) {
+        logger.info('All aliases already installed with correct versions');
+      }
       return result;
     }
 
@@ -119,8 +150,8 @@ export class PackageInstaller {
       logger.info(`Successfully installed: ${result.installed.join(', ')}`);
     } else {
       result.success = false;
-      result.failed = toInstall.map((m) => m.aliasName);
-      result.errors = installResult.errors;
+      result.failed.push(...toInstall.map((m) => m.aliasName));
+      result.errors.push(...installResult.errors);
       logger.error(`Failed to install aliases: ${installResult.errors.join(', ')}`);
     }
 
@@ -129,31 +160,49 @@ export class PackageInstaller {
 
   /**
    * 验证已安装的别名版本是否正确
-   * @returns true 如果版本匹配
+   * @returns 验证结果及已安装包信息
    */
   private verifyInstalledVersion(
     aliasPath: string,
     expectedPackageName: string,
     expectedVersion: string,
-  ): boolean {
+  ): InstalledAliasVerification {
     try {
       const pkgJsonPath = join(aliasPath, 'package.json');
       if (!fileExists(pkgJsonPath)) {
-        return false;
+        return {
+          matches: false,
+          actualPackageName: null,
+          actualVersion: null,
+          reason: 'missing-package-json',
+        };
       }
 
       const pkgJson = readPackageJsonCached(aliasPath);
       if (!pkgJson) {
         logger.debug(`Failed to verify version: unable to read/parse ${pkgJsonPath}`);
-        return false;
+        return {
+          matches: false,
+          actualPackageName: null,
+          actualVersion: null,
+          reason: 'invalid-package-json',
+        };
       }
+
+      const actualPackageName = pkgJson.name ?? null;
+      const actualVersion = pkgJson.version ?? null;
 
       // 检查实际包名是否匹配（npm 别名安装后，name 字段是原始包名）
       if (pkgJson.name !== expectedPackageName) {
         logger.debug(
           `Package name mismatch: expected ${expectedPackageName}, got ${pkgJson.name ?? 'unknown'}`,
         );
-        return false;
+        return {
+          matches: false,
+          actualPackageName,
+          actualVersion,
+          reason: 'package-name-mismatch',
+        };
       }
 
       // 检查版本是否匹配（使用 semver 等价比较，容忍 v1.0.0 vs 1.0.0 等格式差异）
@@ -163,13 +212,28 @@ export class PackageInstaller {
         logger.debug(
           `Version mismatch: expected ${expectedVersion}, got ${pkgJson.version ?? 'unknown'}`,
         );
-        return false;
+        return {
+          matches: false,
+          actualPackageName,
+          actualVersion,
+          reason: 'version-mismatch',
+        };
       }
 
-      return true;
+      return {
+        matches: true,
+        actualPackageName,
+        actualVersion,
+        reason: 'matched',
+      };
     } catch (error) {
       logger.debug(`Failed to verify version: ${String(error)}`);
-      return false;
+      return {
+        matches: false,
+        actualPackageName: null,
+        actualVersion: null,
+        reason: 'invalid-package-json',
+      };
     }
   }
 

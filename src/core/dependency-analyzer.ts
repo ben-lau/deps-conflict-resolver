@@ -449,6 +449,13 @@ export class DependencyAnalyzer {
       for (const [peerName, peerRange] of Object.entries(peerDeps)) {
         const isOptional = peerMeta[peerName]?.optional === true;
 
+        if (isOptional) {
+          logger.debug(
+            `Skipping optional first-level peer dependency: ${peerName}@${peerRange} required by ${depName}`,
+          );
+          continue;
+        }
+
         const existing = peerDepsMap.get(peerName) ?? [];
         existing.push({
           path: [depName],
