@@ -464,6 +464,105 @@ describe('DependencyAnalyzer Alias Detection', () => {
       expect(result?.version).toBe('2.6.14');
     });
 
+    it('should not reuse a local alias whose installed package name differs', async () => {
+      const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-local-alias-'));
+      const aliasPath = join(projectRoot, 'node_modules', 'aliased-vue2');
+
+      try {
+        await fs.writeFile(
+          join(projectRoot, 'package.json'),
+          JSON.stringify({
+            name: 'alias-host',
+            version: '1.0.0',
+            dependencies: { 'aliased-vue2': 'npm:vue@2.7.0' },
+          }),
+          'utf8',
+        );
+        await fs.mkdir(aliasPath, { recursive: true });
+        await fs.writeFile(
+          join(aliasPath, 'package.json'),
+          JSON.stringify({ name: 'different-package', version: '2.7.0' }),
+          'utf8',
+        );
+
+        const analyzer = new DependencyAnalyzer(
+          { ...baseOptions, projectRoot },
+          {
+            name: 'alias-host',
+            version: '1.0.0',
+            dependencies: { 'aliased-vue2': 'npm:vue@2.7.0' },
+          },
+        );
+        const findExistingAliasForRanges = (
+          analyzer as unknown as {
+            findExistingAliasForRanges: (
+              packageName: string,
+              ranges: string[],
+              excludeAliases: Set<string>,
+            ) => { name: string; version: string } | null;
+          }
+        ).findExistingAliasForRanges.bind(analyzer);
+
+        const result = findExistingAliasForRanges('vue', ['^2.7.0'], new Set());
+
+        expect(result).toBeNull();
+      } finally {
+        await fs.rm(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('should not reuse a workspace alias whose installed package name differs', async () => {
+      const workspaceRoot = await fs.mkdtemp(
+        join(tmpdir(), 'deps-conflict-resolver-workspace-alias-'),
+      );
+      const projectRoot = join(workspaceRoot, 'packages', 'app');
+      const aliasPath = join(workspaceRoot, 'node_modules', 'aliased-vue2');
+
+      try {
+        await fs.mkdir(projectRoot, { recursive: true });
+        await fs.writeFile(
+          join(workspaceRoot, 'pnpm-workspace.yaml'),
+          'packages:\n  - packages/*\n',
+          'utf8',
+        );
+        await fs.writeFile(
+          join(workspaceRoot, 'package.json'),
+          JSON.stringify({
+            name: 'workspace-host',
+            version: '1.0.0',
+            dependencies: { 'aliased-vue2': 'npm:vue@2.7.0' },
+          }),
+          'utf8',
+        );
+        await fs.mkdir(aliasPath, { recursive: true });
+        await fs.writeFile(
+          join(aliasPath, 'package.json'),
+          JSON.stringify({ name: 'different-package', version: '2.7.0' }),
+          'utf8',
+        );
+
+        const analyzer = new DependencyAnalyzer(
+          { ...baseOptions, projectRoot },
+          { name: 'app', version: '1.0.0' },
+        );
+        const findExistingAliasForRanges = (
+          analyzer as unknown as {
+            findExistingAliasForRanges: (
+              packageName: string,
+              ranges: string[],
+              excludeAliases: Set<string>,
+            ) => { name: string; version: string } | null;
+          }
+        ).findExistingAliasForRanges.bind(analyzer);
+
+        const result = findExistingAliasForRanges('vue', ['^2.7.0'], new Set());
+
+        expect(result).toBeNull();
+      } finally {
+        await fs.rm(workspaceRoot, { recursive: true, force: true });
+      }
+    });
+
     it('should return null when version does not satisfy requirements (no override)', async () => {
       // 模拟已安装的 npm 别名：aliased-vue2 指向 vue@3.0.0（错误版本）
       // 新逻辑：版本不匹配时返回 null，不会覆盖已有依赖

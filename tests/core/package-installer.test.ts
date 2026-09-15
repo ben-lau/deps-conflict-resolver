@@ -5,6 +5,7 @@ import { promises as fs, readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { existsSync as realExistsSync, readFileSync as realReadFileSync } from 'node:fs';
 import type { ResolvedOptions, AliasMapping } from '../../src/types';
 import type {
   PackageManagerAdapter,
@@ -160,6 +161,48 @@ describe('PackageInstaller', () => {
         expect(result.installed).toEqual([]);
         expect(result.failed).toContain('aliased-vue2');
         expect(result.errors).toContainEqual(expect.stringContaining('Alias collision'));
+        expect(install).not.toHaveBeenCalled();
+        expect(spawn).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('should reject a reused alias when its directory contains a different package', async () => {
+      const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-reused-alias-'));
+      const aliasPath = join(projectRoot, 'node_modules', 'aliased-vue2');
+      const packageJsonPath = join(aliasPath, 'package.json');
+
+      try {
+        await fs.mkdir(aliasPath, { recursive: true });
+        await fs.writeFile(
+          packageJsonPath,
+          JSON.stringify({ name: 'different-package', version: '2.7.0' }),
+          'utf8',
+        );
+
+        vi.mocked(fileExists).mockImplementation((path) => realExistsSync(path));
+        vi.mocked(readFileSync).mockImplementation((path) => realReadFileSync(path, 'utf8'));
+
+        const install = vi.fn();
+        const collisionInstaller = new PackageInstaller(
+          { ...mockOptions, projectRoot },
+          { install },
+        );
+        const mapping: AliasMapping = {
+          originalName: 'vue',
+          aliasName: 'aliased-vue2',
+          resolvedVersion: '2.7.0',
+          usedBy: ['some-package'],
+          allDependents: ['some-package'],
+          installSpec: '',
+        };
+
+        const result = await collisionInstaller.installAliases([mapping]);
+
+        expect(result.success).toBe(false);
+        expect(result.failed).toEqual(['aliased-vue2']);
+        expect(result.errors).toContainEqual(expect.stringContaining('ALIAS_NAME_OCCUPIED'));
         expect(install).not.toHaveBeenCalled();
         expect(spawn).not.toHaveBeenCalled();
       } finally {

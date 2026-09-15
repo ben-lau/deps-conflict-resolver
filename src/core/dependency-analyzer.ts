@@ -839,6 +839,14 @@ export class DependencyAnalyzer {
           continue;
         }
 
+        const installedAlias = this.installedPackageCache.get(alias.aliasName);
+        if (installedAlias?.realName !== packageName) {
+          logger.debug(
+            `    Skip ${alias.aliasName}: installed package name ${installedAlias?.realName ?? 'unknown'} does not match ${packageName}`,
+          );
+          continue;
+        }
+
         // 检查版本是否满足所有范围
         const allSatisfied = ranges.every((range) => satisfies(alias.installedVersion!, range));
 
@@ -874,6 +882,12 @@ export class DependencyAnalyzer {
       if (workspaceRoot) {
         const { packagePath, pkgJson } = this.resolvePackageJson(wsAlias.aliasName, workspaceRoot);
         if (packagePath) {
+          if (pkgJson?.name !== packageName) {
+            logger.debug(
+              `    Skip ${wsAlias.aliasName}: installed package name ${pkgJson?.name ?? 'unknown'} does not match ${packageName}`,
+            );
+            continue;
+          }
           installedVersion = pkgJson?.version ?? null;
           logger.debug(
             `    Found ${wsAlias.aliasName} installed at workspace root: ${installedVersion}`,
@@ -885,6 +899,13 @@ export class DependencyAnalyzer {
       if (!installedVersion) {
         installedVersion = this.getAliasInstalledVersion(wsAlias.aliasName);
         if (installedVersion) {
+          const installedAlias = this.installedPackageCache.get(wsAlias.aliasName);
+          if (installedAlias?.realName !== packageName) {
+            logger.debug(
+              `    Skip ${wsAlias.aliasName}: installed package name ${installedAlias?.realName ?? 'unknown'} does not match ${packageName}`,
+            );
+            continue;
+          }
           logger.debug(`    Found ${wsAlias.aliasName} installed at project: ${installedVersion}`);
         }
       }

@@ -88,14 +88,46 @@ export class PackageInstaller {
 
     // 过滤出需要安装的，同时拒绝覆盖已占用但不匹配的别名
     const toInstall: AliasMapping[] = [];
+    const reportCollision = (mapping: AliasMapping, verification: InstalledAliasVerification) => {
+      const collision = {
+        code: 'ALIAS_NAME_OCCUPIED',
+        aliasName: mapping.aliasName,
+        expected: {
+          packageName: mapping.originalName,
+          version: mapping.resolvedVersion,
+        },
+        actual: {
+          packageName: verification.actualPackageName,
+          version: verification.actualVersion,
+        },
+        reason: verification.reason,
+      };
+      result.success = false;
+      result.failed.push(mapping.aliasName);
+      result.errors.push(`Alias collision: ${JSON.stringify(collision)}`);
+      logger.warn(`Alias collision: ${JSON.stringify(collision)}`);
+    };
+
     for (const m of mappings) {
+      const aliasPath = join(this.options.projectRoot, 'node_modules', m.aliasName);
+
       // 没有 installSpec 表示复用现有别名，不需要安装
       if (!m.installSpec) {
+        if (fileExists(aliasPath)) {
+          const verification = this.verifyInstalledVersion(
+            aliasPath,
+            m.originalName,
+            m.resolvedVersion,
+          );
+          if (!verification.matches) {
+            reportCollision(m, verification);
+            continue;
+          }
+        }
+
         logger.debug(`Skipping ${m.aliasName}: reusing existing installation`);
         continue;
       }
-
-      const aliasPath = join(this.options.projectRoot, 'node_modules', m.aliasName);
 
       // 检查是否已安装
       if (!fileExists(aliasPath)) {
@@ -110,23 +142,7 @@ export class PackageInstaller {
         m.resolvedVersion,
       );
       if (!verification.matches) {
-        const collision = {
-          code: 'ALIAS_NAME_OCCUPIED',
-          aliasName: m.aliasName,
-          expected: {
-            packageName: m.originalName,
-            version: m.resolvedVersion,
-          },
-          actual: {
-            packageName: verification.actualPackageName,
-            version: verification.actualVersion,
-          },
-          reason: verification.reason,
-        };
-        result.success = false;
-        result.failed.push(m.aliasName);
-        result.errors.push(`Alias collision: ${JSON.stringify(collision)}`);
-        logger.warn(`Alias collision: ${JSON.stringify(collision)}`);
+        reportCollision(m, verification);
         continue;
       }
 
