@@ -20,7 +20,8 @@ import {
   rangesIntersect,
 } from '../utils/semver';
 import { parseNpmAlias } from '../utils/version-spec';
-import { fetchAllVersions, clearNpmRegistryCache } from './npm-registry';
+import { clearNpmRegistryCache } from './npm-registry';
+import { npmRegistryClient, type RegistryClient } from './registry-client';
 
 const logger = createLogger('dependency-analyzer');
 
@@ -36,6 +37,17 @@ interface ExistingAliasInfo {
   versionSpec: string;
   /** 已安装的版本（从 node_modules 读取） */
   installedVersion: string | null;
+}
+
+interface ExistingAliasMatch {
+  name: string;
+  version: string;
+  isWorkspaceAlias?: boolean;
+}
+
+interface ReusedAliasGroup {
+  alias: ExistingAliasMatch;
+  requests: DependencyPath[];
 }
 
 export class DependencyAnalyzer {
@@ -66,14 +78,19 @@ export class DependencyAnalyzer {
   private workspaceRootDeclaredLoaded = false;
   /** collectAllRelatedPackages 的 memo 缓存（单次 analyze 生命周期内有效） */
   private collectCache = new Map<string, string[]>();
+  /** 注册表访问适配器（可注入以支持离线分析和确定性测试） */
+  private registryClient: RegistryClient;
 
   constructor(
     options: ResolvedOptions,
     mainPackageJson: PackageJson,
     /** 可选：预填充的已安装包信息（主要用于测试） */
     installedDeps?: Map<string, InstalledPackageInfo>,
+    /** 可选：注册表访问适配器（主要用于离线分析和测试） */
+    registryClient: RegistryClient = npmRegistryClient,
   ) {
     this.options = options;
+    this.registryClient = registryClient;
     this.rawDeclaredDeps = {
       ...mainPackageJson.dependencies,
       ...mainPackageJson.devDependencies,
@@ -598,10 +615,7 @@ export class DependencyAnalyzer {
   ): Promise<AliasMapping[]> {
     const { packageName, conflictingRanges } = conflict;
 
-    // 1. 按范围兼容性分组
-    const rangeGroups = this.groupRangesByCompatibility(conflictingRanges);
-
-    logger.info(`Creating alias for "${packageName}": ${rangeGroups.length} version groups`);
+    logger.info(`Creating alias for "${packageName}"`);
 
     // 输出 workspace 检测结果（使用 info 级别以便用户看到）
     const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
@@ -635,21 +649,78 @@ export class DependencyAnalyzer {
       }
     }
 
-    // 2. 获取远程版本列表（只获取一次）
-    const versions = await fetchAllVersions(packageName, this.options.registry);
-    if (versions.length === 0) {
-      logger.warn(`No versions found for ${packageName}`);
-      return [];
-    }
-
-    // 3. 获取已存在的别名（用于复用和避免命名冲突）
+    // 获取已存在的别名（用于复用和避免命名冲突）
     const existingAliasNames = this.getExistingAliasNames(packageName);
     // 记录这次已使用的别名，避免重复使用
     const usedAliasNames = new Set<string>();
-
     const mappings: AliasMapping[] = [];
 
-    // 4. 为每组创建别名映射
+    // 先逐个匹配已安装的别名。多个请求匹配到同一个别名时合并为一个映射，
+    // 这样完全满足的冲突可以在没有 registry 的环境中完成分析。
+    const reusedAliasGroups = new Map<string, ReusedAliasGroup>();
+    const unresolvedRequests: DependencyPath[] = [];
+
+    for (const request of conflictingRanges) {
+      const existingAlias = this.findExistingAliasForRanges(
+        packageName,
+        [request.requiredRange],
+        new Set(),
+      );
+
+      if (!existingAlias) {
+        unresolvedRequests.push(request);
+        continue;
+      }
+
+      usedAliasNames.add(existingAlias.name);
+      const reusedGroup = reusedAliasGroups.get(existingAlias.name);
+      if (reusedGroup) {
+        reusedGroup.requests.push(request);
+      } else {
+        reusedAliasGroups.set(existingAlias.name, {
+          alias: existingAlias,
+          requests: [request],
+        });
+      }
+    }
+
+    for (const reusedGroup of reusedAliasGroups.values()) {
+      mappings.push(
+        this.buildAliasMapping(
+          packageName,
+          reusedGroup.alias.name,
+          reusedGroup.alias.version,
+          '', // 不需要安装
+          reusedGroup.requests,
+          allConflictPackageNames,
+        ),
+      );
+    }
+
+    // 没有未匹配的请求时，不访问 registry。
+    if (unresolvedRequests.length === 0) {
+      return mappings;
+    }
+
+    // 只为未匹配请求获取远程版本；registry 失败时保留前面已经生成的复用映射。
+    let versions: string[];
+    try {
+      versions = await this.registryClient.fetchAllVersions(packageName, this.options.registry);
+    } catch (error) {
+      logger.warn(`Failed to fetch versions for ${packageName}: ${String(error)}`);
+      return mappings;
+    }
+
+    if (versions.length === 0) {
+      logger.warn(`No versions found for ${packageName}`);
+      return mappings;
+    }
+
+    // 仅对未匹配请求按范围兼容性分组
+    const rangeGroups = this.groupRangesByCompatibility(unresolvedRequests);
+    logger.info(`Creating alias for "${packageName}": ${rangeGroups.length} version groups`);
+
+    // 为每组创建别名映射
     for (let i = 0; i < rangeGroups.length; i++) {
       const group = rangeGroups[i];
       if (!group || group.length === 0) continue;
@@ -810,11 +881,7 @@ export class DependencyAnalyzer {
     packageName: string,
     ranges: string[],
     excludeAliases: Set<string>,
-  ): {
-    name: string;
-    version: string;
-    isWorkspaceAlias?: boolean;
-  } | null {
+  ): ExistingAliasMatch | null {
     logger.debug(
       `  Searching for existing alias for ${packageName} satisfying ranges: [${ranges.join(', ')}]`,
     );
@@ -928,30 +995,7 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      // 如果未安装，用声明的版本范围检查是否有交集
-      // 这适用于别名尚未安装但声明了的情况
-      const declaredSpec = wsAlias.versionSpec;
-      if (declaredSpec) {
-        logger.debug(
-          `    Checking ${wsAlias.aliasName} (declared: ${declaredSpec}) - not installed yet`,
-        );
-        // 检查声明的版本范围与需求范围是否有交集
-        const hasIntersection = ranges.every((range) => rangesIntersect(declaredSpec, range));
-        if (hasIntersection) {
-          logger.info(
-            `    Can reuse workspace alias: ${wsAlias.aliasName} (declared: ${declaredSpec})`,
-          );
-          return {
-            name: wsAlias.aliasName,
-            version: declaredSpec,
-            isWorkspaceAlias: true,
-          };
-        } else {
-          logger.debug(
-            `    Skip ${wsAlias.aliasName}: declared range ${declaredSpec} doesn't intersect with [${ranges.join(', ')}]`,
-          );
-        }
-      }
+      // 仅已安装的 workspace alias 可复用；声明但尚未安装的 alias 仍需解析远程版本。
     }
 
     logger.debug(`  No existing alias found for ${packageName}`);

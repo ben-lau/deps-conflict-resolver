@@ -367,6 +367,398 @@ describe('DependencyAnalyzer optional peer dependencies', () => {
   });
 });
 
+describe('DependencyAnalyzer offline alias reuse', () => {
+  it('reuses an installed alias without registry access', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-offline-alias-'));
+    const firstLevelPackage = 'legacy-vue-package';
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockRejectedValue(new Error('registry must not be called')),
+    };
+
+    try {
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'offline-alias-host',
+          version: '1.0.0',
+          dependencies: {
+            [firstLevelPackage]: '1.0.0',
+            vue: '^3.0.0',
+            vue2: 'npm:vue@2.7.16',
+          },
+        }),
+        'utf8',
+      );
+
+      await fs.mkdir(join(projectRoot, 'node_modules', firstLevelPackage), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', firstLevelPackage, 'package.json'),
+        JSON.stringify({
+          name: firstLevelPackage,
+          version: '1.0.0',
+          peerDependencies: { vue: '^2.7.0' },
+        }),
+        'utf8',
+      );
+
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue2'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue2', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '2.7.16' }),
+        'utf8',
+      );
+
+      // Keep the pre-seam implementation from reaching the network while the
+      // test proves that an injected adapter is the only registry dependency.
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network must not be called')));
+
+      const mainPackageJson: PackageJson = {
+        name: 'offline-alias-host',
+        version: '1.0.0',
+        dependencies: {
+          [firstLevelPackage]: '1.0.0',
+          vue: '^3.0.0',
+          vue2: 'npm:vue@2.7.16',
+        },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [firstLevelPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'npm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const analyzer = new DependencyAnalyzer(options, mainPackageJson, undefined, registryClient);
+      const result = await analyzer.analyze();
+
+      expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
+      expect(result.aliasMappings).toContainEqual(
+        expect.objectContaining({
+          originalName: 'vue',
+          aliasName: 'vue2',
+          installSpec: '',
+          resolvedVersion: '2.7.16',
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reuses an installed workspace alias without registry access', async () => {
+    const workspaceRoot = await fs.mkdtemp(
+      join(tmpdir(), 'deps-conflict-resolver-offline-workspace-alias-'),
+    );
+    const projectRoot = join(workspaceRoot, 'packages', 'app');
+    const firstLevelPackage = 'legacy-vue-package';
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockRejectedValue(new Error('registry must not be called')),
+    };
+
+    try {
+      await fs.mkdir(projectRoot, { recursive: true });
+      await fs.writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+      await fs.writeFile(
+        join(workspaceRoot, 'package.json'),
+        JSON.stringify({
+          name: 'offline-workspace-host',
+          version: '1.0.0',
+          dependencies: { vue2: 'npm:vue@2.7.16' },
+        }),
+        'utf8',
+      );
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'offline-workspace-app',
+          version: '1.0.0',
+          dependencies: { [firstLevelPackage]: '1.0.0', vue: '^3.0.0' },
+        }),
+        'utf8',
+      );
+
+      await fs.mkdir(join(workspaceRoot, 'node_modules', firstLevelPackage), { recursive: true });
+      await fs.writeFile(
+        join(workspaceRoot, 'node_modules', firstLevelPackage, 'package.json'),
+        JSON.stringify({
+          name: firstLevelPackage,
+          version: '1.0.0',
+          peerDependencies: { vue: '^2.7.0' },
+        }),
+        'utf8',
+      );
+      await fs.mkdir(join(workspaceRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(workspaceRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+      await fs.mkdir(join(workspaceRoot, 'node_modules', 'vue2'), { recursive: true });
+      await fs.writeFile(
+        join(workspaceRoot, 'node_modules', 'vue2', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '2.7.16' }),
+        'utf8',
+      );
+
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network must not be called')));
+
+      const mainPackageJson: PackageJson = {
+        name: 'offline-workspace-app',
+        version: '1.0.0',
+        dependencies: { [firstLevelPackage]: '1.0.0', vue: '^3.0.0' },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [firstLevelPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'pnpm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(
+        options,
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
+      expect(result.aliasMappings).toContainEqual(
+        expect.objectContaining({
+          originalName: 'vue',
+          aliasName: 'vue2',
+          installSpec: '',
+          resolvedVersion: '2.7.16',
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reuse a declared but uninstalled workspace alias', async () => {
+    const workspaceRoot = await fs.mkdtemp(
+      join(tmpdir(), 'deps-conflict-resolver-uninstalled-workspace-alias-'),
+    );
+    const projectRoot = join(workspaceRoot, 'packages', 'app');
+    const firstLevelPackage = 'legacy-vue-package';
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockResolvedValue(['2.7.16']),
+    };
+
+    try {
+      await fs.mkdir(projectRoot, { recursive: true });
+      await fs.writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+      await fs.writeFile(
+        join(workspaceRoot, 'package.json'),
+        JSON.stringify({
+          name: 'uninstalled-workspace-host',
+          version: '1.0.0',
+          dependencies: { vue2: 'npm:vue@^2.7.0' },
+        }),
+        'utf8',
+      );
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'uninstalled-workspace-app',
+          version: '1.0.0',
+          dependencies: { [firstLevelPackage]: '1.0.0', vue: '^3.0.0' },
+        }),
+        'utf8',
+      );
+
+      await fs.mkdir(join(workspaceRoot, 'node_modules', firstLevelPackage), { recursive: true });
+      await fs.writeFile(
+        join(workspaceRoot, 'node_modules', firstLevelPackage, 'package.json'),
+        JSON.stringify({
+          name: firstLevelPackage,
+          version: '1.0.0',
+          peerDependencies: { vue: '^2.7.0' },
+        }),
+        'utf8',
+      );
+      await fs.mkdir(join(workspaceRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(workspaceRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+
+      const fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          name: 'vue',
+          versions: { '2.7.16': {} },
+          'dist-tags': { latest: '2.7.16' },
+        }),
+      });
+      vi.stubGlobal('fetch', fetch);
+
+      const mainPackageJson: PackageJson = {
+        name: 'uninstalled-workspace-app',
+        version: '1.0.0',
+        dependencies: { [firstLevelPackage]: '1.0.0', vue: '^3.0.0' },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [firstLevelPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'pnpm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(
+        options,
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(registryClient.fetchAllVersions).toHaveBeenCalledTimes(1);
+      expect(result.aliasMappings).toContainEqual(
+        expect.objectContaining({
+          originalName: 'vue',
+          installSpec: 'aliased-vue2@npm:vue@2.7.16',
+          resolvedVersion: '2.7.16',
+        }),
+      );
+      expect(result.aliasMappings).not.toContainEqual(
+        expect.objectContaining({ aliasName: 'vue2', installSpec: '' }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps installed-alias mappings when registry lookup fails for unresolved requests', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-alias-failure-'));
+    const installedRequestPackage = 'legacy-vue-package-installed';
+    const unresolvedRequestPackage = 'legacy-vue-package-unresolved';
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockRejectedValue(new Error('registry unavailable')),
+    };
+
+    try {
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'registry-failure-host',
+          version: '1.0.0',
+          dependencies: {
+            [installedRequestPackage]: '1.0.0',
+            [unresolvedRequestPackage]: '1.0.0',
+            vue: '^3.0.0',
+            vue2: 'npm:vue@2.7.16',
+          },
+        }),
+        'utf8',
+      );
+
+      for (const [packageName, peerRange] of [
+        [installedRequestPackage, '^2.7.0'],
+        [unresolvedRequestPackage, '^1.0.0'],
+      ] as const) {
+        await fs.mkdir(join(projectRoot, 'node_modules', packageName), { recursive: true });
+        await fs.writeFile(
+          join(projectRoot, 'node_modules', packageName, 'package.json'),
+          JSON.stringify({
+            name: packageName,
+            version: '1.0.0',
+            peerDependencies: { vue: peerRange },
+          }),
+          'utf8',
+        );
+      }
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue2'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue2', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '2.7.16' }),
+        'utf8',
+      );
+
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network must not be called')));
+
+      const mainPackageJson: PackageJson = {
+        name: 'registry-failure-host',
+        version: '1.0.0',
+        dependencies: {
+          [installedRequestPackage]: '1.0.0',
+          [unresolvedRequestPackage]: '1.0.0',
+          vue: '^3.0.0',
+          vue2: 'npm:vue@2.7.16',
+        },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [installedRequestPackage, unresolvedRequestPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'npm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(
+        options,
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(registryClient.fetchAllVersions).toHaveBeenCalledTimes(1);
+      expect(result.aliasMappings).toContainEqual(
+        expect.objectContaining({
+          aliasName: 'vue2',
+          installSpec: '',
+          resolvedVersion: '2.7.16',
+          usedBy: [installedRequestPackage],
+        }),
+      );
+      expect(result.aliasMappings).not.toContainEqual(
+        expect.objectContaining({ usedBy: [unresolvedRequestPackage] }),
+      );
+      expect(
+        result.aliasMappings.every((mapping) => !mapping.resolvedVersion.startsWith('^')),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('DependencyAnalyzer Edge Cases', () => {
   it('should handle empty dependencies list', async () => {
     const mockOptions: ResolvedOptions = {

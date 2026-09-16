@@ -18,6 +18,13 @@ describe('npm-registry', () => {
   });
 
   describe('fetchAllVersions', () => {
+    it('should expose the registry client used by the compatibility wrapper', async () => {
+      const registryModule = await import('../../src/core/npm-registry');
+
+      expect(registryModule.npmRegistryClient).toBeDefined();
+      expect(typeof registryModule.npmRegistryClient.fetchAllVersions).toBe('function');
+    });
+
     it('should fetch and return all versions of a package', async () => {
       const mockResponse = {
         ok: true,
