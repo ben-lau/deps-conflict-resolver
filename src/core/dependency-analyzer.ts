@@ -43,6 +43,10 @@ interface ExistingAliasMatch {
   name: string;
   version: string;
   isWorkspaceAlias?: boolean;
+  /** 已安装 alias 的实际包目录；同名 alias 可能来自不同 scope */
+  installedPath?: string;
+  /** 无法取得路径时保留声明来源，避免 local/workspace alias 被错误合并 */
+  scope: 'local' | 'workspace';
 }
 
 interface ReusedAliasGroup {
@@ -673,11 +677,12 @@ export class DependencyAnalyzer {
       }
 
       usedAliasNames.add(existingAlias.name);
-      const reusedGroup = reusedAliasGroups.get(existingAlias.name);
+      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ?? existingAlias.scope}`;
+      const reusedGroup = reusedAliasGroups.get(aliasIdentity);
       if (reusedGroup) {
         reusedGroup.requests.push(request);
       } else {
-        reusedAliasGroups.set(existingAlias.name, {
+        reusedAliasGroups.set(aliasIdentity, {
           alias: existingAlias,
           requests: [request],
         });
@@ -919,7 +924,12 @@ export class DependencyAnalyzer {
 
         if (allSatisfied) {
           logger.info(`    Reusing local alias: ${alias.aliasName}@${alias.installedVersion}`);
-          return { name: alias.aliasName, version: alias.installedVersion };
+          return {
+            name: alias.aliasName,
+            version: alias.installedVersion,
+            installedPath: installedAlias?.path,
+            scope: 'local',
+          };
         } else {
           logger.debug(
             `    Skip ${alias.aliasName}@${alias.installedVersion}: version doesn't satisfy all ranges`,
@@ -945,6 +955,7 @@ export class DependencyAnalyzer {
 
       // 尝试从 workspace 根目录获取已安装版本（pnpm 模式下依赖安装在根目录）
       let installedVersion: string | null = null;
+      let installedPath: string | undefined;
 
       if (workspaceRoot) {
         const { packagePath, pkgJson } = this.resolvePackageJson(wsAlias.aliasName, workspaceRoot);
@@ -956,6 +967,7 @@ export class DependencyAnalyzer {
             continue;
           }
           installedVersion = pkgJson?.version ?? null;
+          installedPath = packagePath;
           logger.debug(
             `    Found ${wsAlias.aliasName} installed at workspace root: ${installedVersion}`,
           );
@@ -967,6 +979,7 @@ export class DependencyAnalyzer {
         installedVersion = this.getAliasInstalledVersion(wsAlias.aliasName);
         if (installedVersion) {
           const installedAlias = this.installedPackageCache.get(wsAlias.aliasName);
+          installedPath = installedAlias?.path;
           if (installedAlias?.realName !== packageName) {
             logger.debug(
               `    Skip ${wsAlias.aliasName}: installed package name ${installedAlias?.realName ?? 'unknown'} does not match ${packageName}`,
@@ -986,6 +999,8 @@ export class DependencyAnalyzer {
             name: wsAlias.aliasName,
             version: installedVersion,
             isWorkspaceAlias: true,
+            installedPath,
+            scope: 'workspace',
           };
         } else {
           logger.debug(

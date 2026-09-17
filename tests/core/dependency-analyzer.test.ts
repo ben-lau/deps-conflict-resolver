@@ -757,6 +757,140 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       await fs.rm(projectRoot, { recursive: true, force: true });
     }
   });
+
+  it('keeps same-named aliases separate when local and workspace paths differ', async () => {
+    const workspaceRoot = await fs.mkdtemp(
+      join(tmpdir(), 'deps-conflict-resolver-shadowed-alias-'),
+    );
+    const projectRoot = join(workspaceRoot, 'packages', 'app');
+    const vueTwoConsumer = 'legacy-vue-two-consumer';
+    const vueOneConsumer = 'legacy-vue-one-consumer';
+    const localAliasPath = join(projectRoot, 'node_modules', 'vue2');
+    const workspaceAliasPath = join(workspaceRoot, 'node_modules', 'vue2');
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockRejectedValue(new Error('registry must not be called')),
+    };
+
+    try {
+      await fs.mkdir(projectRoot, { recursive: true });
+      await fs.writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+      await fs.writeFile(
+        join(workspaceRoot, 'package.json'),
+        JSON.stringify({
+          name: 'shadowed-alias-workspace',
+          version: '1.0.0',
+          dependencies: { vue2: 'npm:vue@^1.0.0' },
+        }),
+        'utf8',
+      );
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'shadowed-alias-app',
+          version: '1.0.0',
+          dependencies: {
+            [vueTwoConsumer]: '1.0.0',
+            [vueOneConsumer]: '1.0.0',
+            vue: '^3.0.0',
+            vue2: 'npm:vue@^2.7.0',
+          },
+        }),
+        'utf8',
+      );
+
+      for (const [packageName, peerRange] of [
+        [vueTwoConsumer, '^2.7.0'],
+        [vueOneConsumer, '^1.0.0'],
+      ] as const) {
+        await fs.mkdir(join(projectRoot, 'node_modules', packageName), { recursive: true });
+        await fs.writeFile(
+          join(projectRoot, 'node_modules', packageName, 'package.json'),
+          JSON.stringify({
+            name: packageName,
+            version: '1.0.0',
+            peerDependencies: { vue: peerRange },
+          }),
+          'utf8',
+        );
+      }
+
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+      await fs.mkdir(localAliasPath, { recursive: true });
+      await fs.writeFile(
+        join(localAliasPath, 'package.json'),
+        JSON.stringify({ name: 'vue', version: '2.7.16' }),
+        'utf8',
+      );
+      await fs.mkdir(workspaceAliasPath, { recursive: true });
+      await fs.writeFile(
+        join(workspaceAliasPath, 'package.json'),
+        JSON.stringify({ name: 'vue', version: '1.5.0' }),
+        'utf8',
+      );
+
+      const mainPackageJson: PackageJson = {
+        name: 'shadowed-alias-app',
+        version: '1.0.0',
+        dependencies: {
+          [vueTwoConsumer]: '1.0.0',
+          [vueOneConsumer]: '1.0.0',
+          vue: '^3.0.0',
+          vue2: 'npm:vue@^2.7.0',
+        },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [vueTwoConsumer, vueOneConsumer],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'pnpm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(
+        options,
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
+      expect(result.aliasMappings).toHaveLength(2);
+
+      const vueTwoMapping = result.aliasMappings.find((mapping) =>
+        mapping.usedBy.includes(vueTwoConsumer),
+      );
+      const vueOneMapping = result.aliasMappings.find((mapping) =>
+        mapping.usedBy.includes(vueOneConsumer),
+      );
+
+      expect(vueTwoMapping).toEqual(
+        expect.objectContaining({
+          aliasName: 'vue2',
+          installSpec: '',
+          resolvedVersion: '2.7.16',
+        }),
+      );
+      expect(vueOneMapping).toEqual(
+        expect.objectContaining({
+          aliasName: 'vue2',
+          installSpec: '',
+          resolvedVersion: '1.5.0',
+        }),
+      );
+      expect(vueOneMapping?.aliasName).toBe(vueTwoMapping?.aliasName);
+    } finally {
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('DependencyAnalyzer Edge Cases', () => {
