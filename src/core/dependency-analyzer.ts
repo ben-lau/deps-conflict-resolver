@@ -677,7 +677,7 @@ export class DependencyAnalyzer {
       }
 
       usedAliasNames.add(existingAlias.name);
-      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ?? existingAlias.scope}`;
+      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ?? existingAlias.scope}\0${existingAlias.version}`;
       const reusedGroup = reusedAliasGroups.get(aliasIdentity);
       if (reusedGroup) {
         reusedGroup.requests.push(request);
@@ -687,6 +687,38 @@ export class DependencyAnalyzer {
           requests: [request],
         });
       }
+    }
+
+    // AliasManager and the bundler plugins address aliases by name only. Never
+    // emit duplicate names when the same alias resolves to different paths or
+    // versions, because the last rule would silently win at runtime.
+    const reusedGroupsByAliasName = new Map<string, ReusedAliasGroup[]>();
+    for (const reusedGroup of reusedAliasGroups.values()) {
+      const groups = reusedGroupsByAliasName.get(reusedGroup.alias.name);
+      if (groups) {
+        groups.push(reusedGroup);
+      } else {
+        reusedGroupsByAliasName.set(reusedGroup.alias.name, [reusedGroup]);
+      }
+    }
+
+    for (const [aliasName, groups] of reusedGroupsByAliasName) {
+      if (groups.length < 2) continue;
+
+      logger.warn(
+        `Alias reuse skipped: ${JSON.stringify({
+          code: 'AMBIGUOUS_ALIAS_SCOPE',
+          packageName,
+          aliasName,
+          candidates: groups.map(({ alias, requests }) => ({
+            installedPath: alias.installedPath ?? null,
+            scope: alias.scope,
+            version: alias.version,
+            requesters: requests.map((request) => request.path.join('>')),
+          })),
+        })}`,
+      );
+      return [];
     }
 
     for (const reusedGroup of reusedAliasGroups.values()) {

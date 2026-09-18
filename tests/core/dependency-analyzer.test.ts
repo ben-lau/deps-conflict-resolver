@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DependencyAnalyzer } from '../../src/core/dependency-analyzer';
+import { AliasManager } from '../../src/core/alias-manager';
 import type { ResolvedOptions, PackageJson } from '../../src/types';
 import type { InstalledPackageInfo } from '../../src/types';
 import { promises as fs } from 'fs';
@@ -758,7 +759,7 @@ describe('DependencyAnalyzer offline alias reuse', () => {
     }
   });
 
-  it('keeps same-named aliases separate when local and workspace paths differ', async () => {
+  it('rejects same-named aliases when local and workspace paths differ', async () => {
     const workspaceRoot = await fs.mkdtemp(
       join(tmpdir(), 'deps-conflict-resolver-shadowed-alias-'),
     );
@@ -770,6 +771,7 @@ describe('DependencyAnalyzer offline alias reuse', () => {
     const registryClient = {
       fetchAllVersions: vi.fn().mockRejectedValue(new Error('registry must not be called')),
     };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     try {
       await fs.mkdir(projectRoot, { recursive: true });
@@ -863,31 +865,30 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       ).analyze();
 
       expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
-      expect(result.aliasMappings).toHaveLength(2);
+      expect(result.aliasMappings).toEqual([]);
+      expect(
+        warn.mock.calls
+          .flat()
+          .some((arg) => typeof arg === 'string' && arg.includes('AMBIGUOUS_ALIAS_SCOPE')),
+      ).toBe(true);
 
-      const vueTwoMapping = result.aliasMappings.find((mapping) =>
-        mapping.usedBy.includes(vueTwoConsumer),
-      );
-      const vueOneMapping = result.aliasMappings.find((mapping) =>
-        mapping.usedBy.includes(vueOneConsumer),
-      );
-
-      expect(vueTwoMapping).toEqual(
-        expect.objectContaining({
-          aliasName: 'vue2',
-          installSpec: '',
-          resolvedVersion: '2.7.16',
+      const aliasManager = new AliasManager(options);
+      aliasManager.initFromAnalysisResult(result);
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: join(projectRoot, 'node_modules', vueTwoConsumer, 'index.js'),
         }),
-      );
-      expect(vueOneMapping).toEqual(
-        expect.objectContaining({
-          aliasName: 'vue2',
-          installSpec: '',
-          resolvedVersion: '1.5.0',
+      ).toBeNull();
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: join(projectRoot, 'node_modules', vueOneConsumer, 'index.js'),
         }),
-      );
-      expect(vueOneMapping?.aliasName).toBe(vueTwoMapping?.aliasName);
+      ).toBeNull();
+      expect(aliasManager.getAliasPathMappings()).toEqual([]);
     } finally {
+      warn.mockRestore();
       await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
   });
