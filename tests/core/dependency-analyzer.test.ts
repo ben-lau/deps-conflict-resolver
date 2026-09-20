@@ -892,6 +892,125 @@ describe('DependencyAnalyzer offline alias reuse', () => {
       await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
   });
+
+  it('rejects same-named aliases when only one installed path satisfies the range', async () => {
+    const workspaceRoot = await fs.mkdtemp(
+      join(tmpdir(), 'deps-conflict-resolver-filtered-shadowed-alias-'),
+    );
+    const projectRoot = join(workspaceRoot, 'packages', 'app');
+    const consumerPackage = 'legacy-vue-two-consumer';
+    const localAliasPath = join(projectRoot, 'node_modules', 'vue2');
+    const workspaceAliasPath = join(workspaceRoot, 'node_modules', 'vue2');
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockRejectedValue(new Error('registry must not be called')),
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await fs.mkdir(projectRoot, { recursive: true });
+      await fs.writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+      await fs.writeFile(
+        join(workspaceRoot, 'package.json'),
+        JSON.stringify({
+          name: 'filtered-shadowed-alias-workspace',
+          version: '1.0.0',
+          dependencies: { vue2: 'npm:vue@^2.7.0' },
+        }),
+        'utf8',
+      );
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'filtered-shadowed-alias-app',
+          version: '1.0.0',
+          dependencies: {
+            [consumerPackage]: '1.0.0',
+            vue: '^3.0.0',
+            vue2: 'npm:vue@^1.0.0',
+          },
+        }),
+        'utf8',
+      );
+
+      await fs.mkdir(join(projectRoot, 'node_modules', consumerPackage), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', consumerPackage, 'package.json'),
+        JSON.stringify({
+          name: consumerPackage,
+          version: '1.0.0',
+          peerDependencies: { vue: '^2.7.0' },
+        }),
+        'utf8',
+      );
+      await fs.mkdir(join(projectRoot, 'node_modules', 'vue'), { recursive: true });
+      await fs.writeFile(
+        join(projectRoot, 'node_modules', 'vue', 'package.json'),
+        JSON.stringify({ name: 'vue', version: '3.5.0' }),
+        'utf8',
+      );
+      await fs.mkdir(localAliasPath, { recursive: true });
+      await fs.writeFile(
+        join(localAliasPath, 'package.json'),
+        JSON.stringify({ name: 'vue', version: '1.5.0' }),
+        'utf8',
+      );
+      await fs.mkdir(workspaceAliasPath, { recursive: true });
+      await fs.writeFile(
+        join(workspaceAliasPath, 'package.json'),
+        JSON.stringify({ name: 'vue', version: '2.7.16' }),
+        'utf8',
+      );
+
+      const mainPackageJson: PackageJson = {
+        name: 'filtered-shadowed-alias-app',
+        version: '1.0.0',
+        dependencies: {
+          [consumerPackage]: '1.0.0',
+          vue: '^3.0.0',
+          vue2: 'npm:vue@^1.0.0',
+        },
+      };
+      const options: ResolvedOptions = {
+        dependencies: [consumerPackage],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'pnpm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+
+      const result = await new DependencyAnalyzer(
+        options,
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
+      expect(result.aliasMappings).toEqual([]);
+      expect(
+        warn.mock.calls
+          .flat()
+          .some((arg) => typeof arg === 'string' && arg.includes('AMBIGUOUS_ALIAS_SCOPE')),
+      ).toBe(true);
+
+      const aliasManager = new AliasManager(options);
+      aliasManager.initFromAnalysisResult(result);
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: join(projectRoot, 'node_modules', consumerPackage, 'index.js'),
+        }),
+      ).toBeNull();
+      expect(aliasManager.getAliasPathMappings()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('DependencyAnalyzer Edge Cases', () => {

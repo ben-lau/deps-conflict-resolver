@@ -659,6 +659,41 @@ export class DependencyAnalyzer {
     const usedAliasNames = new Set<string>();
     const mappings: AliasMapping[] = [];
 
+    // 先收集所有真实已安装的别名身份，再按范围筛选候选。否则当同名
+    // alias 只有一个满足当前范围时，另一条物理路径会被过滤掉，运行时
+    // 仍可能按项目根目录解析到错误的包。
+    const installedAliasMatches = this.findInstalledAliasMatches(packageName);
+    const installedAliasesByName = new Map<string, ExistingAliasMatch[]>();
+    for (const installedAlias of installedAliasMatches) {
+      const aliases = installedAliasesByName.get(installedAlias.name);
+      if (aliases) {
+        aliases.push(installedAlias);
+      } else {
+        installedAliasesByName.set(installedAlias.name, [installedAlias]);
+      }
+    }
+
+    for (const [aliasName, aliases] of installedAliasesByName) {
+      const identities = new Set(
+        aliases.map((alias) => `${alias.installedPath ?? alias.scope}\0${alias.version}`),
+      );
+      if (identities.size < 2) continue;
+
+      logger.warn(
+        `Alias reuse skipped: ${JSON.stringify({
+          code: 'AMBIGUOUS_ALIAS_SCOPE',
+          packageName,
+          aliasName,
+          candidates: aliases.map((alias) => ({
+            installedPath: alias.installedPath ?? null,
+            scope: alias.scope,
+            version: alias.version,
+          })),
+        })}`,
+      );
+      return [];
+    }
+
     // 先逐个匹配已安装的别名。多个请求匹配到同一个别名时合并为一个映射，
     // 这样完全满足的冲突可以在没有 registry 的环境中完成分析。
     const reusedAliasGroups = new Map<string, ReusedAliasGroup>();
@@ -908,6 +943,68 @@ export class DependencyAnalyzer {
       usedBy,
       allDependents,
     };
+  }
+
+  /**
+   * 收集所有已安装的现有别名，不按请求版本范围过滤。
+   * 用于在范围筛选前识别同名 alias 的多路径/多版本歧义。
+   */
+  private findInstalledAliasMatches(packageName: string): ExistingAliasMatch[] {
+    const matches: ExistingAliasMatch[] = [];
+
+    const npmAliases = this.existingAliasesMap.get(packageName) ?? [];
+    for (const alias of npmAliases) {
+      alias.installedVersion ??= this.getAliasInstalledVersion(alias.aliasName);
+      if (!alias.installedVersion) continue;
+
+      const installedAlias = this.installedPackageCache.get(alias.aliasName);
+      if (installedAlias?.realName !== packageName) continue;
+
+      matches.push({
+        name: alias.aliasName,
+        version: alias.installedVersion,
+        installedPath: installedAlias?.path,
+        scope: 'local',
+      });
+    }
+
+    const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
+    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
+
+    for (const wsAlias of workspaceAliases) {
+      let installedVersion: string | null = null;
+      let installedPath: string | undefined;
+
+      if (workspaceRoot) {
+        const { packagePath, pkgJson } = this.resolvePackageJson(wsAlias.aliasName, workspaceRoot);
+        if (packagePath) {
+          if (pkgJson?.name !== packageName) continue;
+          installedVersion = pkgJson?.version ?? null;
+          installedPath = packagePath;
+        }
+      }
+
+      if (!installedVersion) {
+        installedVersion = this.getAliasInstalledVersion(wsAlias.aliasName);
+        if (installedVersion) {
+          const installedAlias = this.installedPackageCache.get(wsAlias.aliasName);
+          installedPath = installedAlias?.path;
+          if (installedAlias?.realName !== packageName) continue;
+        }
+      }
+
+      if (installedVersion) {
+        matches.push({
+          name: wsAlias.aliasName,
+          version: installedVersion,
+          isWorkspaceAlias: true,
+          installedPath,
+          scope: 'workspace',
+        });
+      }
+    }
+
+    return matches;
   }
 
   /**
