@@ -3,6 +3,7 @@ import { DependencyAnalyzer } from '../../src/core/dependency-analyzer';
 import { AliasManager } from '../../src/core/alias-manager';
 import type { ResolvedOptions, PackageJson } from '../../src/types';
 import type { InstalledPackageInfo } from '../../src/types';
+import { findBestVersion } from '../../src/utils/semver';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -1009,6 +1010,85 @@ describe('DependencyAnalyzer offline alias reuse', () => {
     } finally {
       warn.mockRestore();
       await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('DependencyAnalyzer semver grouping', () => {
+  it('partitions pairwise-only semver intersections into satisfiable mappings', async () => {
+    const availableVersions = ['1.5.0', '2.5.0', '3.5.0'];
+    const requests = [
+      { name: 'consumer-one', range: '1.x || 2.x' },
+      { name: 'consumer-two', range: '2.x || 3.x' },
+      { name: 'consumer-three', range: '1.x || 3.x' },
+    ] as const;
+    const rangesByRequester = new Map<string, string>(
+      requests.map(({ name, range }) => [name, range]),
+    );
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockResolvedValue(availableVersions),
+    };
+    const options: ResolvedOptions = {
+      dependencies: requests.map(({ name }) => name),
+      projectRoot: '/test/project',
+      autoInstall: true,
+      packageManager: 'npm',
+      registry: 'https://registry.example.test',
+      debug: false,
+      aliasPrefix: 'aliased-',
+      excludeRedirects: {},
+      includeRedirects: {},
+    };
+    const analyzer = new DependencyAnalyzer(
+      options,
+      {
+        name: 'semver-grouping-host',
+        version: '1.0.0',
+        dependencies: { vue: '^4.0.0' },
+      },
+      new Map([
+        [
+          'vue',
+          {
+            name: 'vue',
+            version: '4.0.0',
+            path: '/test/project/node_modules/vue',
+          },
+        ],
+      ]),
+      registryClient,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (analyzer as any).analyzeDependencyRecursive = vi.fn((packageName: string) => {
+      const request = requests.find(({ name }) => name === packageName);
+      if (!request) return null;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (analyzer as any).analyzedDependencies.set(packageName, {
+        name: packageName,
+        version: '1.0.0',
+        dependencyPath: [],
+        dependencies: {},
+        peerDependencies: { vue: request.range },
+        peerDependenciesMeta: {},
+      });
+      return null;
+    });
+
+    const result = await analyzer.analyze();
+
+    expect(result.aliasMappings.length).toBeGreaterThanOrEqual(2);
+    const usedBy = result.aliasMappings.flatMap((mapping) => mapping.usedBy);
+    expect(usedBy).toHaveLength(requests.length);
+    expect(new Set(usedBy).size).toBe(requests.length);
+    expect([...usedBy].sort()).toEqual(requests.map(({ name }) => name).sort());
+
+    for (const mapping of result.aliasMappings) {
+      const ranges = mapping.usedBy.map((requester) => rangesByRequester.get(requester)!);
+      const bestVersion = findBestVersion(availableVersions, ranges);
+      expect(bestVersion).not.toBeNull();
+      expect(mapping.resolvedVersion).toBe(bestVersion);
     }
   });
 });
