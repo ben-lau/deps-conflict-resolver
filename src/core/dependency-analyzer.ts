@@ -860,6 +860,10 @@ export class DependencyAnalyzer {
 
       // 没有合适的组，创建新组
       if (!added) {
+        // 没有任何可用版本满足该请求时，不创建不可安装的 singleton 组。
+        if (findBestVersion(availableVersions, [request.requiredRange]) === null) {
+          continue;
+        }
         groups.push([request]);
       }
     }

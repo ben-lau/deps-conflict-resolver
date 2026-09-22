@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DependencyAnalyzer } from '../../src/core/dependency-analyzer';
 import { AliasManager } from '../../src/core/alias-manager';
-import type { ResolvedOptions, PackageJson } from '../../src/types';
+import type { DependencyPath, ResolvedOptions, PackageJson } from '../../src/types';
 import type { InstalledPackageInfo } from '../../src/types';
 import { findBestVersion } from '../../src/utils/semver';
 import { promises as fs } from 'fs';
@@ -1014,7 +1014,61 @@ describe('DependencyAnalyzer offline alias reuse', () => {
   });
 });
 
+const groupRanges = (requests: DependencyPath[], availableVersions: string[]) => {
+  const analyzer = new DependencyAnalyzer(
+    {
+      dependencies: [],
+      projectRoot: '/test/project',
+      autoInstall: true,
+      packageManager: 'npm',
+      registry: 'https://registry.example.test',
+      debug: false,
+      aliasPrefix: 'aliased-',
+      excludeRedirects: {},
+      includeRedirects: {},
+    },
+    { name: 'semver-grouping-host', version: '1.0.0' },
+    new Map(),
+  );
+
+  return (
+    analyzer as unknown as {
+      groupRangesByCompatibility: (
+        requests: DependencyPath[],
+        availableVersions: string[],
+      ) => DependencyPath[][];
+    }
+  ).groupRangesByCompatibility(requests, availableVersions);
+};
+
 describe('DependencyAnalyzer semver grouping', () => {
+  it('does not create a group for a range with no available version', () => {
+    const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: '^2.0.0' }];
+
+    expect(groupRanges(requests, ['1.0.0'])).toEqual([]);
+  });
+
+  it('does not create a group for an invalid range', () => {
+    const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: 'invalid-range' }];
+
+    expect(groupRanges(requests, ['1.0.0'])).toEqual([]);
+  });
+
+  it('does not create groups when there are no available versions', () => {
+    const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: '^1.0.0' }];
+
+    expect(groupRanges(requests, [])).toEqual([]);
+  });
+
+  it('excludes prereleases unless the range explicitly includes prereleases', () => {
+    const requests: DependencyPath[] = [
+      { path: ['stable-range'], requiredRange: '^2.0.0' },
+      { path: ['prerelease-range'], requiredRange: '^2.0.0-0' },
+    ];
+
+    expect(groupRanges(requests, ['2.0.0-beta.1'])).toEqual([[requests[1]]]);
+  });
+
   it('partitions pairwise-only semver intersections into satisfiable mappings', async () => {
     const availableVersions = ['1.5.0', '2.5.0', '3.5.0'];
     const requests = [
