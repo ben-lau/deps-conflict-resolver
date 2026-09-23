@@ -40,6 +40,7 @@ export class DepsConflictResolver {
 
   private analysisResult: AnalysisResult | null = null;
   private initialized = false;
+  private initializationPromise: Promise<void> | null = null;
 
   constructor(userOptions: DepsConflictResolverOptions, hooks: PluginHooks = {}) {
     this.userOptions = userOptions;
@@ -105,6 +106,36 @@ export class DepsConflictResolver {
       return;
     }
 
+    const initialization = (this.initializationPromise ??= this.initializeGeneration());
+    try {
+      await initialization;
+    } catch (error) {
+      // Only clear the promise that failed. A caller may have started a retry
+      // after another concurrent caller observed the rejection.
+      if (this.initializationPromise === initialization) {
+        this.initializationPromise = null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 清理已完成的初始化状态，使下一次 initialize 创建新的分析 generation。
+   *
+   * 初始化尚未完成时不能失效当前 generation，否则并发调用者会观察到
+   * 不一致的部分状态。
+   */
+  invalidate(): void {
+    if (this.initializationPromise && !this.initialized) {
+      throw new Error('Cannot invalidate while initialization is in progress');
+    }
+
+    this.initialized = false;
+    this.initializationPromise = null;
+    this.analysisResult = null;
+  }
+
+  private async initializeGeneration(): Promise<void> {
     logger.info('Initializing dependencies resolver...');
 
     // 验证项目根目录
