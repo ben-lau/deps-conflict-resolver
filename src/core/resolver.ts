@@ -114,6 +114,7 @@ export class DepsConflictResolver {
       // after another concurrent caller observed the rejection.
       if (this.initializationPromise === initialization) {
         this.initializationPromise = null;
+        this.rollbackGeneration();
       }
       throw error;
     }
@@ -132,7 +133,17 @@ export class DepsConflictResolver {
 
     this.initialized = false;
     this.initializationPromise = null;
+    this.rollbackGeneration();
+  }
+
+  /**
+   * 回滚未完成或已失效的 generation，确保外部不会观察到半成品规则。
+   */
+  private rollbackGeneration(): void {
+    this.initialized = false;
     this.analysisResult = null;
+    this.analyzer = null;
+    this.aliasManager?.clear?.();
   }
 
   private async initializeGeneration(): Promise<void> {

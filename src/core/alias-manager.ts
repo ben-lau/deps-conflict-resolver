@@ -65,6 +65,17 @@ export class AliasManager {
   }
 
   /**
+   * 清理当前 generation 的别名规则。
+   *
+   * Resolver 失效或回滚时必须移除旧规则，避免失败的 generation 继续参与解析。
+   */
+  clear(): void {
+    this.aliasMappings = [];
+    this.rulesMap = new Map();
+    this.importerCache.clear();
+  }
+
+  /**
    * 基于 allDependents 构建规则（用 Set 做成员判断，避免超大正则导致的性能与长度问题）
    */
   private buildRules(): void {
