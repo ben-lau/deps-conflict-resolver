@@ -8,6 +8,7 @@ import type { Compiler, Stats } from 'webpack';
 // Mock resolver - 使用真正的 class 来模拟
 const mockResolverInstance = {
   initialize: vi.fn(),
+  invalidate: vi.fn(),
   getAnalysisResult: vi.fn(),
   getAliasPathMappings: vi.fn(),
   getOptions: vi.fn(),
@@ -135,6 +136,28 @@ describe('Webpack Plugin', () => {
         expect(mockResolverInstance.initialize).toHaveBeenCalled();
       });
 
+      it('should fail open when initialization rejects', async () => {
+        const initializationError = new Error('resolver initialization failed');
+        mockResolverInstance.initialize.mockRejectedValue(initializationError);
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        const plugin = new DepsConflictResolverWebpackPlugin({
+          dependencies: ['vue'],
+        });
+
+        const mockCompiler = createMockCompiler();
+
+        plugin.apply(mockCompiler as unknown as Compiler);
+
+        const beforeRunCall = mockCompiler.hooks.beforeRun.tapPromise.mock.calls[0]!;
+
+        await expect(beforeRunCall[1]()).resolves.toBeUndefined();
+
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        expect(plugin.getAnalysisResult()).toBeNull();
+        expect(plugin.isInitialized()).toBe(false);
+      });
+
       it('should initialize on watchRun', async () => {
         mockResolverInstance.initialize.mockResolvedValue(undefined);
         mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
@@ -156,6 +179,36 @@ describe('Webpack Plugin', () => {
         const watchRunCallback = watchRunCall[1];
         await watchRunCallback();
 
+        expect(plugin.isInitialized()).toBe(true);
+      });
+
+      it('should refresh the resolver before each watch compilation', async () => {
+        const events: string[] = [];
+        mockResolverInstance.initialize.mockImplementation(async () => {
+          events.push('initialize');
+        });
+        mockResolverInstance.invalidate = vi.fn(() => {
+          events.push('invalidate');
+        });
+        mockResolverInstance.getAnalysisResult.mockReturnValue(mockAnalysisResult);
+
+        const plugin = new DepsConflictResolverWebpackPlugin({
+          dependencies: ['vue'],
+        });
+
+        const mockCompiler = createMockCompiler();
+
+        plugin.apply(mockCompiler as unknown as Compiler);
+
+        const beforeRunCall = mockCompiler.hooks.beforeRun.tapPromise.mock.calls[0]!;
+        await beforeRunCall[1]();
+
+        const watchRunCall = mockCompiler.hooks.watchRun.tapPromise.mock.calls[0]!;
+        await watchRunCall[1]();
+
+        expect(mockResolverInstance.invalidate).toHaveBeenCalledTimes(1);
+        expect(mockResolverInstance.initialize).toHaveBeenCalledTimes(2);
+        expect(events).toEqual(['initialize', 'invalidate', 'initialize']);
         expect(plugin.isInitialized()).toBe(true);
       });
 

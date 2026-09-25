@@ -35,6 +35,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   private analysisResult: AnalysisResult | null = null;
   private initPromise: Promise<void> | null = null;
   private initialized = false;
+  private generation = 0;
 
   constructor(config: PluginConfig) {
     this.config = config;
@@ -47,36 +48,115 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   /**
    * 初始化解析器
    */
-  private async initialize(): Promise<void> {
-    if (this.initialized) return;
-
-    logger.info('Initializing dependencies resolver...');
-
-    const { hooks, ...resolverOptions } = this.config;
-    this.resolver = new DepsConflictResolver(resolverOptions, hooks);
-    await this.resolver.initialize();
-
-    this.analysisResult = this.resolver.getAnalysisResult();
-
-    if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
-      logger.info(`Detected ${this.analysisResult.aliasMappings.length} peer dependency conflicts`);
-
-      if (this.config.debug) {
-        logger.debug(
-          'Alias mappings:',
-          this.analysisResult.aliasMappings.map((m) => ({
-            original: m.originalName,
-            alias: m.aliasName,
-            usedBy: m.usedBy,
-            allDependents: m.allDependents,
-          })),
-        );
-      }
-    } else {
-      logger.info('No peer dependency conflicts detected');
+  private initialize(refresh = false): Promise<void> {
+    if (refresh) {
+      return this.refreshInitialization();
     }
 
-    this.initialized = true;
+    if (this.initialized) {
+      return Promise.resolve();
+    }
+
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+
+    return this.startInitialization();
+  }
+
+  /**
+   * 开始新一轮初始化，并只在该 generation 成功后公开解析器状态。
+   */
+  private startInitialization(): Promise<void> {
+    const generation = ++this.generation;
+
+    try {
+      if (!this.resolver) {
+        logger.info('Initializing dependencies resolver...');
+
+        const { hooks, ...resolverOptions } = this.config;
+        this.resolver = new DepsConflictResolver(resolverOptions, hooks);
+      }
+    } catch (error) {
+      this.analysisResult = null;
+      this.initialized = false;
+      logger.error('Error initializing dependencies resolver:', error);
+      return Promise.resolve();
+    }
+
+    const resolver = this.resolver;
+    const initialization = Promise.resolve()
+      .then(() => resolver.initialize())
+      .then(() => {
+        if (generation !== this.generation || this.resolver !== resolver) {
+          return;
+        }
+
+        this.analysisResult = resolver.getAnalysisResult();
+
+        if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
+          logger.info(
+            `Detected ${this.analysisResult.aliasMappings.length} peer dependency conflicts`,
+          );
+
+          if (this.config.debug) {
+            logger.debug(
+              'Alias mappings:',
+              this.analysisResult.aliasMappings.map((m) => ({
+                original: m.originalName,
+                alias: m.aliasName,
+                usedBy: m.usedBy,
+                allDependents: m.allDependents,
+              })),
+            );
+          }
+        } else {
+          logger.info('No peer dependency conflicts detected');
+        }
+
+        this.initialized = true;
+      })
+      .catch((error: unknown) => {
+        if (generation !== this.generation || this.resolver !== resolver) {
+          return;
+        }
+
+        this.analysisResult = null;
+        this.initialized = false;
+        logger.error('Error initializing dependencies resolver:', error);
+      })
+      .finally(() => {
+        if (generation === this.generation && this.initPromise === initialization) {
+          this.initPromise = null;
+        }
+      });
+
+    this.initPromise = initialization;
+    return initialization;
+  }
+
+  /**
+   * watch 模式开始新一轮分析。等待上一轮结束，避免 invalidate 触发 resolver 的并发保护。
+   */
+  private async refreshInitialization(): Promise<void> {
+    if (this.initPromise) {
+      await this.initPromise;
+    }
+
+    if (this.resolver) {
+      try {
+        this.resolver.invalidate();
+      } catch (error: unknown) {
+        this.analysisResult = null;
+        this.initialized = false;
+        logger.error('Error invalidating dependencies resolver:', error);
+        return;
+      }
+    }
+
+    this.analysisResult = null;
+    this.initialized = false;
+    await this.startInitialization();
   }
 
   /**
@@ -99,7 +179,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       return;
     }
 
-    if (!this.resolver) {
+    if (!this.resolver || !this.initialized) {
       return;
     }
 
@@ -139,7 +219,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     // 对于 watch 模式
     compiler.hooks.watchRun.tapPromise(PLUGIN_NAME, async () => {
-      await this.initPromise;
+      await this.initialize(true);
     });
 
     // 使用 normalModuleFactory 钩子拦截模块请求
@@ -152,7 +232,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
       // - 返回 undefined/void 表示继续处理
       nmf.hooks.beforeResolve.tapPromise(PLUGIN_NAME, async (resolveData) => {
         try {
-          await this.initPromise;
+          await this.initialize();
           this.handleResolve(resolveData);
         } catch (err) {
           logger.error('Error during module resolution:', err);
