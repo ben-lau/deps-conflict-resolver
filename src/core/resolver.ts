@@ -248,7 +248,21 @@ export class DepsConflictResolver {
 
     // 调用钩子
     if (this.hooks.onInstallComplete) {
-      await this.hooks.onInstallComplete(aliasMappings);
+      // The hook predates structured installer results and intentionally keeps
+      // its AliasMapping[] signature. Filter the analyzed mappings internally
+      // so a failed install/collision is never reported as installed while old
+      // installer implementations that only expose failed[] remain usable.
+      const failedAliases = new Set(aliasResult.failed);
+      const successfulAliases = new Set([...aliasResult.installed, ...(aliasResult.reused ?? [])]);
+      const completedMappings =
+        successfulAliases.size > 0
+          ? aliasMappings.filter(
+              (mapping) =>
+                successfulAliases.has(mapping.aliasName) && !failedAliases.has(mapping.aliasName),
+            )
+          : aliasMappings.filter((mapping) => !failedAliases.has(mapping.aliasName));
+
+      await this.hooks.onInstallComplete(completedMappings);
     }
   }
 

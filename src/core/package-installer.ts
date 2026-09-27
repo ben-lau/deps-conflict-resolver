@@ -27,6 +27,11 @@ interface InstallResult {
   installed: string[];
 
   /**
+   * 已复用或已存在且校验通过的包
+   */
+  reused: string[];
+
+  /**
    * 失败的包
    */
   failed: string[];
@@ -77,6 +82,7 @@ export class PackageInstaller {
     const result: InstallResult = {
       success: true,
       installed: [],
+      reused: [],
       failed: [],
       errors: [],
     };
@@ -126,6 +132,7 @@ export class PackageInstaller {
         }
 
         logger.debug(`Skipping ${m.aliasName}: reusing existing installation`);
+        result.reused.push(m.aliasName);
         continue;
       }
 
@@ -147,6 +154,7 @@ export class PackageInstaller {
       }
 
       logger.debug(`${m.aliasName} already installed with correct version`);
+      result.reused.push(m.aliasName);
     }
 
     if (toInstall.length === 0) {

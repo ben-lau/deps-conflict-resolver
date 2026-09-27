@@ -162,6 +162,16 @@ export class DependencyAnalyzer {
     };
   }
 
+  /** Keep generated alias names clear of host and workspace dependencies. */
+  private getReservedDependencyNames(): Set<string> {
+    this.ensureWorkspaceRootDeclaredDepsLoaded();
+    return new Set([
+      ...Object.keys(this.rawDeclaredDeps),
+      ...Object.keys(this.declaredDeps),
+      ...Object.keys(this.workspaceRootDeclaredDeps),
+    ]);
+  }
+
   /**
    * 判断某个包是否在“主工程”声明（dependencies/devDependencies）
    *
@@ -912,7 +922,11 @@ export class DependencyAnalyzer {
     }
 
     // 3. 生成新的别名名称
-    const combinedExisting = new Set([...existingAliasNames, ...usedAliasNames]);
+    const combinedExisting = new Set([
+      ...existingAliasNames,
+      ...usedAliasNames,
+      ...this.getReservedDependencyNames(),
+    ]);
     const aliasName = this.generateUniqueAliasName(packageName, bestVersion, combinedExisting);
     const installSpec = createAliasInstallSpec(aliasName, packageName, bestVersion);
 

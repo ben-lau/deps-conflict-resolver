@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DepsConflictResolver, createResolver } from '../../src/core/resolver';
 import { findProjectRoot } from '../../src/utils/fs';
+import type { AliasMapping, AnalysisResult } from '../../src/types';
 
 // Mock 依赖模块
 vi.mock('../../src/utils/fs', () => ({
@@ -651,6 +652,54 @@ describe('DepsConflictResolver', () => {
       await resolver.installDependencies();
 
       expect(onInstallComplete).toHaveBeenCalled();
+    });
+
+    it('should pass only reused or installed mappings to onInstallComplete', async () => {
+      const successfulMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue2',
+        installSpec: '',
+        resolvedVersion: '2.7.16',
+        usedBy: ['legacy-package'],
+        allDependents: ['legacy-package'],
+      };
+      const failedMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue1',
+        installSpec: 'aliased-vue1@npm:vue@1.7.0',
+        resolvedVersion: '1.7.0',
+        usedBy: ['very-legacy-package'],
+        allDependents: ['very-legacy-package'],
+      };
+      const analysisResult: AnalysisResult = {
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [successfulMapping, failedMapping],
+        missingFirstLevelPeers: [],
+      };
+      const { createDependencyAnalyzer } = await import('../../src/core/dependency-analyzer');
+      const { createPackageInstaller } = await import('../../src/core/package-installer');
+      vi.mocked(createDependencyAnalyzer).mockReturnValue({
+        analyze: vi.fn().mockResolvedValue(analysisResult),
+      } as never);
+      vi.mocked(createPackageInstaller).mockReturnValue({
+        installAliases: vi.fn().mockResolvedValue({
+          success: false,
+          installed: [],
+          reused: ['aliased-vue2'],
+          failed: ['aliased-vue1'],
+          errors: ['install failed'],
+        }),
+      } as never);
+      const onInstallComplete = vi.fn();
+      const resolver = new DepsConflictResolver(
+        { dependencies: ['vue'], autoInstall: true },
+        { onInstallComplete },
+      );
+
+      await expect(resolver.initialize()).resolves.toBeUndefined();
+
+      expect(onInstallComplete).toHaveBeenCalledWith([successfulMapping]);
     });
   });
 });
