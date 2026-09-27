@@ -350,4 +350,155 @@ describe('AliasManager', () => {
       ).toBeNull();
     });
   });
+
+  describe('path-scoped mappings', () => {
+    it('selects the mapping by importer instance regardless of mapping order', () => {
+      const mappings: AnalysisResult = {
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue3',
+            installSpec: '',
+            resolvedVersion: '3.5.0',
+            usedBy: ['modern-widget'],
+            allDependents: ['shared-core'],
+            importerPaths: [
+              '/project/node_modules/modern-widget',
+              '/project/node_modules/modern-widget/node_modules/shared-core',
+            ],
+          },
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue2',
+            installSpec: '',
+            resolvedVersion: '2.7.16',
+            usedBy: ['legacy-widget'],
+            allDependents: ['shared-core'],
+            importerPaths: [
+              '/project/node_modules/legacy-widget',
+              '/project/node_modules/legacy-widget/node_modules/shared-core',
+            ],
+          },
+        ],
+        missingFirstLevelPeers: [],
+      };
+
+      aliasManager.initFromAnalysisResult(mappings);
+
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/legacy-widget/node_modules/shared-core/index.js',
+        }),
+      ).toBe('aliased-vue2');
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/modern-widget/node_modules/shared-core/index.js',
+        }),
+      ).toBe('aliased-vue3');
+    });
+
+    it('does not let a nested excluded importer fall back to an ancestor package rule', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        excludeRedirects: { vue: ['pinia'] },
+      });
+      manager.initFromAnalysisResult({
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue2',
+            installSpec: '',
+            resolvedVersion: '2.7.16',
+            usedBy: ['legacy-widget'],
+            allDependents: ['legacy-widget', 'pinia'],
+            importerPaths: [
+              '/project/node_modules/legacy-widget',
+              '/project/node_modules/legacy-widget/node_modules/pinia',
+            ],
+          },
+        ],
+        missingFirstLevelPeers: [],
+      });
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/legacy-widget/node_modules/pinia/index.js',
+        }),
+      ).toBeNull();
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/legacy-widget/index.js',
+        }),
+      ).toBe('aliased-vue2');
+    });
+
+    it('keeps descendants of an excluded package out of the path-scoped redirect', () => {
+      const manager = new AliasManager({
+        ...mockOptions,
+        excludeRedirects: { vue: ['pinia'] },
+      });
+      manager.initFromAnalysisResult({
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue2',
+            installSpec: '',
+            resolvedVersion: '2.7.16',
+            usedBy: ['legacy-widget'],
+            allDependents: ['legacy-widget', 'pinia', 'pinia-child'],
+            importerPaths: [
+              '/project/node_modules/legacy-widget',
+              '/project/node_modules/legacy-widget/node_modules/pinia',
+              '/project/node_modules/legacy-widget/node_modules/pinia/node_modules/pinia-child',
+            ],
+          },
+        ],
+        missingFirstLevelPeers: [],
+      });
+
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer:
+            '/project/node_modules/legacy-widget/node_modules/pinia/node_modules/pinia-child/index.js',
+        }),
+      ).toBeNull();
+    });
+
+    it('does not use legacy name matching when importerPaths is present', () => {
+      aliasManager.initFromAnalysisResult({
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue2',
+            installSpec: '',
+            resolvedVersion: '2.7.16',
+            usedBy: ['legacy-widget'],
+            allDependents: ['shared-core'],
+            importerPaths: ['/project/node_modules/legacy-widget'],
+          },
+        ],
+        missingFirstLevelPeers: [],
+      });
+
+      expect(
+        aliasManager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/modern-widget/node_modules/shared-core/index.js',
+        }),
+      ).toBeNull();
+    });
+  });
 });

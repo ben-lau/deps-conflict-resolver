@@ -4,9 +4,10 @@ import type {
   AliasPathMapping,
   AnalysisResult,
 } from '../types/index';
+import { realpathSync } from 'node:fs';
 import { createLogger } from '../utils/logger';
 import { findPackagePath } from '../utils/fs';
-import { join } from 'path';
+import { join, posix } from 'path';
 import { LruCache } from '../utils/lru-cache';
 
 const logger = createLogger('alias-manager');
@@ -30,6 +31,13 @@ interface AliasRule {
   originalName: string;
   aliasName: string;
   dependents: Set<string>;
+  importerPaths?: string[];
+  excludedPackages: Set<string>;
+}
+
+interface ImporterPackageInstance {
+  name: string;
+  path: string;
 }
 
 /**
@@ -48,7 +56,7 @@ export class AliasManager {
    * importer 路径 -> 包名列表 的 LRU 缓存
    * dev server / HMR 场景下同一 importer 会被反复解析，缓存避免重复字符串拆分
    */
-  private importerCache = new LruCache<string, string[]>({ maxEntries: 1000 });
+  private importerCache = new LruCache<string, ImporterPackageInstance[]>({ maxEntries: 1000 });
 
   constructor(options: ResolvedOptions) {
     this.options = options;
@@ -80,9 +88,11 @@ export class AliasManager {
    */
   private buildRules(): void {
     this.rulesMap = new Map();
+    this.importerCache.clear();
 
     for (const mapping of this.aliasMappings) {
-      const dependents = new Set(mapping.allDependents ?? []);
+      const isPathScoped = mapping.importerPaths !== undefined;
+      const dependents = new Set(isPathScoped ? [] : (mapping.allDependents ?? []));
 
       // 1. 先叠加 includeRedirects：显式强制纳入的包（优先于 exclude 执行）
       const includeList = this.options.includeRedirects[mapping.originalName] ?? [];
@@ -93,9 +103,11 @@ export class AliasManager {
         logger.debug(`Included redirects for ${mapping.originalName}: ${includeList.join(', ')}`);
       }
 
-      // 2. 再减去 excludeRedirects：显式排除的包
       const excludeList = this.options.excludeRedirects[mapping.originalName] ?? [];
-      if (excludeList.length > 0) {
+      // Name-only rules can remove excluded names from the legacy dependent
+      // set. Path-scoped rules retain ancestor paths and apply exclusions to
+      // the most-specific importer instance at resolution time.
+      if (!isPathScoped && excludeList.length > 0) {
         for (const dep of excludeList) {
           dependents.delete(dep);
         }
@@ -106,6 +118,10 @@ export class AliasManager {
         originalName: mapping.originalName,
         aliasName: mapping.aliasName,
         dependents,
+        importerPaths: isPathScoped
+          ? mapping.importerPaths!.map((path) => this.normalizeImporterPath(path))
+          : undefined,
+        excludedPackages: new Set(excludeList),
       };
 
       const list = this.rulesMap.get(rule.originalName);
@@ -158,16 +174,22 @@ export class AliasManager {
    * - /p/node_modules/@s/a/dist/index.js        -> ["@s/a"]
    * - /p/node_modules/.pnpm/a@1/node_modules/a/ -> ["a"]（会跳过 ".pnpm"）
    */
-  private extractImporterPackages(importer: string): string[] {
+  private normalizeImporterPath(importerPath: string): string {
+    const normalized = posix.normalize(importerPath.replace(/\\/g, '/'));
+    if (normalized.length <= 1) return normalized;
+    return normalized.replace(/\/+$/, '');
+  }
+
+  private extractImporterPackageInstances(importer: string): ImporterPackageInstance[] {
     const cached = this.importerCache.get(importer);
     if (cached) {
       return cached;
     }
 
-    const normalized = importer.replace(/\\/g, '/');
+    const normalized = this.normalizeImporterPath(importer);
     const parts = normalized.split('/');
 
-    const packages: string[] = [];
+    const packages: ImporterPackageInstance[] = [];
 
     for (let i = 0; i < parts.length - 1; i++) {
       if (parts[i] !== 'node_modules') continue;
@@ -180,16 +202,74 @@ export class AliasManager {
       if (next.startsWith('@')) {
         const name = parts[i + 2];
         if (name) {
-          packages.push(`${next}/${name}`);
+          packages.push({
+            name: `${next}/${name}`,
+            path: this.normalizeImporterPath(parts.slice(0, i + 3).join('/')),
+          });
         }
         continue;
       }
 
-      packages.push(next);
+      packages.push({
+        name: next,
+        path: this.normalizeImporterPath(parts.slice(0, i + 2).join('/')),
+      });
     }
 
     this.importerCache.set(importer, packages);
     return packages;
+  }
+
+  private matchesImporterPath(importer: string, packagePath: string): boolean {
+    const importerCandidates = this.getNormalizedPathCandidates(importer);
+    const packageCandidates = this.getNormalizedPathCandidates(packagePath);
+    return [...importerCandidates].some((normalizedImporter) =>
+      [...packageCandidates].some(
+        (normalizedPackagePath) =>
+          normalizedImporter === normalizedPackagePath ||
+          normalizedImporter.startsWith(`${normalizedPackagePath}/`),
+      ),
+    );
+  }
+
+  private getNormalizedPathCandidates(path: string): Set<string> {
+    const candidates = new Set([this.normalizeImporterPath(path)]);
+    try {
+      candidates.add(this.normalizeImporterPath(realpathSync(path)));
+    } catch {
+      // The importer can be a virtual/nonexistent path in unit tests. The
+      // lexical candidate remains sufficient in that case.
+    }
+    return candidates;
+  }
+
+  private getPathScopedMatch(
+    rule: AliasRule,
+    importer: string,
+    importerInstances: ImporterPackageInstance[],
+  ): { excluded: boolean; specificity: number } | null {
+    if (!rule.importerPaths) return null;
+
+    const matchedPaths = rule.importerPaths.filter((packagePath) =>
+      this.matchesImporterPath(importer, packagePath),
+    );
+    const bestPath = matchedPaths.reduce<string | null>(
+      (current, packagePath) =>
+        !current || packagePath.length > current.length ? packagePath : current,
+      null,
+    );
+    if (!bestPath) return null;
+
+    // Any excluded package instance in the matched scope excludes its whole
+    // subtree, preserving the legacy name-based behavior for descendants.
+    const nestedInstances = importerInstances.filter((instance) =>
+      matchedPaths.some((matchedPath) => this.matchesImporterPath(instance.path, matchedPath)),
+    );
+
+    return {
+      excluded: nestedInstances.some((instance) => rule.excludedPackages.has(instance.name)),
+      specificity: bestPath.length,
+    };
   }
 
   /**
@@ -204,8 +284,8 @@ export class AliasManager {
       return null;
     }
 
-    const importerPackages = this.extractImporterPackages(importer);
-    if (importerPackages.length === 0) {
+    const importerInstances = this.extractImporterPackageInstances(importer);
+    if (importerInstances.length === 0) {
       return null;
     }
 
@@ -219,18 +299,50 @@ export class AliasManager {
       return null;
     }
 
+    const pathMatches = candidateRules
+      .map((rule) => ({ rule, match: this.getPathScopedMatch(rule, importer, importerInstances) }))
+      .filter(
+        (entry): entry is { rule: AliasRule; match: { excluded: boolean; specificity: number } } =>
+          entry.match !== null,
+      )
+      .sort(
+        (left, right) =>
+          right.match.specificity - left.match.specificity ||
+          left.rule.aliasName.localeCompare(right.rule.aliasName),
+      );
+
+    for (const { rule, match } of pathMatches) {
+      if (match.excluded) {
+        return null;
+      }
+
+      if (request === rule.originalName) {
+        logger.debug(`Resolving ${request} -> ${rule.aliasName} (from ${importer})`);
+        return rule.aliasName;
+      }
+
+      const prefix = `${rule.originalName}/`;
+      if (request.startsWith(prefix)) {
+        const resolved = `${rule.aliasName}${request.slice(rule.originalName.length)}`;
+        logger.debug(`Resolving ${request} -> ${resolved} (from ${importer})`);
+        return resolved;
+      }
+    }
+
     for (const rule of candidateRules) {
+      // A mapping with importerPaths is authoritative. Name-only matching is
+      // reserved for mappings produced by older callers without the field.
+      if (rule.importerPaths) continue;
+
       // importer 是否位于需要重定向的依赖包链路中
       // 优化点：
       // - 避免每次都把 Set 展开成数组（会产生大量临时对象）
       // - importerPackages 通常很短（路径上出现的包名数量有限），因此遍历它并用 Set.has 做判断更高效
-      let shouldRedirect = false;
-      for (const pkg of importerPackages) {
-        if (rule.dependents.has(pkg)) {
-          shouldRedirect = true;
-          break;
-        }
-      }
+      const hasExcludedImporter = importerInstances.some(({ name: pkg }) =>
+        rule.excludedPackages.has(pkg),
+      );
+      const shouldRedirect =
+        !hasExcludedImporter && importerInstances.some(({ name: pkg }) => rule.dependents.has(pkg));
       if (!shouldRedirect) {
         continue;
       }

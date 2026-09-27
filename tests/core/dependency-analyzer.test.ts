@@ -4,9 +4,24 @@ import { AliasManager } from '../../src/core/alias-manager';
 import type { DependencyPath, ResolvedOptions, PackageJson } from '../../src/types';
 import type { InstalledPackageInfo } from '../../src/types';
 import { findBestVersion } from '../../src/utils/semver';
-import { promises as fs } from 'fs';
+import { promises as fs, realpathSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+async function writeTestPackage(
+  parentDir: string,
+  name: string,
+  packageJson: Record<string, unknown>,
+): Promise<string> {
+  const packagePath = join(parentDir, 'node_modules', name);
+  await fs.mkdir(packagePath, { recursive: true });
+  await fs.writeFile(
+    join(packagePath, 'package.json'),
+    JSON.stringify({ name, version: '1.0.0', ...packageJson }),
+    'utf8',
+  );
+  return packagePath;
+}
 
 describe('DependencyAnalyzer', () => {
   let mockOptions: ResolvedOptions;
@@ -1172,6 +1187,183 @@ describe('DependencyAnalyzer Edge Cases', () => {
     expect(result.analyzedDependencies.size).toBe(0);
     expect(result.peerConflicts).toHaveLength(0);
     expect(result.aliasMappings).toHaveLength(0);
+  });
+});
+
+describe('DependencyAnalyzer path-aware redirect scopes', () => {
+  it('includes each nested package instance in the generated importer paths', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-path-scope-'));
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockResolvedValue(['2.7.16', '3.5.0']),
+    };
+
+    try {
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'path-scope-host',
+          version: '1.0.0',
+          dependencies: {
+            'legacy-widget': '1.0.0',
+            'modern-widget': '1.0.0',
+            vue: '^4.0.0',
+          },
+        }),
+        'utf8',
+      );
+      const legacyPath = await writeTestPackage(projectRoot, 'legacy-widget', {
+        peerDependencies: { vue: '^2.0.0' },
+        dependencies: { 'shared-core': '1.0.0' },
+      });
+      const modernPath = await writeTestPackage(projectRoot, 'modern-widget', {
+        peerDependencies: { vue: '^3.0.0' },
+        dependencies: { 'shared-core': '2.0.0' },
+      });
+      const legacyCorePath = await writeTestPackage(legacyPath, 'shared-core', {
+        version: '1.0.0',
+        dependencies: { 'legacy-leaf': '1.0.0' },
+      });
+      const modernCorePath = await writeTestPackage(modernPath, 'shared-core', {
+        version: '2.0.0',
+        dependencies: { 'modern-leaf': '1.0.0' },
+      });
+      await writeTestPackage(legacyCorePath, 'legacy-leaf', { version: '1.0.0' });
+      await writeTestPackage(modernCorePath, 'modern-leaf', { version: '1.0.0' });
+      await writeTestPackage(projectRoot, 'vue', { version: '4.0.0' });
+
+      const options: ResolvedOptions = {
+        dependencies: ['legacy-widget', 'modern-widget'],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'npm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+      const result = await new DependencyAnalyzer(
+        options,
+        {
+          name: 'path-scope-host',
+          version: '1.0.0',
+          dependencies: {
+            'legacy-widget': '1.0.0',
+            'modern-widget': '1.0.0',
+            vue: '^4.0.0',
+          },
+        },
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(result.aliasMappings).toHaveLength(2);
+      expect(result.aliasMappings.every((mapping) => mapping.importerPaths)).toBe(true);
+      expect(result.aliasMappings.flatMap((mapping) => mapping.importerPaths ?? [])).toEqual(
+        expect.arrayContaining([realpathSync(legacyCorePath), realpathSync(modernCorePath)]),
+      );
+      expect(result.aliasMappings.flatMap((mapping) => mapping.importerPaths ?? [])).toEqual(
+        expect.arrayContaining([
+          realpathSync(join(legacyCorePath, 'node_modules', 'legacy-leaf')),
+          realpathSync(join(modernCorePath, 'node_modules', 'modern-leaf')),
+        ]),
+      );
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('closes peer links between generated aliases without redirecting host imports', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-alias-closure-'));
+    const registryClient = {
+      fetchAllVersions: vi
+        .fn()
+        .mockImplementation((packageName: string) =>
+          Promise.resolve(packageName === 'vue' ? ['2.7.16'] : ['3.6.0']),
+        ),
+    };
+
+    try {
+      await writeTestPackage(projectRoot, 'legacy-consumer', {
+        peerDependencies: { vue: '^2.0.0', 'vue-router': '^3.0.0' },
+      });
+      await writeTestPackage(projectRoot, 'vue', {
+        version: '4.0.0',
+        peerDependencies: { 'vue-router': '^3.0.0' },
+      });
+      await writeTestPackage(projectRoot, 'vue-router', {
+        version: '5.0.0',
+        peerDependencies: { vue: '^2.0.0' },
+      });
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({
+          name: 'alias-closure-host',
+          version: '1.0.0',
+          dependencies: {
+            'legacy-consumer': '1.0.0',
+            vue: '^4.0.0',
+            'vue-router': '^5.0.0',
+          },
+        }),
+        'utf8',
+      );
+
+      const options: ResolvedOptions = {
+        dependencies: ['legacy-consumer'],
+        projectRoot,
+        autoInstall: true,
+        packageManager: 'npm',
+        registry: 'https://registry.example.test',
+        debug: false,
+        aliasPrefix: 'aliased-',
+        excludeRedirects: {},
+        includeRedirects: {},
+      };
+      const result = await new DependencyAnalyzer(
+        options,
+        {
+          name: 'alias-closure-host',
+          version: '1.0.0',
+          dependencies: {
+            'legacy-consumer': '1.0.0',
+            vue: '^4.0.0',
+            'vue-router': '^5.0.0',
+          },
+        },
+        undefined,
+        registryClient,
+      ).analyze();
+
+      const vueMapping = result.aliasMappings.find((mapping) => mapping.originalName === 'vue');
+      const routerMapping = result.aliasMappings.find(
+        (mapping) => mapping.originalName === 'vue-router',
+      );
+      const normalizedProjectRoot = realpathSync(projectRoot);
+      expect(vueMapping?.importerPaths).toContain(
+        join(normalizedProjectRoot, 'node_modules', routerMapping?.aliasName ?? ''),
+      );
+      expect(routerMapping?.importerPaths).toContain(
+        join(normalizedProjectRoot, 'node_modules', vueMapping?.aliasName ?? ''),
+      );
+
+      const manager = new AliasManager(options);
+      manager.initFromAnalysisResult(result);
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: join(projectRoot, 'node_modules', routerMapping?.aliasName ?? '', 'index.js'),
+        }),
+      ).toBe(vueMapping?.aliasName);
+      expect(
+        manager.resolveModule({
+          request: 'vue',
+          importer: join(projectRoot, 'src', 'index.js'),
+        }),
+      ).toBeNull();
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
   });
 });
 

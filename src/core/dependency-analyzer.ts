@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
 import type {
   DependencyInfo,
   PackageJson,
@@ -21,6 +23,11 @@ import {
 import { parseNpmAlias } from '../utils/version-spec';
 import { clearNpmRegistryCache } from './npm-registry';
 import { npmRegistryClient, type RegistryClient } from './registry-client';
+import {
+  buildInstalledDependencyGraph,
+  type InstalledDependencyGraph,
+  type InstalledPackageNode,
+} from './dependency-graph';
 
 const logger = createLogger('dependency-analyzer');
 
@@ -81,6 +88,8 @@ export class DependencyAnalyzer {
   private workspaceRootDeclaredLoaded = false;
   /** collectAllRelatedPackages 的 memo 缓存（单次 analyze 生命周期内有效） */
   private collectCache = new Map<string, string[]>();
+  /** 当前 analyze 使用的按安装路径区分的依赖图 */
+  private dependencyGraph: InstalledDependencyGraph | null = null;
   /** 注册表访问适配器（可注入以支持离线分析和确定性测试） */
   private registryClient: RegistryClient;
 
@@ -281,6 +290,13 @@ export class DependencyAnalyzer {
       // 0.1 预加载 workspaceRoot 的声明依赖（用于后续“已声明”判断合并）
       this.ensureWorkspaceRootDeclaredDepsLoaded();
 
+      // 先建立按真实安装路径标识的完整图。后续所有关系判断都从该图
+      // 读取；analyzedDependencies 仅保留按名称兼容的首个可见实例。
+      this.dependencyGraph = buildInstalledDependencyGraph(
+        this.options.dependencies,
+        this.options.projectRoot,
+      );
+
       // 1. 从用户指定的依赖开始，递归分析所有子依赖（deps + peerDeps）
       //    构建完整依赖树用于后续重定向判断
       for (const depName of this.options.dependencies) {
@@ -329,6 +345,7 @@ export class DependencyAnalyzer {
       this.rawDeclaredDeps = {};
       this.declaredDeps = {};
       this.collectCache.clear();
+      this.dependencyGraph = null;
     }
   }
 
@@ -339,6 +356,12 @@ export class DependencyAnalyzer {
     packageName: string,
     dependencyPath: string[],
   ): DependencyInfo | null {
+    const graphRoot = this.findGraphRoot(packageName);
+    if (graphRoot) {
+      this.populateAnalyzedDependenciesFromGraph();
+      return this.analyzedDependencies.get(graphRoot.name) ?? null;
+    }
+
     // 使用包名作为 visited 键，同一个包只分析一次
     if (this.visitedPackages.has(packageName)) {
       logger.debug(`Skipping already visited package: ${packageName}`);
@@ -409,6 +432,54 @@ export class DependencyAnalyzer {
     }
 
     return rootInfo;
+  }
+
+  private findGraphRoot(packageName: string): InstalledPackageNode | null {
+    if (!this.dependencyGraph) return null;
+
+    for (const rootId of this.dependencyGraph.roots) {
+      const root = this.dependencyGraph.nodes.get(rootId);
+      if (root?.name === packageName) return root;
+    }
+
+    return null;
+  }
+
+  private getDependencyPathForGraphNode(node: InstalledPackageNode): string[] {
+    if (!this.dependencyGraph) return [];
+
+    const names: string[] = [];
+    let current: InstalledPackageNode | undefined = node;
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      names.unshift(current.name);
+      current = current.parentId ? this.dependencyGraph.nodes.get(current.parentId) : undefined;
+    }
+
+    return names.slice(0, -1);
+  }
+
+  private populateAnalyzedDependenciesFromGraph(): void {
+    if (!this.dependencyGraph) return;
+
+    for (const node of this.dependencyGraph.nodes.values()) {
+      if (this.analyzedDependencies.has(node.name)) continue;
+
+      const packageJson = readPackageJsonCached(node.packagePath);
+      if (!packageJson) continue;
+
+      this.cacheInstalledPackageInfo(node.name, node.packagePath, packageJson);
+      this.analyzedDependencies.set(node.name, {
+        name: node.name,
+        version: node.version,
+        dependencyPath: this.getDependencyPathForGraphNode(node),
+        dependencies: packageJson.dependencies ?? {},
+        peerDependencies: packageJson.peerDependencies ?? {},
+        peerDependenciesMeta: packageJson.peerDependenciesMeta,
+      });
+      this.visitedPackages.add(node.name);
+    }
   }
 
   /**
@@ -557,22 +628,22 @@ export class DependencyAnalyzer {
    * 返回 null 表示包未安装
    */
   private getMainProjectVersion(packageName: string): string | null {
-    // 先检查已缓存的安装信息
-    const cached = this.installedPackageCache.get(packageName);
-    if (cached) {
-      return cached.version;
-    }
-
-    // 尝试按需查找包（从 node_modules 读取实际安装的版本）
+    // 主工程版本必须从 projectRoot 解析，不能被图中更早遇到的嵌套
+    // 同名实例覆盖。只有根目录解析不到时才回退到缓存。
     const { packagePath, pkgJson } = this.resolvePackageJson(packageName, this.options.projectRoot);
     if (packagePath && pkgJson?.version) {
-      // 缓存安装信息
+      // 缓存主工程可见实例，供后续别名识别复用。
       this.installedPackageCache.set(packageName, {
         name: packageName,
         version: pkgJson.version,
         path: packagePath,
       });
       return pkgJson.version;
+    }
+
+    const cached = this.installedPackageCache.get(packageName);
+    if (cached) {
+      return cached.version;
     }
 
     // 包未安装，返回 null
@@ -606,7 +677,60 @@ export class DependencyAnalyzer {
       aliasMappings.push(...mappings);
     }
 
+    this.linkAliasPeerImporterPaths(aliasMappings);
+
     return aliasMappings;
+  }
+
+  private getAliasCandidatePaths(aliasName: string): string[] {
+    const paths = new Set<string>();
+    const addRootPath = (root: string): void => {
+      paths.add(join(root, 'node_modules', aliasName));
+      paths.add(join(this.normalizeInstalledPath(root), 'node_modules', aliasName));
+    };
+
+    addRootPath(this.options.projectRoot);
+    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
+    if (workspaceRoot) addRootPath(workspaceRoot);
+
+    const installedPath = findPackagePath(aliasName, this.options.projectRoot);
+    if (installedPath) paths.add(this.normalizeInstalledPath(installedPath));
+
+    return [...paths];
+  }
+
+  /**
+   * If one generated alias represents a package with a peer dependency that
+   * is also aliased, its installed package directory must be an importer for
+   * the peer alias. Otherwise the alias's own import resolves back to the
+   * host version and breaks the peer closure.
+   */
+  private linkAliasPeerImporterPaths(mappings: AliasMapping[]): void {
+    if (!this.dependencyGraph || mappings.length < 2) return;
+
+    for (const importerMapping of mappings) {
+      const peerNames = new Set(
+        [...this.dependencyGraph.nodes.values()]
+          .filter((node) => node.name === importerMapping.originalName)
+          .flatMap((node) => node.peerDependencyNames),
+      );
+      if (peerNames.size === 0) continue;
+
+      const importerPaths = this.getAliasCandidatePaths(importerMapping.aliasName);
+      for (const peerMapping of mappings) {
+        if (
+          peerMapping === importerMapping ||
+          !peerNames.has(peerMapping.originalName) ||
+          peerMapping.importerPaths === undefined
+        ) {
+          continue;
+        }
+
+        peerMapping.importerPaths = [
+          ...new Set([...(peerMapping.importerPaths ?? []), ...importerPaths]),
+        ];
+      }
+    }
   }
 
   /**
@@ -948,9 +1072,16 @@ export class DependencyAnalyzer {
     ];
 
     // 收集 usedByRoots 子树（dependencies + peerDependencies 递归）用于重定向。
+    // 图模式按实际 package instance 路径收集，避免同名嵌套包共享规则。
     // 排除所有冲突包名（allConflictPackageNames），防止其被纳入 allDependents 后
     // 导致主工程对这些包的引用也被错误重定向。
-    const allDependents = this.collectAllRelatedPackages(usedByRoots, allConflictPackageNames);
+    const graphInstances = this.collectGraphRelatedPackageInstances(
+      usedByRoots,
+      allConflictPackageNames,
+    );
+    const allDependents = graphInstances
+      ? [...new Set(graphInstances.map((instance) => instance.name))]
+      : this.collectAllRelatedPackages(usedByRoots, allConflictPackageNames);
 
     return {
       originalName: packageName,
@@ -959,6 +1090,9 @@ export class DependencyAnalyzer {
       resolvedVersion: version,
       usedBy,
       allDependents,
+      ...(graphInstances && graphInstances.length > 0
+        ? { importerPaths: [...new Set(graphInstances.map((instance) => instance.path))] }
+        : {}),
     };
   }
 
@@ -1238,6 +1372,68 @@ export class DependencyAnalyzer {
     return names;
   }
 
+  private normalizeInstalledPath(packagePath: string): string {
+    try {
+      return realpathSync(packagePath);
+    } catch {
+      return resolvePath(packagePath);
+    }
+  }
+
+  private findGraphChildNode(
+    parent: InstalledPackageNode,
+    dependencyName: string,
+  ): InstalledPackageNode | null {
+    if (!this.dependencyGraph) return null;
+
+    const packagePath = findPackagePath(dependencyName, parent.packagePath);
+    if (!packagePath) return null;
+
+    return this.dependencyGraph.nodes.get(this.normalizeInstalledPath(packagePath)) ?? null;
+  }
+
+  /**
+   * 收集图中指定根实例的所有后代实例。返回 null 表示当前分析没有
+   * 对应的图根，调用方可为兼容旧测试/旧调用回退到名称遍历。
+   */
+  private collectGraphRelatedPackageInstances(
+    packageNames: string[],
+    excludePackages: string[] = [],
+  ): Array<{ name: string; path: string }> | null {
+    if (!this.dependencyGraph) return null;
+
+    const roots = packageNames
+      .map((packageName) =>
+        this.dependencyGraph!.roots.map((rootId) => this.dependencyGraph!.nodes.get(rootId)).find(
+          (node) => node?.name === packageName,
+        ),
+      )
+      .filter((node): node is InstalledPackageNode => node !== undefined);
+    if (roots.length === 0) return null;
+
+    const excludeSet = new Set(excludePackages);
+    const visited = new Set<string>();
+    const collected: Array<{ name: string; path: string }> = [];
+    const stack = roots.map((root) => root.id);
+
+    while (stack.length > 0) {
+      const nodeId = stack.pop();
+      if (!nodeId || visited.has(nodeId)) continue;
+      visited.add(nodeId);
+
+      const node = this.dependencyGraph.nodes.get(nodeId);
+      if (!node || excludeSet.has(node.name)) continue;
+
+      collected.push({ name: node.name, path: node.packagePath });
+      for (const dependencyName of [...node.dependencyNames, ...node.peerDependencyNames]) {
+        const child = this.findGraphChildNode(node, dependencyName);
+        if (child && !visited.has(child.id)) stack.push(child.id);
+      }
+    }
+
+    return collected;
+  }
+
   /**
    * 递归收集指定包的所有子依赖（dependencies + peerDependencies）
    *
@@ -1334,6 +1530,13 @@ export class DependencyAnalyzer {
     const cached = this.collectCache.get(cacheKey);
     if (cached) {
       return cached;
+    }
+
+    const graphInstances = this.collectGraphRelatedPackageInstances(packageNames, excludePackages);
+    if (graphInstances) {
+      const result = [...new Set(graphInstances.map((instance) => instance.name))];
+      this.collectCache.set(cacheKey, result);
+      return result;
     }
 
     const collected = new Set<string>();
