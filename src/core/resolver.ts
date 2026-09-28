@@ -252,15 +252,25 @@ export class DepsConflictResolver {
       // its AliasMapping[] signature. Filter the analyzed mappings internally
       // so a failed install/collision is never reported as installed while old
       // installer implementations that only expose failed[] remain usable.
-      const failedAliases = new Set(aliasResult.failed);
+      const failedAliases = new Set(aliasResult.failed ?? []);
       const successfulAliases = new Set([...aliasResult.installed, ...(aliasResult.reused ?? [])]);
-      const completedMappings =
-        successfulAliases.size > 0
-          ? aliasMappings.filter(
-              (mapping) =>
-                successfulAliases.has(mapping.aliasName) && !failedAliases.has(mapping.aliasName),
-            )
-          : aliasMappings.filter((mapping) => !failedAliases.has(mapping.aliasName));
+      // Older installers did not expose `reused`. For a result that is not
+      // explicitly failed, an empty installSpec is the legacy reuse marker.
+      // A failed/incomplete result must not infer any unknown mapping as
+      // successful: only its explicit installed/reused names are trustworthy.
+      const hasExplicitFailure = (aliasResult as { success?: boolean }).success === false;
+      if (!hasExplicitFailure) {
+        for (const mapping of aliasMappings) {
+          if (mapping.installSpec === '' && !failedAliases.has(mapping.aliasName)) {
+            successfulAliases.add(mapping.aliasName);
+          }
+        }
+      }
+
+      const completedMappings = aliasMappings.filter(
+        (mapping) =>
+          successfulAliases.has(mapping.aliasName) && !failedAliases.has(mapping.aliasName),
+      );
 
       await this.hooks.onInstallComplete(completedMappings);
     }
