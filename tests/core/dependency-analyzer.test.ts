@@ -1191,6 +1191,59 @@ describe('DependencyAnalyzer Edge Cases', () => {
 });
 
 describe('DependencyAnalyzer path-aware redirect scopes', () => {
+  it('uses the root-visible instance for name-keyed analyzedDependencies', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-root-visible-'));
+
+    try {
+      const rootConsumerPath = await writeTestPackage(projectRoot, 'root-consumer', {
+        dependencies: { shared: '1.0.0' },
+      });
+      await writeTestPackage(rootConsumerPath, 'shared', { version: '1.1.0' });
+      const rootSharedPath = await writeTestPackage(projectRoot, 'shared', { version: '2.1.0' });
+      const mainPackageJson: PackageJson = {
+        name: 'root-visible-host',
+        version: '1.0.0',
+        dependencies: {
+          'root-consumer': '1.0.0',
+          shared: '2.1.0',
+        },
+      };
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify(mainPackageJson),
+        'utf8',
+      );
+
+      const result = await new DependencyAnalyzer(
+        {
+          dependencies: ['root-consumer', 'shared'],
+          projectRoot,
+          autoInstall: true,
+          packageManager: 'npm',
+          registry: 'https://registry.example.test',
+          debug: false,
+          aliasPrefix: 'aliased-',
+          excludeRedirects: {},
+          includeRedirects: {},
+        },
+        mainPackageJson,
+        undefined,
+        { fetchAllVersions: vi.fn() },
+      ).analyze();
+
+      expect(result.analyzedDependencies.get('shared')).toMatchObject({
+        version: '2.1.0',
+        dependencyPath: [],
+      });
+      expect(result.analyzedDependencies.get('shared')).toBeDefined();
+      expect(realpathSync(rootSharedPath)).not.toBe(
+        realpathSync(join(rootConsumerPath, 'node_modules', 'shared')),
+      );
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('includes each nested package instance in the generated importer paths', async () => {
     const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-path-scope-'));
     const registryClient = {

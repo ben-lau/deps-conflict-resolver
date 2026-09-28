@@ -253,12 +253,18 @@ export class AliasManager {
     const matchedPaths = rule.importerPaths.filter((packagePath) =>
       this.matchesImporterPath(importer, packagePath),
     );
+    // `includeRedirects` augments a path-scoped rule with explicit package
+    // names. Those names are intentionally the only name-based fallback for
+    // path-scoped mappings; generated `allDependents` must remain path-aware.
+    const includedInstances = importerInstances.filter((instance) =>
+      rule.dependents.has(instance.name),
+    );
     const bestPath = matchedPaths.reduce<string | null>(
       (current, packagePath) =>
         !current || packagePath.length > current.length ? packagePath : current,
       null,
     );
-    if (!bestPath) return null;
+    if (!bestPath && includedInstances.length === 0) return null;
 
     // Any excluded package instance in the matched scope excludes its whole
     // subtree, preserving the legacy name-based behavior for descendants.
@@ -267,8 +273,10 @@ export class AliasManager {
     );
 
     return {
-      excluded: nestedInstances.some((instance) => rule.excludedPackages.has(instance.name)),
-      specificity: bestPath.length,
+      excluded:
+        nestedInstances.some((instance) => rule.excludedPackages.has(instance.name)) ||
+        includedInstances.some((instance) => rule.excludedPackages.has(instance.name)),
+      specificity: bestPath?.length ?? 0,
     };
   }
 

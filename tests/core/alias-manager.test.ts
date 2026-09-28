@@ -440,6 +440,50 @@ describe('AliasManager', () => {
       ).toBe('aliased-vue2');
     });
 
+    it('applies included names to path-scoped mappings while exclusion still wins', () => {
+      const mapping: AnalysisResult = {
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue2',
+            installSpec: '',
+            resolvedVersion: '2.7.16',
+            usedBy: ['legacy-widget'],
+            allDependents: ['legacy-widget'],
+            importerPaths: ['/project/node_modules/legacy-widget'],
+          },
+        ],
+        missingFirstLevelPeers: [],
+      };
+
+      const includedManager = new AliasManager({
+        ...mockOptions,
+        includeRedirects: { vue: ['forced-pkg'] },
+      });
+      includedManager.initFromAnalysisResult(mapping);
+      expect(
+        includedManager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/forced-pkg/index.js',
+        }),
+      ).toBe('aliased-vue2');
+
+      const excludedManager = new AliasManager({
+        ...mockOptions,
+        includeRedirects: { vue: ['forced-pkg'] },
+        excludeRedirects: { vue: ['forced-pkg'] },
+      });
+      excludedManager.initFromAnalysisResult(mapping);
+      expect(
+        excludedManager.resolveModule({
+          request: 'vue',
+          importer: '/project/node_modules/forced-pkg/index.js',
+        }),
+      ).toBeNull();
+    });
+
     it('keeps descendants of an excluded package out of the path-scoped redirect', () => {
       const manager = new AliasManager({
         ...mockOptions,

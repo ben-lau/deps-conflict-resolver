@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { realpathSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -79,6 +80,34 @@ describe('buildInstalledDependencyGraph', () => {
           ['modern-leaf', modernNode?.id],
         ]),
       );
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('clears a nested parent when the same physical package is also a graph root', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-graph-root-hit-'));
+
+    try {
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify({ name: 'fixture', version: '1.0.0' }),
+        'utf8',
+      );
+
+      await writePackage(projectRoot, 'root-consumer', {
+        dependencies: { shared: '^1.0.0' },
+      });
+      const rootSharedPath = await writePackage(projectRoot, 'shared', {
+        version: '1.2.0',
+      });
+
+      const graph = buildInstalledDependencyGraph(['root-consumer', 'shared'], projectRoot);
+      const sharedNode = graph.nodes.get(realpathSync(rootSharedPath));
+
+      expect(sharedNode).toBeDefined();
+      expect(sharedNode?.parentId).toBeNull();
+      expect(graph.roots).toContain(sharedNode?.id);
     } finally {
       await fs.rm(projectRoot, { recursive: true, force: true });
     }

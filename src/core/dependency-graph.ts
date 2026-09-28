@@ -51,7 +51,14 @@ export function buildInstalledDependencyGraph(
     if (!packagePath) continue;
 
     const normalizedPath = normalizePackagePath(packagePath);
-    if (nodes.has(normalizedPath)) {
+    const existingNode = nodes.get(normalizedPath);
+    if (existingNode) {
+      if (item.root) {
+        // A root request can resolve to a package already discovered through a
+        // dependency edge. The physical package is still root-visible, so
+        // remove the incidental parent edge before recording the root.
+        existingNode.parentId = null;
+      }
       if (item.root && !roots.includes(normalizedPath)) {
         roots.push(normalizedPath);
       }

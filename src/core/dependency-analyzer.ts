@@ -463,7 +463,35 @@ export class DependencyAnalyzer {
   private populateAnalyzedDependenciesFromGraph(): void {
     if (!this.dependencyGraph) return;
 
+    const rootVisibleNodeIds = new Map<string, string>();
     for (const node of this.dependencyGraph.nodes.values()) {
+      const rootVisiblePath = findPackagePath(node.name, this.options.projectRoot);
+      if (!rootVisiblePath) continue;
+
+      const rootVisibleNode = this.dependencyGraph.nodes.get(
+        this.normalizeInstalledPath(rootVisiblePath),
+      );
+      if (rootVisibleNode && !rootVisibleNodeIds.has(node.name)) {
+        rootVisibleNodeIds.set(node.name, rootVisibleNode.id);
+      }
+    }
+
+    const orderedNodes: InstalledPackageNode[] = [];
+    const selectedNodeIds = new Set<string>();
+    for (const nodeId of rootVisibleNodeIds.values()) {
+      const node = this.dependencyGraph.nodes.get(nodeId);
+      if (node && !selectedNodeIds.has(node.id)) {
+        selectedNodeIds.add(node.id);
+        orderedNodes.push(node);
+      }
+    }
+    for (const node of this.dependencyGraph.nodes.values()) {
+      if (!selectedNodeIds.has(node.id)) {
+        orderedNodes.push(node);
+      }
+    }
+
+    for (const node of orderedNodes) {
       if (this.analyzedDependencies.has(node.name)) continue;
 
       const packageJson = readPackageJsonCached(node.packagePath);
