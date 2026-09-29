@@ -18,13 +18,17 @@ export function clearNpmRegistryCache(): void {
 }
 
 /**
- * 带超时的 fetch
+ * 带超时的 fetch 与响应体读取。
+ *
+ * `fetch()` resolve 只表示响应头已到达；注册表响应体仍可能卡住。因此
+ * 消费响应体的回调也必须在同一个 AbortController 的生命周期内执行。
  */
-async function fetchWithTimeout(
+async function fetchWithTimeout<T>(
   url: string,
   options: RequestInit = {},
+  consumeResponse: (response: Response) => Promise<T>,
   timeout = DEFAULT_NPM_REGISTRY_TIMEOUT_MS,
-): Promise<Response> {
+): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -33,7 +37,7 @@ async function fetchWithTimeout(
       ...options,
       signal: controller.signal,
     });
-    return response;
+    return await consumeResponse(response);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -62,11 +66,35 @@ async function fetchPackageInfo(
     const url = `${registry}/${encodedName}`;
     logger.debug(`Fetching package info from: ${url}`);
 
-    const response = await fetchWithTimeout(url, {
-      headers: {
-        Accept: 'application/vnd.npm.install-v1+json',
+    const { response, data } = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          Accept: 'application/vnd.npm.install-v1+json',
+        },
       },
-    });
+      async (fetchedResponse) => {
+        if (!fetchedResponse.ok) {
+          return { response: fetchedResponse, data: null };
+        }
+
+        return {
+          response: fetchedResponse,
+          data: (await fetchedResponse.json()) as {
+            name: string;
+            versions: Record<
+              string,
+              {
+                dependencies?: Record<string, string>;
+                peerDependencies?: Record<string, string>;
+                peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+              }
+            >;
+            'dist-tags': Record<string, string>;
+          },
+        };
+      },
+    );
 
     if (!response.ok) {
       if (response.status === 404) {
@@ -76,24 +104,11 @@ async function fetchPackageInfo(
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const data = (await response.json()) as {
-      name: string;
-      versions: Record<
-        string,
-        {
-          dependencies?: Record<string, string>;
-          peerDependencies?: Record<string, string>;
-          peerDependenciesMeta?: Record<string, { optional?: boolean }>;
-        }
-      >;
-      'dist-tags': Record<string, string>;
-    };
-
     const packageInfo: NpmPackageInfo = {
-      name: data.name,
-      versions: Object.keys(data.versions),
-      versionDetails: data.versions,
-      distTags: data['dist-tags'],
+      name: data!.name,
+      versions: Object.keys(data!.versions),
+      versionDetails: data!.versions,
+      distTags: data!['dist-tags'],
     };
 
     // 缓存时只保留版本列表和 distTags，丢弃庞大的 versionDetails 以节省内存
@@ -110,6 +125,7 @@ async function fetchPackageInfo(
     if (error instanceof Error && error.name === 'AbortError') {
       logger.error(
         `Timeout fetching package info for ${packageName} (>${DEFAULT_NPM_REGISTRY_TIMEOUT_MS}ms)`,
+        error,
       );
     } else {
       logger.error(`Failed to fetch package info for ${packageName}:`, error);
