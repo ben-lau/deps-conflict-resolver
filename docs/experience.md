@@ -30,31 +30,33 @@
 
 **教训**：monorepo 中依赖声明是分层的，任何关于"是否已安装/声明"的判断都需要考虑 workspace 拓扑。
 
-### 4. 版本不匹配时不应覆盖已有别名
+### 4. 已有别名必须验证身份，安装器不得覆盖目录
 
-**问题**：早期版本在已有别名的版本不满足新需求时，会覆盖安装新版本。这是一个破坏性行为——其他使用者可能依赖旧版本。
+**问题**：仅凭 `installSpec` 或目录存在就认为 alias 可复用，会把错误包或错误版本当作目标依赖；直接覆盖已有目录也可能破坏其他使用者。
 
-**方案**：版本不匹配时返回 null，不修改已有依赖。由用户自行决定如何处理。
+**方案**：复用前读取 alias 目录的 `package.json`，同时校验真实包名和版本。安装器遇到缺失/无效元数据、包名不匹配或版本不匹配时，返回结构化的 `ALIAS_NAME_OCCUPIED` collision，标记该 alias 失败且不调用包管理器；已有目录保持不变。只有身份和版本都匹配时才复用。
 
-**教训**：工具应尽量避免对已有配置的破坏性修改，宁可保守（返回 null / 报错）也不要静默覆盖。
+**教训**：安装操作必须是非破坏性的；遇到占用或不确定状态应报告冲突并 fail closed，而不是静默覆盖。别名名称对所有项目/workspace 依赖键的预留属于后续改进，不能把当前的名称后缀策略描述成完整的所有权保证。
 
-### 5. optional peerDependencies 应排除在 missing 报告之外
+### 5. optional peerDependencies 应排除在冲突和 missing 报告之外
 
 **问题**：`peerDependenciesMeta` 中标记为 `optional: true` 的 peer 依赖如果未安装，不应被报告为 missing，也不应触发别名安装。
 
-**方案**：在收集 missing peers 时，检查 `peerDependenciesMeta` 并跳过 optional 的条目。
+**方案**：在收集第一层 peer 时检查 `peerDependenciesMeta`，跳过 optional 条目。它们不会进入冲突列表、missing peer 诊断或 alias 生成。
 
 ---
 
 ## 性能与稳定性
 
-### 6. 大型依赖树必须用显式栈替代递归
+### 6. 依赖图遍历必须按安装路径保留嵌套实例
 
-**问题**：某些项目的依赖树极深（如大型 monorepo），递归遍历会直接导致 JavaScript 调用栈溢出。
+**问题**：按包名去重会把同名但不同版本的嵌套包错误合并，导致 importer 解析到错误的 alias；递归调用还可能在深依赖树上耗尽 JavaScript 调用栈。
 
-**方案**：依赖树遍历改用 `while (stack.length > 0)` 迭代方式，彻底消除栈溢出风险。
+**方案**：使用显式栈迭代遍历，并以规范化的实际包目录作为图节点身份。每个子依赖都从其所属包目录解析，因此同名嵌套实例保留为独立节点；alias 的 importer 路径按具体实例生成，运行时优先按路径匹配。旧调用方没有 `importerPaths` 时才保留 name-only `allDependents` 兼容路径。
 
-**教训**：处理用户提供的树形/图结构数据时，默认使用迭代而非递归。
+**边界**：冲突检测仍只收集用户指定依赖的第一层 peer；完整递归图只用于重定向候选、路径作用域和 alias-to-alias peer closure，不会把子依赖 peer 自动升级为新的安装任务。`excludeRedirects` 对路径匹配到的实例及其后代生效，`includeRedirects` 仍按显式包名补充后再执行排除。
+
+**教训**：图遍历的去重键必须反映运行时包实例，而不是只反映显示名称；检测范围和重定向范围要分别定义。
 
 ### 7. 缓存 null 结果，避免重复磁盘探测
 
@@ -82,18 +84,20 @@
 
 **方案**：始终传递 `--legacy-peer-deps` 跳过 peer 依赖检查。安装逻辑本身就是为了解决冲突，不需要 npm 再做一次检查。
 
-### 10. 安装进程需要超时 + 信号升级机制
+### 10. 安装进程需要有边界的超时和信号升级机制
 
 **问题**：网络问题或 registry 不可达时，`npm install` 可能无限挂起。
 
 **方案**：
 
-- 设置 120 秒超时
-- 超时后先发 SIGTERM，等待 5 秒
-- 若仍未退出则发 SIGKILL
-- 用 `resolved` 标志防止 Promise 被 resolve 两次
+- 包管理器安装子进程设置 120 秒超时
+- 超时后先向进程组发送 SIGTERM，等待 5 秒
+- 若进程组仍未退出，再发送 SIGKILL（Windows 使用 `taskkill /pid <pid> /t /f`）
+- 以子进程 `close` 事件作为最终完成信号，`settled`/`closeSeen` 只负责保证 Promise 单次完成
 
-**教训**：所有涉及外部进程的操作都必须有超时保护和优雅降级机制。
+这个计时器约束的是 alias 安装子进程，不应被表述为覆盖 registry 响应体读取或 `response.json()`；后者仍是独立的 registry-client 后续改进项。
+
+**教训**：外部进程必须有超时和优雅降级；超时结果应在子进程真正退出后报告，不能用 `child.killed` 或提前 resolve 代替完成信号。
 
 ### 11. 包管理器自动检测需要多重降级策略
 
@@ -105,7 +109,7 @@
 2. lock 文件存在性（`pnpm-lock.yaml` / `yarn.lock` / `package-lock.json`）
 3. 默认 npm
 
-Registry 同理：项目 `.npmrc` → 用户 `~/.npmrc` → `.yarnrc.yml` → 默认 `registry.npmjs.org`。
+Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 用户 `~/.npmrc` → pnpm 用户 `.pnpmrc`/yarn `.yarnrc.yml` → 默认 `registry.npmjs.org`。解析器的版本查询和包管理器 alias 安装都使用解析后的同一 registry。
 
 ---
 
@@ -119,9 +123,10 @@ Registry 同理：项目 `.npmrc` → 用户 `~/.npmrc` → `.yarnrc.yml` → �
 
 **额外处理**：
 
-- watch 模式通过 `watchRun` hook 重新初始化
-- 初始化失败不应阻塞编译（继续构建，只是别名不生效）
-- `done` hook 中的错误不应抛出
+- watch 模式通过 `watchRun` hook 先失效旧 generation，再等待新一轮分析完成
+- 初始化失败不应阻塞 Webpack 编译（记录错误并继续构建，该 generation 不应用 alias），后续 watch 周期可以重试
+- Webpack `done` hook 中的错误不应抛出
+- 核心 resolver 与 Vite 插件仍把初始化错误交给调用方；fail-open 是 Webpack 插件的边界，不是所有入口的默认行为
 
 ### 13. Vite 插件需要处理 esbuild 版本差异
 
@@ -189,11 +194,13 @@ Registry 同理：项目 `.npmrc` → 用户 `~/.npmrc` → `.yarnrc.yml` → �
 
 **问题**：同一包的不同版本可能生成相同的别名（如 `vue@2.6.14` 和 `vue@2.7.0` 都生成 `aliased-vue2`），导致安装冲突。
 
-**方案**：三级命名策略：
+**方案**：对已识别的 alias 名称使用三级候选策略：
 
 1. 简单名：`aliased-vue2`
 2. 完整版本后缀：`aliased-vue-2-6-14`
 3. 数字计数器：`aliased-vue2-2`
+
+安装器仍会在落盘前验证实际包名/版本；即使目录已被其他包占用，也只报告 `ALIAS_NAME_OCCUPIED` 并保留原目录。当前名称候选集合主要来自已有 local/workspace alias；将项目和 workspace 的所有依赖键纳入预留集合、避免生成阶段撞上无关依赖，是后续 alias-ownership 工作，不能在文档中承诺已经完成。
 
 ### 23. 双重初始化应为 no-op
 
