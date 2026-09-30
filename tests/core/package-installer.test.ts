@@ -113,6 +113,48 @@ describe('PackageInstaller', () => {
       expect(result.installed).toEqual([]);
     });
 
+    it('should report reused and newly installed aliases separately', async () => {
+      vi.mocked(fileExists).mockImplementation((path) => path.toString().includes('aliased-vue2'));
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({
+          name: 'vue',
+          version: '2.7.0',
+        }),
+      );
+      const install = vi.fn().mockResolvedValue({
+        success: true,
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+      } satisfies PackageManagerRunResult);
+      const injectedInstaller = new PackageInstaller(mockOptions, { install });
+
+      const result = await injectedInstaller.installAliases([
+        {
+          originalName: 'vue',
+          aliasName: 'aliased-vue2',
+          resolvedVersion: '2.7.0',
+          usedBy: ['legacy-package'],
+          allDependents: ['legacy-package'],
+          installSpec: '',
+        },
+        {
+          originalName: 'vue',
+          aliasName: 'aliased-vue3',
+          resolvedVersion: '2.7.1',
+          usedBy: ['modern-package'],
+          allDependents: ['modern-package'],
+          installSpec: 'aliased-vue3@npm:vue@2.7.1',
+        },
+      ]);
+
+      expect(result.success).toBe(true);
+      expect(result.reused).toEqual(['aliased-vue2']);
+      expect(result.installed).toEqual(['aliased-vue3']);
+      expect(result.failed).toEqual([]);
+    });
+
     it('should report an occupied alias without replacing it', async () => {
       const projectRoot = await fs.mkdtemp(
         join(tmpdir(), 'deps-conflict-resolver-alias-collision-'),
@@ -465,6 +507,7 @@ describe('PackageInstaller', () => {
       expect(result).toEqual({
         success: false,
         installed: [],
+        reused: [],
         failed: ['aliased-vue'],
         errors: ['Install failed'],
       });

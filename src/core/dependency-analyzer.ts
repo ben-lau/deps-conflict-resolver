@@ -1064,7 +1064,11 @@ export class DependencyAnalyzer {
     }
 
     // 3. 生成新的别名名称
-    const combinedExisting = new Set([...existingAliasNames, ...usedAliasNames]);
+    const combinedExisting = new Set([
+      ...existingAliasNames,
+      ...usedAliasNames,
+      ...this.getReservedDependencyNames(),
+    ]);
     const aliasName = this.generateUniqueAliasName(packageName, bestVersion, combinedExisting);
     const installSpec = createAliasInstallSpec(aliasName, packageName, bestVersion);
 
@@ -1398,6 +1402,23 @@ export class DependencyAnalyzer {
     }
 
     return names;
+  }
+
+  /**
+   * Return every dependency key that the host or its workspace root owns.
+   *
+   * Generated aliases share the package namespace with ordinary dependency
+   * keys. Keeping the complete set here prevents a generated alias from
+   * silently replacing an unrelated dependency declared by the user.
+   */
+  private getReservedDependencyNames(): Set<string> {
+    this.ensureWorkspaceRootDeclaredDepsLoaded();
+
+    return new Set([
+      ...Object.keys(this.rawDeclaredDeps),
+      ...Object.keys(this.declaredDeps),
+      ...Object.keys(this.workspaceRootDeclaredDeps),
+    ]);
   }
 
   private normalizeInstalledPath(packagePath: string): string {
