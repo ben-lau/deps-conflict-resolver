@@ -68,15 +68,13 @@ function createEsbuildAliasPlugin(
   return {
     name: 'deps-conflict-resolver-esbuild',
     setup(build) {
-      const analysisResult = resolver.getAnalysisResult();
-      if (!analysisResult || analysisResult.aliasMappings.length === 0) {
+      const activeMappings = resolver.getAliasPathMappings();
+      if (activeMappings.length === 0) {
         return;
       }
 
       // 收敛为一个 onResolve，避免为每个包注册两次 handler
-      const originalNames = Array.from(
-        new Set(analysisResult.aliasMappings.map((m) => m.originalName)),
-      );
+      const originalNames = Array.from(new Set(activeMappings.map((m) => m.originalName)));
 
       const filter = new RegExp(`^(${originalNames.map(escapeRegex).join('|')})(?:/.*)?$`);
 
@@ -165,16 +163,18 @@ export function depsConflictResolverVitePlugin(options: VitePluginOptions): Plug
         return;
       }
 
-      const { aliasMappings } = analysisResult;
-
       // 获取别名路径映射并转换为 Vite 格式
       const aliasPathMappings = resolver.getAliasPathMappings();
+      if (aliasPathMappings.length === 0) {
+        logger.info('No active aliases available');
+        return;
+      }
       const aliases = createViteAliases(aliasPathMappings);
 
-      logger.info(`Configured ${aliasMappings.length} alias redirections`);
+      logger.info(`Configured ${aliasPathMappings.length} alias redirections`);
 
       // 收集需要包含在 optimizeDeps 中的别名包
-      const aliasPackages = Array.from(new Set(aliasMappings.map((m) => m.aliasName)));
+      const aliasPackages = Array.from(new Set(aliasPathMappings.map((m) => m.aliasName)));
 
       logger.debug(`Alias packages to include: ${aliasPackages.join(', ')}`);
 

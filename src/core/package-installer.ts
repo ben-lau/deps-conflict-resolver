@@ -170,8 +170,35 @@ export class PackageInstaller {
     const installResult = await this.runInstall(installSpecs);
 
     if (installResult.success) {
-      result.installed = toInstall.map((m) => m.aliasName);
-      logger.info(`Successfully installed: ${result.installed.join(', ')}`);
+      for (const mapping of toInstall) {
+        const aliasPath = join(this.options.projectRoot, 'node_modules', mapping.aliasName);
+
+        // A successful package-manager exit does not prove that the alias
+        // still belongs to the requested package: another process can claim
+        // the directory between the preflight check and installation. When a
+        // directory is present, verify its identity before publishing it as
+        // installed. Keep the adapter's success for test/dry-run adapters
+        // that do not materialize a filesystem tree.
+        if (!fileExists(aliasPath)) {
+          result.installed.push(mapping.aliasName);
+          continue;
+        }
+
+        const verification = this.verifyInstalledVersion(
+          aliasPath,
+          mapping.originalName,
+          mapping.resolvedVersion,
+        );
+        if (verification.matches) {
+          result.installed.push(mapping.aliasName);
+        } else {
+          reportCollision(mapping, verification);
+        }
+      }
+
+      if (result.installed.length > 0) {
+        logger.info(`Successfully installed: ${result.installed.join(', ')}`);
+      }
     } else {
       result.success = false;
       result.failed.push(...toInstall.map((m) => m.aliasName));

@@ -4,6 +4,7 @@ import type {
   AnalysisResult,
   PluginHooks,
   AliasPathMapping,
+  AliasMapping,
 } from '../types/index';
 import { DEFAULT_NPM_REGISTRY } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
@@ -35,8 +36,8 @@ export class DepsConflictResolver {
 
   private environmentDetector: EnvironmentDetector | null = null;
   private analyzer: DependencyAnalyzer | null = null;
-  private aliasManager!: AliasManager;
-  private installer!: PackageInstaller;
+  private aliasManager: AliasManager | null = null;
+  private installer: PackageInstaller | null = null;
 
   private analysisResult: AnalysisResult | null = null;
   private initialized = false;
@@ -144,6 +145,8 @@ export class DepsConflictResolver {
     this.analysisResult = null;
     this.analyzer = null;
     this.aliasManager?.clear?.();
+    this.aliasManager = null;
+    this.installer = null;
   }
 
   private async initializeGeneration(): Promise<void> {
@@ -181,9 +184,6 @@ export class DepsConflictResolver {
     // 输出缺失的 peer 依赖警告（不自动安装，仅提示）
     this.logMissingFirstLevelPeers(this.analysisResult);
 
-    // 初始化别名管理器
-    this.aliasManager.initFromAnalysisResult(this.analysisResult);
-
     // 调用钩子
     if (this.hooks.onAnalysisComplete) {
       await this.hooks.onAnalysisComplete(this.analysisResult);
@@ -192,6 +192,13 @@ export class DepsConflictResolver {
     // 自动安装
     if (this.options.autoInstall) {
       await this.installDependencies();
+    } else {
+      // An empty installSpec identifies an alias that analysis verified as
+      // already reusable. Generated aliases still require installation before
+      // they may enter runtime rules.
+      this.setActiveAliasMappings(
+        this.analysisResult.aliasMappings.filter((mapping) => mapping.installSpec === ''),
+      );
     }
 
     // 分析器在初始化完成后不再使用，释放以允许 GC 回收其内部状态
@@ -232,7 +239,7 @@ export class DepsConflictResolver {
    * 这样可以避免"什么依赖都自动安装"的问题，用户可以根据警告自行决定是否安装缺失的依赖
    */
   async installDependencies(): Promise<void> {
-    if (!this.analysisResult) {
+    if (!this.analysisResult || !this.installer) {
       throw new Error('Resolver not initialized. Call initialize() first.');
     }
 
@@ -240,7 +247,18 @@ export class DepsConflictResolver {
 
     // 只安装与主工程版本冲突的别名依赖（用于编译时重定向）
     // aliasMappings 只包含 needsAlias=true 的情况，即主工程已声明且版本冲突
-    const aliasResult = await this.installer.installAliases(aliasMappings);
+    let aliasResult: Awaited<ReturnType<PackageInstaller['installAliases']>>;
+    try {
+      aliasResult = await this.installer.installAliases(aliasMappings);
+    } catch (error) {
+      // A thrown installer error cannot identify a safe subset of mappings.
+      // Remove all active rules before propagating it to the generation guard.
+      this.setActiveAliasMappings([]);
+      throw error;
+    }
+
+    const completedMappings = this.filterCompletedMappings(aliasMappings, aliasResult, false);
+    this.setActiveAliasMappings(completedMappings);
 
     if (!aliasResult.success) {
       logger.warn(`Some alias installations failed: ${aliasResult.errors.join(', ')}`);
@@ -252,28 +270,63 @@ export class DepsConflictResolver {
       // its AliasMapping[] signature. Filter the analyzed mappings internally
       // so a failed install/collision is never reported as installed while old
       // installer implementations that only expose failed[] remain usable.
-      const failedAliases = new Set(aliasResult.failed ?? []);
-      const successfulAliases = new Set([...aliasResult.installed, ...(aliasResult.reused ?? [])]);
-      // Older installers did not expose `reused`. For a result that is not
-      // explicitly failed, an empty installSpec is the legacy reuse marker.
-      // A failed/incomplete result must not infer any unknown mapping as
-      // successful: only its explicit installed/reused names are trustworthy.
-      const hasExplicitFailure = (aliasResult as { success?: boolean }).success === false;
-      if (!hasExplicitFailure) {
-        for (const mapping of aliasMappings) {
-          if (mapping.installSpec === '' && !failedAliases.has(mapping.aliasName)) {
-            successfulAliases.add(mapping.aliasName);
-          }
+      await this.hooks.onInstallComplete(
+        this.filterCompletedMappings(aliasMappings, aliasResult, true),
+      );
+    }
+  }
+
+  /**
+   * Select only mappings whose installer outcome explicitly proved reuse or
+   * installation. Hook callers retain the pre-Task-9 compatibility fallback
+   * for old installer results that omitted `reused`.
+   */
+  private filterCompletedMappings(
+    aliasMappings: AliasMapping[],
+    aliasResult: {
+      success?: boolean;
+      installed?: string[];
+      reused?: string[];
+      failed?: string[];
+    },
+    allowLegacyReuse: boolean,
+  ): AliasMapping[] {
+    const failedAliases = new Set(aliasResult.failed ?? []);
+    const successfulAliases = new Set([
+      ...(aliasResult.installed ?? []),
+      ...(aliasResult.reused ?? []),
+    ]);
+
+    // Older installer implementations did not expose `reused`. The hook
+    // remains compatible with that result shape, but runtime rules do not
+    // infer success from installSpec and therefore stay fail-closed.
+    if (allowLegacyReuse && aliasResult.success !== false) {
+      for (const mapping of aliasMappings) {
+        if (mapping.installSpec === '' && !failedAliases.has(mapping.aliasName)) {
+          successfulAliases.add(mapping.aliasName);
         }
       }
-
-      const completedMappings = aliasMappings.filter(
-        (mapping) =>
-          successfulAliases.has(mapping.aliasName) && !failedAliases.has(mapping.aliasName),
-      );
-
-      await this.hooks.onInstallComplete(completedMappings);
     }
+
+    return aliasMappings.filter(
+      (mapping) =>
+        successfulAliases.has(mapping.aliasName) && !failedAliases.has(mapping.aliasName),
+    );
+  }
+
+  /**
+   * Publish a new active mapping set while keeping the complete analysis
+   * result available for diagnostics.
+   */
+  private setActiveAliasMappings(mappings: AliasMapping[]): void {
+    if (!this.aliasManager || !this.analysisResult) {
+      return;
+    }
+
+    this.aliasManager.initFromAnalysisResult({
+      ...this.analysisResult,
+      aliasMappings: mappings,
+    });
   }
 
   /**
@@ -281,6 +334,10 @@ export class DepsConflictResolver {
    * @returns 解析后的模块名，如果不需要重定向则返回 null
    */
   resolveModule(request: string, importer?: string): string | null {
+    if (!this.initialized || !this.aliasManager) {
+      return null;
+    }
+
     // 检查钩子
     if (this.hooks.beforeResolve) {
       const hookResult = this.hooks.beforeResolve(request, importer);
@@ -297,6 +354,10 @@ export class DepsConflictResolver {
    * 返回别名名称到实际路径的映射，供构建工具插件转换为各自的格式
    */
   getAliasPathMappings(): AliasPathMapping[] {
+    if (!this.initialized || !this.aliasManager) {
+      return [];
+    }
+
     return this.aliasManager.getAliasPathMappings();
   }
 
