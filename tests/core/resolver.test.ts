@@ -701,6 +701,99 @@ describe('DepsConflictResolver', () => {
 
       expect(onInstallComplete).toHaveBeenCalledWith([successfulMapping]);
     });
+
+    it('should not infer unknown mappings as successful from an incomplete failed result', async () => {
+      const knownMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue2',
+        installSpec: 'aliased-vue2@npm:vue@2.7.16',
+        resolvedVersion: '2.7.16',
+        usedBy: ['legacy-package'],
+        allDependents: ['legacy-package'],
+      };
+      const failedMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue1',
+        installSpec: 'aliased-vue1@npm:vue@1.7.0',
+        resolvedVersion: '1.7.0',
+        usedBy: ['very-legacy-package'],
+        allDependents: ['very-legacy-package'],
+      };
+      const analysisResult: AnalysisResult = {
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [knownMapping, failedMapping],
+        missingFirstLevelPeers: [],
+      };
+      const { createDependencyAnalyzer } = await import('../../src/core/dependency-analyzer');
+      const { createPackageInstaller } = await import('../../src/core/package-installer');
+      vi.mocked(createDependencyAnalyzer).mockReturnValue({
+        analyze: vi.fn().mockResolvedValue(analysisResult),
+      } as never);
+      vi.mocked(createPackageInstaller).mockReturnValue({
+        installAliases: vi.fn().mockResolvedValue({
+          success: false,
+          installed: [],
+          failed: ['aliased-vue1'],
+          errors: ['install failed'],
+        }),
+      } as never);
+      const onInstallComplete = vi.fn();
+      const resolver = new DepsConflictResolver(
+        { dependencies: ['vue'], autoInstall: true },
+        { onInstallComplete },
+      );
+
+      await expect(resolver.initialize()).resolves.toBeUndefined();
+
+      expect(onInstallComplete).toHaveBeenCalledWith([]);
+    });
+
+    it('should infer reused mappings for an old installer result without reused', async () => {
+      const reusedMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue2',
+        installSpec: '',
+        resolvedVersion: '2.7.16',
+        usedBy: ['legacy-package'],
+        allDependents: ['legacy-package'],
+      };
+      const installedMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue3',
+        installSpec: 'aliased-vue3@npm:vue@3.7.0',
+        resolvedVersion: '3.7.0',
+        usedBy: ['modern-package'],
+        allDependents: ['modern-package'],
+      };
+      const analysisResult: AnalysisResult = {
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [reusedMapping, installedMapping],
+        missingFirstLevelPeers: [],
+      };
+      const { createDependencyAnalyzer } = await import('../../src/core/dependency-analyzer');
+      const { createPackageInstaller } = await import('../../src/core/package-installer');
+      vi.mocked(createDependencyAnalyzer).mockReturnValue({
+        analyze: vi.fn().mockResolvedValue(analysisResult),
+      } as never);
+      vi.mocked(createPackageInstaller).mockReturnValue({
+        installAliases: vi.fn().mockResolvedValue({
+          installed: ['aliased-vue3'],
+          failed: [],
+          errors: [],
+        }),
+      } as never);
+      const onInstallComplete = vi.fn();
+      const resolver = new DepsConflictResolver(
+        { dependencies: ['vue'], autoInstall: true },
+        { onInstallComplete },
+      );
+
+      await expect(resolver.initialize()).resolves.toBeUndefined();
+
+      expect(onInstallComplete).toHaveBeenCalledWith([reusedMapping, installedMapping]);
+    });
   });
 });
 
