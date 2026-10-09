@@ -2,11 +2,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DepsConflictResolver, createResolver } from '../../src/core/resolver';
 import { findProjectRoot } from '../../src/utils/fs';
 import type { AliasMapping, AnalysisResult } from '../../src/types';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Mock 依赖模块
-vi.mock('../../src/utils/fs', () => ({
-  findProjectRoot: vi.fn(),
-}));
+vi.mock('../../src/utils/fs', async () => {
+  const actual = await vi.importActual<typeof import('../../src/utils/fs')>('../../src/utils/fs');
+  return {
+    ...actual,
+    findProjectRoot: vi.fn(),
+  };
+});
 
 // 创建 mock EnvironmentDetector 实例
 const mockEnvironmentDetector = {
@@ -806,6 +813,101 @@ describe('DepsConflictResolver', () => {
         successfulMapping,
         failedMapping,
       ]);
+    });
+
+    it('should remove failed alias paths from successful importer scopes', async () => {
+      const projectRoot = await fs.mkdtemp(
+        join(tmpdir(), 'deps-conflict-resolver-cross-alias-collision-'),
+      );
+      const successfulAliasPath = join(projectRoot, 'node_modules', 'aliased-vue');
+      const failedAliasPath = join(projectRoot, 'node_modules', 'aliased-vue-router');
+
+      try {
+        await fs.writeFile(
+          join(projectRoot, 'package.json'),
+          JSON.stringify({ name: 'cross-alias-host', version: '1.0.0' }),
+          'utf8',
+        );
+        await fs.mkdir(successfulAliasPath, { recursive: true });
+        await fs.writeFile(
+          join(successfulAliasPath, 'package.json'),
+          JSON.stringify({ name: 'vue', version: '2.7.16' }),
+          'utf8',
+        );
+        await fs.mkdir(failedAliasPath, { recursive: true });
+        await fs.writeFile(
+          join(failedAliasPath, 'package.json'),
+          JSON.stringify({ name: 'unrelated-package', version: '1.0.0' }),
+          'utf8',
+        );
+
+        const successfulMapping: AliasMapping = {
+          originalName: 'vue',
+          aliasName: 'aliased-vue',
+          installSpec: 'aliased-vue@npm:vue@2.7.16',
+          resolvedVersion: '2.7.16',
+          usedBy: ['legacy-consumer'],
+          allDependents: ['legacy-consumer'],
+          importerPaths: [failedAliasPath],
+        };
+        const failedMapping: AliasMapping = {
+          originalName: 'vue-router',
+          aliasName: 'aliased-vue-router',
+          installSpec: 'aliased-vue-router@npm:vue-router@3.6.0',
+          resolvedVersion: '3.6.0',
+          usedBy: ['legacy-consumer'],
+          allDependents: ['legacy-consumer'],
+          importerPaths: [failedAliasPath],
+        };
+        const analysisResult: AnalysisResult = {
+          analyzedDependencies: new Map(),
+          peerConflicts: [],
+          aliasMappings: [successfulMapping, failedMapping],
+          missingFirstLevelPeers: [],
+        };
+        const { createDependencyAnalyzer } = await import('../../src/core/dependency-analyzer');
+        const { createAliasManager } = await import('../../src/core/alias-manager');
+        const { createPackageInstaller } = await import('../../src/core/package-installer');
+        const { AliasManager: RealAliasManager } = await vi.importActual<
+          typeof import('../../src/core/alias-manager')
+        >('../../src/core/alias-manager');
+        let activeAnalysisResult: AnalysisResult | undefined;
+
+        vi.mocked(createDependencyAnalyzer).mockReturnValue({
+          analyze: vi.fn().mockResolvedValue(analysisResult),
+        } as never);
+        vi.mocked(createPackageInstaller).mockReturnValue({
+          installAliases: vi.fn().mockResolvedValue({
+            success: false,
+            installed: ['aliased-vue'],
+            reused: [],
+            failed: ['aliased-vue-router'],
+            errors: ['Alias collision'],
+          }),
+        } as never);
+        vi.mocked(createAliasManager).mockImplementation((options) => {
+          const manager = new RealAliasManager(options);
+          const initialize = manager.initFromAnalysisResult.bind(manager);
+          vi.spyOn(manager, 'initFromAnalysisResult').mockImplementation((result) => {
+            activeAnalysisResult = result;
+            initialize(result);
+          });
+          return manager as never;
+        });
+        vi.mocked(findProjectRoot).mockReturnValue(projectRoot);
+
+        const resolver = new DepsConflictResolver({
+          dependencies: ['legacy-consumer'],
+          projectRoot,
+        });
+        await resolver.initialize();
+
+        const activeMapping = activeAnalysisResult?.aliasMappings[0];
+        expect(activeMapping?.importerPaths).toEqual([]);
+        expect(resolver.resolveModule('vue', join(failedAliasPath, 'index.js'))).toBeNull();
+      } finally {
+        await fs.rm(projectRoot, { recursive: true, force: true });
+      }
     });
 
     it('should infer reused mappings for an old installer result without reused', async () => {
