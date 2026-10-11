@@ -61,6 +61,64 @@ describe('PackageInstaller', () => {
   });
 
   describe('installAliases', () => {
+    it('does not publish a successful exit when no alias was installed', async () => {
+      vi.mocked(fileExists).mockReturnValue(false);
+      const install = vi
+        .fn()
+        .mockResolvedValue({ success: true, exitCode: 0, stdout: '', stderr: '', timedOut: false });
+      const result = await new PackageInstaller(mockOptions, { install }).installAliases([
+        {
+          originalName: 'vue',
+          aliasName: 'missing-alias',
+          resolvedVersion: '2.7.0',
+          installSpec: 'missing-alias@npm:vue@2.7.0',
+          usedBy: ['legacy'],
+          allDependents: ['legacy'],
+        },
+      ]);
+      expect(result.success).toBe(false);
+      expect(result.installed).toEqual([]);
+      expect(result.failed).toEqual(['missing-alias']);
+    });
+
+    it.each(['vue', 'unrelated'])(
+      'verifies a reused workspace alias with real name %s',
+      async (name) => {
+        const root = await fs.mkdtemp(join(tmpdir(), 'deps-workspace-install-'));
+        const projectRoot = join(root, 'packages/app');
+        const aliasPath = join(root, 'node_modules/vue2');
+        try {
+          await fs.mkdir(projectRoot, { recursive: true });
+          await fs.mkdir(aliasPath, { recursive: true });
+          await fs.writeFile(join(projectRoot, 'package.json'), JSON.stringify({ name: 'app' }));
+          await fs.writeFile(
+            join(aliasPath, 'package.json'),
+            JSON.stringify({ name, version: '2.7.0' }),
+          );
+          const nativeFs = await vi.importActual<typeof import('fs')>('fs');
+          vi.mocked(fileExists).mockImplementation((path) => realExistsSync(path));
+          vi.mocked(readFileSync).mockImplementation((path) => nativeFs.readFileSync(path, 'utf8'));
+          const result = await new PackageInstaller({ ...mockOptions, projectRoot }).installAliases(
+            [
+              {
+                originalName: 'vue',
+                aliasName: 'vue2',
+                resolvedVersion: '2.7.0',
+                installSpec: '',
+                usedBy: ['legacy'],
+                allDependents: ['legacy'],
+              },
+            ],
+          );
+          expect(result.success).toBe(name === 'vue');
+          expect(result.reused).toEqual(name === 'vue' ? ['vue2'] : []);
+          expect(spawn).not.toHaveBeenCalled();
+        } finally {
+          await fs.rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('should return success when no mappings provided', async () => {
       const result = await installer.installAliases([]);
 
@@ -69,7 +127,8 @@ describe('PackageInstaller', () => {
       expect(result.failed).toEqual([]);
     });
 
-    it('should skip mappings without installSpec (reuse existing)', async () => {
+    it('rejects a reused mapping whose installation disappeared', async () => {
+      vi.mocked(fileExists).mockReturnValue(false);
       const mappings: AliasMapping[] = [
         {
           originalName: 'vue',
@@ -83,8 +142,9 @@ describe('PackageInstaller', () => {
 
       const result = await installer.installAliases(mappings);
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       expect(result.installed).toEqual([]);
+      expect(result.reused).toEqual([]);
     });
 
     it('should skip already installed aliases with correct version', async () => {
@@ -114,20 +174,28 @@ describe('PackageInstaller', () => {
     });
 
     it('should report reused and newly installed aliases separately', async () => {
-      vi.mocked(fileExists).mockImplementation((path) => path.toString().includes('aliased-vue2'));
-      vi.mocked(readFileSync).mockReturnValue(
+      let installed = false;
+      vi.mocked(fileExists).mockImplementation(
+        (path) =>
+          path.toString().includes('aliased-vue2') ||
+          (installed && path.toString().includes('aliased-vue3')),
+      );
+      vi.mocked(readFileSync).mockImplementation((path) =>
         JSON.stringify({
           name: 'vue',
-          version: '2.7.0',
+          version: path.toString().includes('aliased-vue3') ? '2.7.1' : '2.7.0',
         }),
       );
-      const install = vi.fn().mockResolvedValue({
-        success: true,
-        exitCode: 0,
-        stdout: '',
-        stderr: '',
-        timedOut: false,
-      } satisfies PackageManagerRunResult);
+      const install = vi.fn().mockImplementation(async () => {
+        installed = true;
+        return {
+          success: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+        } satisfies PackageManagerRunResult;
+      });
       const injectedInstaller = new PackageInstaller(mockOptions, { install });
 
       const result = await injectedInstaller.installAliases([
@@ -303,7 +371,8 @@ describe('PackageInstaller', () => {
     });
 
     it('should install when alias not exists', async () => {
-      vi.mocked(fileExists).mockReturnValue(false);
+      vi.mocked(fileExists).mockReturnValueOnce(false).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ name: 'vue', version: '2.7.0' }));
 
       const mockChild = createMockChildProcess(0);
       vi.mocked(spawn).mockReturnValue(mockChild as never);

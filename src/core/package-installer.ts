@@ -1,6 +1,11 @@
-import type { AliasMapping, ResolvedOptions } from '../types/index';
+import type { AliasMapping, ResolvedOptions, InstallReport } from '../types/index';
 import { createLogger } from '../utils/logger';
-import { fileExists, readPackageJsonCached } from '../utils/fs';
+import {
+  fileExists,
+  readPackageJsonCached,
+  findPackagePath,
+  clearPackageJsonCache,
+} from '../utils/fs';
 import { join } from 'path';
 import semver from 'semver';
 import { createPackageManagerAdapter, type PackageManagerAdapter } from './package-manager-adapter';
@@ -11,36 +16,6 @@ const logger = createLogger('package-installer');
  * 安装超时时间（毫秒）
  */
 const INSTALL_TIMEOUT = 120000; // 120秒
-
-/**
- * 安装结果
- */
-interface InstallResult {
-  /**
-   * 是否成功
-   */
-  success: boolean;
-
-  /**
-   * 安装的包
-   */
-  installed: string[];
-
-  /**
-   * 已复用或已存在且校验通过的包
-   */
-  reused: string[];
-
-  /**
-   * 失败的包
-   */
-  failed: string[];
-
-  /**
-   * 错误信息
-   */
-  errors: string[];
-}
 
 interface InstalledAliasVerification {
   matches: boolean;
@@ -78,8 +53,8 @@ export class PackageInstaller {
   /**
    * 安装别名依赖
    */
-  async installAliases(mappings: AliasMapping[]): Promise<InstallResult> {
-    const result: InstallResult = {
+  async installAliases(mappings: AliasMapping[]): Promise<InstallReport> {
+    const result: InstallReport = {
       success: true,
       installed: [],
       reused: [],
@@ -114,21 +89,33 @@ export class PackageInstaller {
       logger.warn(`Alias collision: ${JSON.stringify(collision)}`);
     };
 
+    const installedAliasPath = (aliasName: string): string | null => {
+      const local = join(this.options.projectRoot, 'node_modules', aliasName);
+      return fileExists(local) ? local : findPackagePath(aliasName, this.options.projectRoot);
+    };
+    const reportMissing = (mapping: AliasMapping): void => {
+      result.success = false;
+      result.failed.push(mapping.aliasName);
+      result.errors.push('Alias is not installed or resolvable: ' + mapping.aliasName);
+    };
+
     for (const m of mappings) {
-      const aliasPath = join(this.options.projectRoot, 'node_modules', m.aliasName);
+      const aliasPath = installedAliasPath(m.aliasName);
 
       // 没有 installSpec 表示复用现有别名，不需要安装
       if (!m.installSpec) {
-        if (fileExists(aliasPath)) {
-          const verification = this.verifyInstalledVersion(
-            aliasPath,
-            m.originalName,
-            m.resolvedVersion,
-          );
-          if (!verification.matches) {
-            reportCollision(m, verification);
-            continue;
-          }
+        if (!aliasPath) {
+          reportMissing(m);
+          continue;
+        }
+        const verification = this.verifyInstalledVersion(
+          aliasPath,
+          m.originalName,
+          m.resolvedVersion,
+        );
+        if (!verification.matches) {
+          reportCollision(m, verification);
+          continue;
         }
 
         logger.debug(`Skipping ${m.aliasName}: reusing existing installation`);
@@ -137,7 +124,7 @@ export class PackageInstaller {
       }
 
       // 检查是否已安装
-      if (!fileExists(aliasPath)) {
+      if (!aliasPath) {
         toInstall.push(m); // 未安装，需要安装
         continue;
       }
@@ -170,17 +157,13 @@ export class PackageInstaller {
     const installResult = await this.runInstall(installSpecs);
 
     if (installResult.success) {
+      // Installation may invalidate cached misses and preflight metadata.
+      clearPackageJsonCache();
       for (const mapping of toInstall) {
-        const aliasPath = join(this.options.projectRoot, 'node_modules', mapping.aliasName);
+        const aliasPath = installedAliasPath(mapping.aliasName);
 
-        // A successful package-manager exit does not prove that the alias
-        // still belongs to the requested package: another process can claim
-        // the directory between the preflight check and installation. When a
-        // directory is present, verify its identity before publishing it as
-        // installed. Keep the adapter's success for test/dry-run adapters
-        // that do not materialize a filesystem tree.
-        if (!fileExists(aliasPath)) {
-          result.installed.push(mapping.aliasName);
+        if (!aliasPath) {
+          reportMissing(mapping);
           continue;
         }
 
