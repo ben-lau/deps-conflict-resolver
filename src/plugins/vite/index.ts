@@ -28,16 +28,12 @@ export function createViteAliases(mappings: AliasPathMapping[]): ViteAliasEntry[
   const aliases: ViteAliasEntry[] = [];
 
   for (const mapping of mappings) {
-    // 精确匹配
+    // Resolve the package root to the installed alias path. Subpaths are
+    // intentionally left to Vite's package resolver so package `exports` and
+    // conditional entry points remain effective.
     aliases.push({
       find: new RegExp(`^${escapeRegex(mapping.aliasName)}$`),
       replacement: mapping.path,
-    });
-
-    // 子路径匹配
-    aliases.push({
-      find: new RegExp(`^${escapeRegex(mapping.aliasName)}/(.*)$`),
-      replacement: `${mapping.path}/$1`,
     });
   }
 

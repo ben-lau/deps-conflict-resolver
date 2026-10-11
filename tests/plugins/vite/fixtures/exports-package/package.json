@@ -1,0 +1,12 @@
+{
+  "name": "vite-exports-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./feature": {
+      "import": "./exports/feature.js",
+      "default": "./exports/feature.js"
+    }
+  }
+}
