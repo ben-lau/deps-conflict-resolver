@@ -278,6 +278,82 @@ describe('PackageInstaller', () => {
       }
     });
 
+    it.each([
+      { mutation: 'version', success: true },
+      { mutation: 'package', success: true },
+      { mutation: 'deleted', success: true },
+      { mutation: 'version', success: false },
+    ])(
+      'revalidates reused aliases after install: $mutation, success=$success',
+      async ({ mutation, success }) => {
+        const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-reused-after-install-'));
+        const aliasPath = join(projectRoot, 'node_modules/vue2');
+        try {
+          await fs.mkdir(aliasPath, { recursive: true });
+          await fs.writeFile(
+            join(aliasPath, 'package.json'),
+            JSON.stringify({ name: 'vue', version: '2.6.14' }),
+          );
+          const nativeFs = await vi.importActual<typeof import('fs')>('fs');
+          vi.mocked(fileExists).mockImplementation((path) => realExistsSync(path));
+          vi.mocked(readFileSync).mockImplementation((path) => nativeFs.readFileSync(path, 'utf8'));
+          const install = vi.fn(async () => {
+            if (mutation === 'deleted') {
+              await fs.rm(aliasPath, { recursive: true });
+            } else {
+              await fs.writeFile(
+                join(aliasPath, 'package.json'),
+                JSON.stringify({
+                  name: mutation === 'package' ? 'unrelated' : 'vue',
+                  version: '2.7.16',
+                }),
+              );
+            }
+            const renderer = join(projectRoot, 'node_modules/renderer1');
+            await fs.mkdir(renderer, { recursive: true });
+            await fs.writeFile(
+              join(renderer, 'package.json'),
+              JSON.stringify({ name: 'renderer', version: '1.0.0' }),
+            );
+            return {
+              success,
+              exitCode: success ? 0 : 1,
+              stdout: '',
+              stderr: success ? '' : 'install failed',
+              timedOut: false,
+            };
+          });
+          const result = await new PackageInstaller(
+            { ...mockOptions, projectRoot },
+            { install },
+          ).installAliases([
+            {
+              originalName: 'vue',
+              aliasName: 'vue2',
+              resolvedVersion: '2.6.14',
+              installSpec: '',
+              usedBy: ['legacy'],
+              allDependents: ['legacy'],
+            },
+            {
+              originalName: 'renderer',
+              aliasName: 'renderer1',
+              resolvedVersion: '1.0.0',
+              installSpec: 'renderer1@npm:renderer@1.0.0',
+              usedBy: ['legacy'],
+              allDependents: ['legacy'],
+            },
+          ]);
+          expect(result.success).toBe(false);
+          expect(result.reused).toEqual([]);
+          expect(result.failed).toContain('vue2');
+          expect(result.installed).toEqual(success ? ['renderer1'] : []);
+        } finally {
+          await fs.rm(projectRoot, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('should revalidate aliases after install to reject a race collision', async () => {
       const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-install-race-'));
       const aliasPath = join(projectRoot, 'node_modules', 'aliased-vue2');
