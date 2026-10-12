@@ -273,16 +273,22 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
    * 返回 webpack 格式的别名映射
    */
   getAliasConfig(): Record<string, string | false | string[]> {
-    if (!this.resolver) {
+    if (!this.resolver || !this.initialized) {
       return {};
     }
-    // 将核心的 AliasPathMapping[] 转换为 Webpack 的别名格式
-    const mappings = this.resolver.getAliasPathMappings();
-    const aliases: Record<string, string | false | string[]> = {};
-    for (const mapping of mappings) {
-      aliases[mapping.aliasName] = mapping.path;
+
+    try {
+      // 将核心的 AliasPathMapping[] 转换为 Webpack 的别名格式
+      const mappings = this.resolver.getAliasPathMappings();
+      const aliases: Record<string, string | false | string[]> = {};
+      for (const mapping of mappings) {
+        aliases[mapping.aliasName] = mapping.path;
+      }
+      return aliases;
+    } catch (error) {
+      logger.error('Error reading alias configuration:', error);
+      return {};
     }
-    return aliases;
   }
 
   /**

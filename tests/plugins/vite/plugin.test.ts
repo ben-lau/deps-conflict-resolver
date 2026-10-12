@@ -197,6 +197,40 @@ describe('Vite Plugin', () => {
       expect(result?.optimizeDeps?.include).toContain('aliased-vue');
     });
 
+    it('should include only active aliases in optimizeDeps after an install failure', async () => {
+      mockResolverInstance.initialize.mockResolvedValue(undefined);
+      mockResolverInstance.getAnalysisResult.mockReturnValue({
+        ...mockAnalysisResult,
+        aliasMappings: [
+          ...mockAnalysisResult.aliasMappings,
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue1',
+            resolvedVersion: '1.7.0',
+            usedBy: ['very-legacy-package'],
+            allDependents: ['very-legacy-package'],
+            installSpec: 'aliased-vue1@npm:vue@1.7.0',
+          },
+        ],
+      });
+      mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
+      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
+
+      const plugin = depsConflictResolverVitePlugin({
+        dependencies: ['vue'],
+      });
+
+      const config = plugin.config as (
+        config: unknown,
+        env: { command: string },
+      ) => Promise<unknown>;
+      const result = (await config({}, { command: 'build' })) as {
+        optimizeDeps?: { include?: string[] };
+      };
+
+      expect(result.optimizeDeps?.include).toEqual(['aliased-vue']);
+    });
+
     describe('resolveId', () => {
       it.each([
         { desc: 'relative paths', source: './relative/path' },

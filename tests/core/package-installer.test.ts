@@ -210,6 +210,56 @@ describe('PackageInstaller', () => {
       }
     });
 
+    it('should revalidate aliases after install to reject a race collision', async () => {
+      const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-install-race-'));
+      const aliasPath = join(projectRoot, 'node_modules', 'aliased-vue2');
+
+      try {
+        vi.mocked(fileExists).mockImplementation((path) => realExistsSync(path));
+        vi.mocked(readFileSync).mockImplementation((path) => realReadFileSync(path, 'utf8'));
+
+        const install = vi.fn(async () => {
+          // Another process claims the alias between the preflight check and
+          // the package manager's successful return.
+          await fs.mkdir(aliasPath, { recursive: true });
+          await fs.writeFile(
+            join(aliasPath, 'package.json'),
+            JSON.stringify({ name: 'different-package', version: '1.0.0' }),
+            'utf8',
+          );
+          return {
+            success: true,
+            exitCode: 0,
+            stdout: '',
+            stderr: '',
+            timedOut: false,
+          } satisfies PackageManagerRunResult;
+        });
+        const collisionInstaller = new PackageInstaller(
+          { ...mockOptions, projectRoot },
+          { install },
+        );
+
+        const result = await collisionInstaller.installAliases([
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue2',
+            resolvedVersion: '2.7.0',
+            usedBy: ['some-package'],
+            allDependents: ['some-package'],
+            installSpec: 'aliased-vue2@npm:vue@2.7.0',
+          },
+        ]);
+
+        expect(result.success).toBe(false);
+        expect(result.installed).toEqual([]);
+        expect(result.failed).toEqual(['aliased-vue2']);
+        expect(result.errors).toContainEqual(expect.stringContaining('ALIAS_NAME_OCCUPIED'));
+      } finally {
+        await fs.rm(projectRoot, { recursive: true, force: true });
+      }
+    });
+
     it('should reject a reused alias when its directory contains a different package', async () => {
       const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-reused-alias-'));
       const aliasPath = join(projectRoot, 'node_modules', 'aliased-vue2');

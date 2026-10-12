@@ -156,6 +156,7 @@ describe('Webpack Plugin', () => {
         expect(errorSpy).toHaveBeenCalledTimes(1);
         expect(plugin.getAnalysisResult()).toBeNull();
         expect(plugin.isInitialized()).toBe(false);
+        expect(plugin.getAliasConfig()).toEqual({});
       });
 
       it('should initialize on watchRun', async () => {

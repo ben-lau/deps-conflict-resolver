@@ -556,9 +556,21 @@ export class DependencyAnalyzer {
    */
   private collectFirstLevelPeerDependencies(): Map<string, DependencyPath[]> {
     const peerDepsMap = new Map<string, DependencyPath[]>();
+    const hasInstalledGraphRoots = (this.dependencyGraph?.roots.length ?? 0) > 0;
 
     // 只遍历第一层依赖（用户指定的 dependencies）
     for (const depName of this.options.dependencies) {
+      // `analyzedDependencies` is intentionally keyed by package name for
+      // compatibility, so a nested instance can appear under the same key
+      // after another root populated the graph. In a real installed graph,
+      // only a node recorded in `roots` is a configured first-level package.
+      // Keep the no-root fallback for injected/unit-test analyzers that do
+      // not materialize an installed graph at all.
+      if (hasInstalledGraphRoots && !this.findGraphRoot(depName)) {
+        logger.debug(`Skipping non-root configured dependency: ${depName}`);
+        continue;
+      }
+
       const depInfo = this.analyzedDependencies.get(depName);
       if (!depInfo) continue;
 

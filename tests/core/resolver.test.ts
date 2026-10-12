@@ -419,6 +419,7 @@ describe('DepsConflictResolver', () => {
       });
 
       await expect(resolver.initialize()).rejects.toThrow('Could not find package.json');
+      expect(resolver.getAliasPathMappings()).toEqual([]);
     });
 
     it('should use process.cwd when projectRoot not specified', async () => {
@@ -747,6 +748,64 @@ describe('DepsConflictResolver', () => {
       await expect(resolver.initialize()).resolves.toBeUndefined();
 
       expect(onInstallComplete).toHaveBeenCalledWith([]);
+    });
+
+    it('should keep failed mappings out of active alias rules while retaining diagnostics', async () => {
+      const successfulMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue2',
+        installSpec: 'aliased-vue2@npm:vue@2.7.16',
+        resolvedVersion: '2.7.16',
+        usedBy: ['legacy-package'],
+        allDependents: ['legacy-package'],
+      };
+      const failedMapping: AliasMapping = {
+        originalName: 'vue',
+        aliasName: 'aliased-vue1',
+        installSpec: 'aliased-vue1@npm:vue@1.7.0',
+        resolvedVersion: '1.7.0',
+        usedBy: ['very-legacy-package'],
+        allDependents: ['very-legacy-package'],
+      };
+      const analysisResult: AnalysisResult = {
+        analyzedDependencies: new Map(),
+        peerConflicts: [],
+        aliasMappings: [successfulMapping, failedMapping],
+        missingFirstLevelPeers: [],
+      };
+      const initFromAnalysisResult = vi.fn();
+      const { createDependencyAnalyzer } = await import('../../src/core/dependency-analyzer');
+      const { createAliasManager } = await import('../../src/core/alias-manager');
+      const { createPackageInstaller } = await import('../../src/core/package-installer');
+      vi.mocked(createDependencyAnalyzer).mockReturnValue({
+        analyze: vi.fn().mockResolvedValue(analysisResult),
+      } as never);
+      vi.mocked(createAliasManager).mockReturnValue({
+        initFromAnalysisResult,
+        resolveModule: vi.fn(),
+        getAliasPathMappings: vi.fn().mockReturnValue([]),
+      } as never);
+      vi.mocked(createPackageInstaller).mockReturnValue({
+        installAliases: vi.fn().mockResolvedValue({
+          success: false,
+          installed: ['aliased-vue2'],
+          reused: [],
+          failed: ['aliased-vue1'],
+          errors: ['Alias collision'],
+        }),
+      } as never);
+
+      const resolver = new DepsConflictResolver({ dependencies: ['vue'] });
+
+      await expect(resolver.initialize()).resolves.toBeUndefined();
+
+      expect(initFromAnalysisResult).toHaveBeenCalledWith(
+        expect.objectContaining({ aliasMappings: [successfulMapping] }),
+      );
+      expect(resolver.getAnalysisResult()?.aliasMappings).toEqual([
+        successfulMapping,
+        failedMapping,
+      ]);
     });
 
     it('should infer reused mappings for an old installer result without reused', async () => {

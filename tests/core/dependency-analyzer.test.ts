@@ -1244,6 +1244,59 @@ describe('DependencyAnalyzer path-aware redirect scopes', () => {
     }
   });
 
+  it('does not treat a nested-only configured package as a first-level peer requester', async () => {
+    const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-nested-only-'));
+    const registryClient = { fetchAllVersions: vi.fn().mockResolvedValue(['2.7.16']) };
+
+    try {
+      const hostPath = await writeTestPackage(projectRoot, 'host-consumer', {
+        dependencies: { 'nested-only': '1.0.0' },
+      });
+      await writeTestPackage(hostPath, 'nested-only', {
+        version: '1.0.0',
+        peerDependencies: { vue: '^2.0.0' },
+      });
+      await writeTestPackage(projectRoot, 'vue', { version: '3.5.0' });
+
+      const mainPackageJson: PackageJson = {
+        name: 'nested-only-host',
+        version: '1.0.0',
+        dependencies: {
+          'host-consumer': '1.0.0',
+          vue: '^3.0.0',
+        },
+      };
+      await fs.writeFile(
+        join(projectRoot, 'package.json'),
+        JSON.stringify(mainPackageJson),
+        'utf8',
+      );
+
+      const result = await new DependencyAnalyzer(
+        {
+          dependencies: ['host-consumer', 'nested-only'],
+          projectRoot,
+          autoInstall: true,
+          packageManager: 'npm',
+          registry: 'https://registry.example.test',
+          debug: false,
+          aliasPrefix: 'aliased-',
+          excludeRedirects: {},
+          includeRedirects: {},
+        },
+        mainPackageJson,
+        undefined,
+        registryClient,
+      ).analyze();
+
+      expect(result.peerConflicts).toEqual([]);
+      expect(result.aliasMappings).toEqual([]);
+      expect(registryClient.fetchAllVersions).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('includes each nested package instance in the generated importer paths', async () => {
     const projectRoot = await fs.mkdtemp(join(tmpdir(), 'deps-conflict-resolver-path-scope-'));
     const registryClient = {
