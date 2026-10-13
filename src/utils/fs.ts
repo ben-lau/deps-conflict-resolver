@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, readFileSync, realpathSync } from 'fs';
+import { basename, join, dirname, resolve } from 'path';
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
 import type { PackageJson } from '../types/index';
@@ -53,7 +53,7 @@ const packagePathCache = new LruCache<string, string | null>({
 });
 
 /**
- * 清理 package.json 缓存，释放内存
+ * 清理本库的 IO 缓存，不修改 Node 的内部模块缓存。
  */
 export function clearPackageJsonCache(): void {
   packageJsonCache.clear();
@@ -113,8 +113,9 @@ export function findProjectRoot(startDir: string): string | null {
 }
 
 /**
- * 查找 node_modules 中的包路径
- * 使用 require.resolve 机制来正确处理各种包管理器（npm, yarn, pnpm）的依赖结构
+ * Locate an installed package directory for metadata inspection. Node supplies
+ * lookup order; current filesystem links supply identity. Entry points and
+ * exports remain the responsibility of the module/bundler resolver.
  */
 export function findPackagePath(packageName: string, baseDir: string): string | null {
   const cacheKey = `${baseDir}\0${packageName}`;
@@ -133,7 +134,35 @@ export function findPackagePath(packageName: string, baseDir: string): string | 
       requireCache.set(baseDir, localRequire);
     }
 
-    const pkgJsonPath = localRequire.resolve(`${packageName}/package.json`);
+    const metadataRequest = `${packageName}/package.json`;
+    const lookupPaths = localRequire.resolve.paths?.(metadataRequest);
+    if (lookupPaths) {
+      let visible = findSelfPackagePath(packageName, baseDir);
+      if (!visible) {
+        for (const directory of lookupPaths) {
+          const candidate = join(directory, packageName);
+          if (fileExists(candidate)) {
+            visible = candidate;
+            break;
+          }
+        }
+      }
+      let resolved = visible;
+      if (visible) {
+        try {
+          resolved = realpathSync(visible);
+        } catch {
+          resolved = resolve(visible);
+        }
+      }
+      // Do not fall back to require.resolve on a miss: it can still return a
+      // deleted link's old store directory from Node's private path cache.
+      packagePathCache.set(cacheKey, resolved);
+      return resolved;
+    }
+
+    // Retain the existing adapter fallback for resolvers without lookup paths.
+    const pkgJsonPath = localRequire.resolve(metadataRequest);
     const resolved = dirname(pkgJsonPath);
     packagePathCache.set(cacheKey, resolved);
     return resolved;
@@ -144,6 +173,18 @@ export function findPackagePath(packageName: string, baseDir: string): string | 
     packagePathCache.set(cacheKey, resolved);
     return resolved;
   }
+}
+
+function findSelfPackagePath(packageName: string, baseDir: string): string | null {
+  for (const directory of iterateParentDirs(resolve(baseDir))) {
+    if (basename(directory) === 'node_modules') break;
+    const manifest = readPackageJsonCached(directory);
+    if (!manifest) continue;
+    return manifest.name === packageName && 'exports' in manifest && manifest.exports != null
+      ? directory
+      : null;
+  }
+  return null;
 }
 
 /**
