@@ -258,7 +258,7 @@ export class DepsConflictResolver {
     }
 
     const completedMappings = this.filterCompletedMappings(aliasMappings, aliasResult, false);
-    this.setActiveAliasMappings(completedMappings);
+    this.setActiveAliasMappings(completedMappings, aliasResult.failed ?? []);
 
     if (!aliasResult.success) {
       logger.warn(`Some alias installations failed: ${aliasResult.errors.join(', ')}`);
@@ -318,15 +318,58 @@ export class DepsConflictResolver {
    * Publish a new active mapping set while keeping the complete analysis
    * result available for diagnostics.
    */
-  private setActiveAliasMappings(mappings: AliasMapping[]): void {
+  private setActiveAliasMappings(
+    mappings: AliasMapping[],
+    blockedAliasNames: Iterable<string> = [],
+  ): void {
     if (!this.aliasManager || !this.analysisResult) {
       return;
     }
 
+    const activeAliasNames = new Set(mappings.map((mapping) => mapping.aliasName));
+    const inactiveAliasNames = new Set(blockedAliasNames);
+    for (const mapping of this.analysisResult.aliasMappings) {
+      if (!activeAliasNames.has(mapping.aliasName)) {
+        inactiveAliasNames.add(mapping.aliasName);
+      }
+    }
+
+    const activeMappings = mappings.map((mapping) => {
+      if (!mapping.importerPaths || inactiveAliasNames.size === 0) {
+        return mapping;
+      }
+
+      return {
+        ...mapping,
+        importerPaths: mapping.importerPaths.filter(
+          (importerPath) =>
+            ![...inactiveAliasNames].some((aliasName) =>
+              this.isAliasPackagePath(importerPath, aliasName),
+            ),
+        ),
+      };
+    });
+
     this.aliasManager.initFromAnalysisResult({
       ...this.analysisResult,
-      aliasMappings: mappings,
+      aliasMappings: activeMappings,
     });
+  }
+
+  /**
+   * Check whether an importer path belongs to an alias package directory.
+   * Package paths can be nested under pnpm's virtual store, so matching the
+   * `node_modules/<alias>` segment is more reliable than checking a basename.
+   */
+  private isAliasPackagePath(importerPath: string, aliasName: string): boolean {
+    const normalizedPath = importerPath.replace(/\\/g, '/').replace(/\/+$/, '');
+    const marker = `node_modules/${aliasName}`;
+    return (
+      normalizedPath === marker ||
+      normalizedPath.startsWith(`${marker}/`) ||
+      normalizedPath.endsWith(`/${marker}`) ||
+      normalizedPath.includes(`/${marker}/`)
+    );
   }
 
   /**
