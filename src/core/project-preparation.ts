@@ -68,6 +68,8 @@ interface LockOwner {
   pid: number;
   host: string;
   token: string;
+  // Zero publishes the choosing phase; positive tickets order contenders.
+  ticket: number;
 }
 
 async function readOwner(path: string): Promise<LockOwner | null> {
@@ -79,17 +81,22 @@ async function readOwner(path: string): Promise<LockOwner | null> {
       'pid' in value &&
       'host' in value &&
       'token' in value &&
+      'ticket' in value &&
       Number.isInteger(value.pid) &&
       Number(value.pid) > 0 &&
       typeof value.host === 'string' &&
-      typeof value.token === 'string'
+      typeof value.token === 'string' &&
+      Number.isSafeInteger(value.ticket) &&
+      Number(value.ticket) >= 0
     ) {
       return value as LockOwner;
     }
-  } catch {
-    /* An unknown owner must never be treated as a dead owner. */
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
   }
-  return null;
+  // Committed records are always complete. Never discard an unknown owner.
+  throw new Error('Invalid dependency preparation lock record: ' + path);
 }
 
 function exited(owner: LockOwner): boolean {
@@ -102,24 +109,28 @@ function exited(owner: LockOwner): boolean {
   return false;
 }
 
-/** Only one contender may remove a dead owner's lock. Never expire a live lock. */
-async function recoverExitedOwner(path: string): Promise<void> {
-  const recovery = path + '.recovery';
-  try {
-    await fs.mkdir(recovery);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return;
-    throw error;
-  }
-  try {
+async function removeRecord(path: string): Promise<void> {
+  await fs.unlink(path).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  });
+}
+
+async function readContenders(directory: string, token: string): Promise<LockOwner[]> {
+  const contenders: LockOwner[] = [];
+  for (const name of await fs.readdir(directory)) {
+    if (!name.endsWith('.json') || name === token + '.json') continue;
+    const path = join(directory, name);
     const owner = await readOwner(path);
-    if (owner && exited(owner))
-      await fs.unlink(path).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      });
-  } finally {
-    await fs.rmdir(recovery);
+    if (!owner) continue;
+    if (owner.token + '.json' !== name)
+      throw new Error('Invalid dependency preparation lock identity: ' + path);
+    if (exited(owner)) {
+      // Each contender has a unique, never-reused path. Concurrent cleaners
+      // can remove it without a recovery mutex or touching a successor's lock.
+      await removeRecord(path);
+    } else contenders.push(owner);
   }
+  return contenders;
 }
 
 async function acquireLock(owner: string): Promise<() => Promise<void>> {
@@ -129,42 +140,56 @@ async function acquireLock(owner: string): Promise<() => Promise<void>> {
     typeof process.getuid === 'function'
       ? String(process.getuid())
       : createHash('sha256').update(userInfo().username).digest('hex');
-  const directory = join(tmpdir(), 'deps-conflict-resolver-locks-' + user);
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const key = createHash('sha256').update(owner).digest('hex');
-  const path = join(directory, key + '.lock');
+  const directory = join(tmpdir(), 'deps-conflict-resolver-locks-' + user, key + '.queue');
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const token = randomUUID();
-  const candidate = path + '.' + token;
-  // Publish a fully written owner record atomically. A killed process cannot
-  // leave an empty lock between exclusive creation and writing its PID.
-  await fs.writeFile(candidate, JSON.stringify({ pid: process.pid, host: hostname(), token }), {
-    flag: 'wx',
-    mode: 0o600,
-  });
+  const path = join(directory, token + '.json');
+  const candidate = join(directory, token + '.tmp');
+  const record: LockOwner = { pid: process.pid, host: hostname(), token, ticket: 0 };
   const deadline = performance.now() + 300_000;
+  let published = false;
   try {
+    // Lamport's bakery doorway: publish choosing before reading any tickets,
+    // then atomically replace it with a complete numbered record. Unpublished
+    // .tmp files and empty directories never confer ownership.
+    // https://lamport.azurewebsites.net/pubs/bakery.pdf
+    await fs.writeFile(candidate, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+    await fs.link(candidate, path);
+    published = true;
+    await removeRecord(candidate);
+    record.ticket =
+      1 +
+      (await readContenders(directory, token)).reduce(
+        (max, other) => Math.max(max, other.ticket),
+        0,
+      );
+    if (!Number.isSafeInteger(record.ticket))
+      throw new Error('Dependency preparation ticket limit exceeded in ' + owner);
+    await fs.writeFile(candidate, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+    await fs.rename(candidate, path);
     while (true) {
-      try {
-        await fs.link(candidate, path);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (performance.now() >= deadline)
-          throw new Error(
-            'Timed out waiting for dependency preparation in ' + owner + ' (lock: ' + path + ')',
-            { cause: error },
-          );
-        const current = await readOwner(path);
-        if (current && exited(current)) await recoverExitedOwner(path);
-        await new Promise<void>((done) => setTimeout(done, 25));
-      }
+      const blocked = (await readContenders(directory, token)).some(
+        (other) =>
+          other.ticket === 0 ||
+          other.ticket < record.ticket ||
+          (other.ticket === record.ticket && other.token < token),
+      );
+      if (!blocked) return () => removeRecord(path);
+      if (performance.now() >= deadline)
+        throw new Error(
+          'Timed out waiting for dependency preparation in ' + owner + ' (lock: ' + path + ')',
+        );
+      await new Promise<void>((done) => setTimeout(done, 25));
     }
-  } finally {
-    await fs.unlink(candidate);
+  } catch (error) {
+    try {
+      await removeRecord(candidate);
+    } finally {
+      if (published) await removeRecord(path);
+    }
+    throw error;
   }
-  return async () => {
-    if ((await readOwner(path))?.token === token) await fs.unlink(path);
-  };
 }
 
 /** The task owns analysis through publication; user callbacks run outside it. */
