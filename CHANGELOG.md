@@ -1,5 +1,74 @@
 # Changelog
 
+## [1.2.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.0...v1.2.0) (2026-11-17)
+
+
+### Features
+
+* **core:** add doctor and prepare CLI commands ([e04cf8b](https://github.com/ben-lau/deps-conflict-resolver/commit/e04cf8bcc8ca6f48ca10032440a96eda929246b1))
+* **core:** add indexed resolution and deterministic preparation ([73cf118](https://github.com/ben-lau/deps-conflict-resolver/commit/73cf11860073330d5d29911fbbcd37bcce78fb06))
+* **vite:** support SSR optimization and native Rolldown ([72f705c](https://github.com/ben-lau/deps-conflict-resolver/commit/72f705c2f5ddcd99e147a49a4632ea0daa780862))
+
+
+### Bug Fixes
+
+* **ci:** 修复 release-please 仍自动提取 component 的问题 ([4c9171b](https://github.com/ben-lau/deps-conflict-resolver/commit/4c9171b46d067a50eb939f7d72d914eeb5603118))
+* **ci:** 收紧 release-please publish 条件并清理无效 extra-files ([885f0fb](https://github.com/ben-lau/deps-conflict-resolver/commit/885f0fbd0779e6dc3789664873d5f76c4dd702a9))
+* **core:** canonicalize linked consumers before peer validation ([cb0a80e](https://github.com/ben-lau/deps-conflict-resolver/commit/cb0a80ea2c613ef6d7311346bfd3c478981c0e82))
+* **core:** complete strict installation in the consumer context ([593491a](https://github.com/ben-lau/deps-conflict-resolver/commit/593491af05c2aec957c47061bb31770055dcd4cd))
+* **core:** coordinate manual installation and invalidation ([ca09269](https://github.com/ben-lau/deps-conflict-resolver/commit/ca0926929e474bee789a6a08525b52b80a29bbba))
+* **core:** coordinate project preparation and rebuild installed rules ([5cbca47](https://github.com/ben-lau/deps-conflict-resolver/commit/5cbca47cdf75f6140d3bef9bfc13fcb1edabd285))
+* **core:** ignore absent optional packages in doctor scans ([6a676aa](https://github.com/ben-lau/deps-conflict-resolver/commit/6a676aaacc5ccee148a7fe1be06405a2a74a3b8f))
+* **core:** preserve alias identity and shared peer contexts ([b7e1db7](https://github.com/ben-lau/deps-conflict-resolver/commit/b7e1db7dc11e4a6b99e2d857d6166580f2651152))
+* **core:** recover interrupted preparation without a recovery mutex ([690612e](https://github.com/ben-lau/deps-conflict-resolver/commit/690612ed64d68d532d3b0f79e8ba9f08bf211775))
+* **core:** refresh declarations before generation input reads ([90560d8](https://github.com/ben-lau/deps-conflict-resolver/commit/90560d83a72420d0bba4acd5357f8a5120634eeb))
+* **core:** revalidate reused aliases after package-manager attempts ([b272752](https://github.com/ben-lau/deps-conflict-resolver/commit/b272752fa1d5ab19de1c6ac56eeef43d996fcaaa))
+* **core:** validate shared providers and physical importer scopes ([a76aaf1](https://github.com/ben-lau/deps-conflict-resolver/commit/a76aaf1a8a643986b5f9c59fc17b90e939eb8371))
+* **core:** validate workspace aliases from the host-visible origin ([51685a7](https://github.com/ben-lau/deps-conflict-resolver/commit/51685a7ac695974012bc8f0e923d6c88127a2332))
+* **core:** verify installed aliases before accepting success ([487abc3](https://github.com/ben-lau/deps-conflict-resolver/commit/487abc359b33f5bf213acd00b28955f8475ea0f0))
+* **deps:** save exact aliases and forward Yarn registries ([bc67e95](https://github.com/ben-lau/deps-conflict-resolver/commit/bc67e955289a3c080f509cdddab9be6fe956c0da))
+* harden alias installation process ([6dc68d5](https://github.com/ben-lau/deps-conflict-resolver/commit/6dc68d59d831e227a7e86e4645c1358e3b67cbd0))
+* harden cross-module alias publication ([4a87a71](https://github.com/ben-lau/deps-conflict-resolver/commit/4a87a71ea618a066749318418943a00756a714e7))
+* harden package-manager process lifecycle ([d833266](https://github.com/ben-lau/deps-conflict-resolver/commit/d833266a80a6af65fb093e999f7d5f2d06e75800))
+* invoke package managers without shims ([85d76bf](https://github.com/ben-lau/deps-conflict-resolver/commit/85d76bfbbbbc469c58a594e69a9b73cf15d31c56))
+* make resolver initialization idempotent ([4bab3ce](https://github.com/ben-lau/deps-conflict-resolver/commit/4bab3ce4c43758f7a6210de7165c205c07957a22))
+* parse package-manager shim variables ([1c7b6ea](https://github.com/ben-lau/deps-conflict-resolver/commit/1c7b6ea54b784207bce5f4663a33790bc6912dd1))
+* partition semver ranges by common versions ([644b50a](https://github.com/ben-lau/deps-conflict-resolver/commit/644b50a757aba28c25f0e1dd1dd248cdcac5b55f))
+* preflight ambiguous alias identities ([011a580](https://github.com/ben-lau/deps-conflict-resolver/commit/011a58027e06bedd82f62ff3f00bd5a077d269b2))
+* preserve alias ownership and install outcomes ([20d722c](https://github.com/ben-lau/deps-conflict-resolver/commit/20d722c171fa8848ac888336e0b7e6f9ae6f9613))
+* preserve registry body timeout and package exports ([13b9073](https://github.com/ben-lau/deps-conflict-resolver/commit/13b90738252d055419fb3d92dbb68b060fa5f6b0))
+* preserve resolver install outcome compatibility ([1dd07d6](https://github.com/ben-lau/deps-conflict-resolver/commit/1dd07d6411abb40c80870e7d4377dd576d7801bf))
+* preserve root-visible dependency and scoped include rules ([70c3721](https://github.com/ben-lau/deps-conflict-resolver/commit/70c372131df85b5be76fd66022dbfbf32b85bb49))
+* prune inactive alias importer scopes ([a03159a](https://github.com/ben-lau/deps-conflict-resolver/commit/a03159a77ee1a9e03d8f3290b7d608f662f51816))
+* refresh webpack resolver safely ([99078a6](https://github.com/ben-lau/deps-conflict-resolver/commit/99078a6ba5e2f18eb9b63c53df9e3dbe5244450a))
+* reject ambiguous alias reuse ([985d848](https://github.com/ben-lau/deps-conflict-resolver/commit/985d8486fe2e0f82bb0872e4457916b7e4cd2010))
+* resolve dependency graphs by package path ([a29b629](https://github.com/ben-lau/deps-conflict-resolver/commit/a29b629019e2836fd1aa2a1c64deb31af0728b20))
+* restrict package-manager shim entrypoints ([b1bd084](https://github.com/ben-lau/deps-conflict-resolver/commit/b1bd08468219e756eea5f6d065d087129e9d56e3))
+* reuse installed aliases offline ([946f9cd](https://github.com/ben-lau/deps-conflict-resolver/commit/946f9cdb2adf8edd2f00e81fef4598529253b56c))
+* roll back failed resolver generations ([2b52219](https://github.com/ben-lau/deps-conflict-resolver/commit/2b522194a05767303de0b88104f872340be8f891))
+* separate shadowed alias scopes ([aec11a3](https://github.com/ben-lau/deps-conflict-resolver/commit/aec11a334cc60760696c5cf279773af92073180a))
+* skip optional peers and preserve aliases ([bc476d3](https://github.com/ben-lau/deps-conflict-resolver/commit/bc476d3fbe011bb25785152a4b5c6b0954ca71ea))
+* skip unsatisfiable semver singleton groups ([a94372a](https://github.com/ben-lau/deps-conflict-resolver/commit/a94372ab0f171347469fd5586c61dc8ba7d3dbfe))
+* **utils:** verify current visible package directories after relinking ([3f2a458](https://github.com/ben-lau/deps-conflict-resolver/commit/3f2a45830a7b1824deba018f6cfa0c394385098b))
+* validate reused alias identities ([eec15fe](https://github.com/ben-lau/deps-conflict-resolver/commit/eec15fe8caf42e19db0a5183bc5ee74508864959))
+* **vite:** honor SSR exclusions and limit eager optimization ([eb9a6f7](https://github.com/ben-lau/deps-conflict-resolver/commit/eb9a6f7db2b3638ce1004c465a205509f67c47a2))
+* **vite:** initialize against the final configured project root ([2cd24be](https://github.com/ben-lau/deps-conflict-resolver/commit/2cd24beffc5acec80af41dbbaf273deab4f3c4f8))
+* **vite:** initialize dedicated Worker instances safely ([1a4cf81](https://github.com/ben-lau/deps-conflict-resolver/commit/1a4cf81c7602c9aaa9eb536560353b21ee132eda))
+* **vite:** merge legacy and environment SSR policy natively ([5ceffb1](https://github.com/ben-lau/deps-conflict-resolver/commit/5ceffb1b126aa5a3085c0938418b6f221397efd5))
+* **vite:** preserve linked and untyped SSR providers ([9649c8b](https://github.com/ben-lau/deps-conflict-resolver/commit/9649c8ba4c540d907ab54d499cea5bcc875d6410))
+* **vite:** preserve SSR prebundling and package exports ([99274df](https://github.com/ben-lau/deps-conflict-resolver/commit/99274dfc3e19a32de4349d839416c0f2df00e599))
+* **vite:** resolve external SSR dependencies from their consumers ([4624efb](https://github.com/ben-lau/deps-conflict-resolver/commit/4624efb2e61e36031021c1b8b4a55dc2a4598dfc))
+* **vite:** retain native SSR namespace and module-cache identity ([dfcb222](https://github.com/ben-lau/deps-conflict-resolver/commit/dfcb2224953583b7808a95d461b9edce27206b77))
+* **webpack:** invalidate affected watch modules and resolve linked aliases ([bbba6bd](https://github.com/ben-lau/deps-conflict-resolver/commit/bbba6bd44a8d8b851a3ed5d6b3af136844dda2a3))
+* 修复 CI 构建失败，指定 pnpm 版本并升级 GitHub Actions ([228d6f4](https://github.com/ben-lau/deps-conflict-resolver/commit/228d6f45cbc8bf58f3e86d9de2eaba5d53ff3329))
+* 回退 GitHub Actions 至 v4，保持 Node.js 20 兼容 ([6d151eb](https://github.com/ben-lau/deps-conflict-resolver/commit/6d151ebef3411a13bfc36e6298a110da2dbc413a))
+
+
+### Performance
+
+* **core:** add a repeatable warm-resolution benchmark ([03b1325](https://github.com/ben-lau/deps-conflict-resolver/commit/03b132599b5bd036189bcaab66931e0bda53eaec))
+* **core:** reuse version candidates for repeated ranges ([b088982](https://github.com/ben-lau/deps-conflict-resolver/commit/b0889820dc5208d5f82ba1a8f66ca0683df283a2))
+
 ## 1.1.0 (2026-04-21)
 
 ### Features
