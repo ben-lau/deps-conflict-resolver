@@ -1,8 +1,12 @@
-import type { Compiler, WebpackPluginInstance, ResolveData } from 'webpack';
+import type { Compiler, NormalModule, WebpackPluginInstance, ResolveData } from 'webpack';
 import type { PluginConfig, AnalysisResult } from '../../types/index';
 import { DepsConflictResolver } from '../../core/resolver';
 import { createLogger, LogLevel } from '../../utils/logger';
 import { isPathLikeRequest, isWebpackInternalRequest } from '../../utils/module-request';
+import { readPackageJsonCached } from '../../utils/fs';
+import { realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 
 const logger = createLogger('webpack-plugin');
 
@@ -18,6 +22,10 @@ const PLUGIN_NAME = 'DepsConflictResolverWebpackPlugin';
 type NormalModuleFactory = Parameters<
   Parameters<Compiler['hooks']['normalModuleFactory']['tap']>[1]
 >[0];
+
+type RedirectBuildInfo = NonNullable<NormalModule['buildInfo']> & {
+  depsConflictResolver?: string;
+};
 
 /**
  * Webpack 插件主类
@@ -36,6 +44,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
   private initPromise: Promise<void> | null = null;
   private initialized = false;
   private generation = 0;
+  private aliasVersions = new Map<string, string>();
 
   constructor(config: PluginConfig) {
     this.config = config;
@@ -94,6 +103,21 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
         }
 
         this.analysisResult = resolver.getAnalysisResult();
+        this.aliasVersions.clear();
+        for (const mapping of resolver.getAliasPathMappings()) {
+          let path = mapping.path;
+          try {
+            path = realpathSync(path);
+          } catch {
+            /* Keep the verified lookup path. */
+          }
+          this.aliasVersions.set(
+            mapping.aliasName,
+            createHash('sha256')
+              .update(JSON.stringify([path, readPackageJsonCached(path)]))
+              .digest('hex'),
+          );
+        }
 
         if (this.analysisResult && this.analysisResult.aliasMappings.length > 0) {
           logger.info(`Planned ${this.analysisResult.aliasMappings.length} alias mappings`);
@@ -122,6 +146,7 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
         this.analysisResult = null;
         this.initialized = false;
+        this.aliasVersions.clear();
         logger.error('Error initializing dependencies resolver:', error);
         if (this.config.strict) throw error;
       })
@@ -207,6 +232,44 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
 
     // 直接使用解析后的模块名（别名包名），而不是转换为文件系统路径
     resolveData.request = resolvedModule;
+    // Resolve the verified alias from the host, preserving Webpack's exports
+    // and dependency-type conditions even for linked packages outside it.
+    resolveData.context = this.resolver.getOptions().projectRoot;
+  }
+
+  private moduleResolutionVersion(module: NormalModule): string {
+    if (!this.initialized || !module.resource || !this.resolver || this.aliasVersions.size === 0)
+      return '';
+    const requests = new Set<string>();
+    const versions: string[] = [];
+    const blocks: Array<Pick<NormalModule, 'blocks' | 'dependencies'>> = [module];
+    while (blocks.length > 0) {
+      const block = blocks.pop()!;
+      blocks.push(...block.blocks);
+      for (const dependency of block.dependencies) {
+        if (!('request' in dependency) || typeof dependency.request !== 'string') continue;
+        const request = dependency.request;
+        if (
+          requests.has(request) ||
+          isPathLikeRequest(request) ||
+          isWebpackInternalRequest(request)
+        )
+          continue;
+        requests.add(request);
+        const decision = this.resolver.explainResolution(request, module.resource, {
+          skipHook: true,
+        });
+        if (!decision.resolved && decision.reason !== 'ambiguous') continue;
+        versions.push(
+          JSON.stringify([
+            request,
+            decision.resolved,
+            decision.aliases.map((alias) => this.aliasVersions.get(alias)),
+          ]),
+        );
+      }
+    }
+    return versions.length > 0 ? JSON.stringify(versions.sort()) : '';
   }
 
   apply(compiler: Compiler): void {
@@ -227,6 +290,45 @@ export class DepsConflictResolverWebpackPlugin implements WebpackPluginInstance 
     // 对于 watch 模式
     compiler.hooks.watchRun.tapPromise(PLUGIN_NAME, async () => {
       await this.initialize(true);
+    });
+
+    let legacyCacheHookInstalled = false;
+    compiler.hooks.compilation.tap(PLUGIN_NAME, (compilation) => {
+      for (const file of this.analysisResult?.watchFiles ?? [])
+        compilation.fileDependencies.add(file);
+      compilation.fileDependencies.add(join(this.config.projectRoot!, 'package.json'));
+      compilation.hooks.succeedModule.tap(PLUGIN_NAME, (module) => {
+        if ('resource' in module && module.buildInfo)
+          (module.buildInfo as RedirectBuildInfo).depsConflictResolver =
+            this.moduleResolutionVersion(module as NormalModule);
+      });
+      const hooks = compiler.webpack?.NormalModule.getCompilationHooks(compilation);
+      if (hooks?.needBuild) {
+        hooks.needBuild.tapAsync(PLUGIN_NAME, (module, _context, callback) => {
+          const previous =
+            (module.buildInfo as RedirectBuildInfo | undefined)?.depsConflictResolver ?? '';
+          if (previous !== this.moduleResolutionVersion(module)) return callback(null, true);
+          callback();
+        });
+      } else if (!legacyCacheHookInstalled) {
+        // Early Webpack 5 has no needBuild hook. Observe cache restoration
+        // before its native build check; unchanged modules remain cached.
+        compiler.cache.hooks.get.tap(
+          { name: PLUGIN_NAME, stage: Number.NEGATIVE_INFINITY },
+          (identifier, _etag, gotHandlers) => {
+            if (!identifier.includes('Compilation/modules|')) return;
+            gotHandlers.push((cached: NormalModule | undefined, callback) => {
+              if (cached?.resource && typeof cached.invalidateBuild === 'function') {
+                const previous =
+                  (cached.buildInfo as RedirectBuildInfo | undefined)?.depsConflictResolver ?? '';
+                if (previous !== this.moduleResolutionVersion(cached)) cached.invalidateBuild();
+              }
+              callback();
+            });
+          },
+        );
+        legacyCacheHookInstalled = true;
+      }
     });
 
     // 使用 normalModuleFactory 钩子拦截模块请求
