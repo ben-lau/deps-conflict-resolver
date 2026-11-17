@@ -8,6 +8,9 @@ export type {
   PeerConflict,
   PluginHooks,
   PluginConfig,
+  ResolverDiagnostic,
+  ResolutionExplanation,
+  InstallReport,
   // Workspace/Monorepo 相关类型
   PnpmWorkspaceConfig,
   WorkspaceDetectionResult,
@@ -16,6 +19,7 @@ export type {
 } from './types/index';
 
 export { DepsConflictResolver, createResolver } from './core/resolver';
+export { ResolutionError } from './core/resolution-error';
 
 // 导出 WorkspaceDetector 供高级用法
 export { WorkspaceDetector, createWorkspaceDetector } from './core/workspace-detector';

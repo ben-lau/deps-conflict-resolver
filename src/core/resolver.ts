@@ -5,14 +5,27 @@ import type {
   PluginHooks,
   AliasPathMapping,
   AliasMapping,
+  ResolverDiagnostic,
+  ResolutionExplanation,
+  InstallReport,
 } from '../types/index';
 import { DEFAULT_NPM_REGISTRY } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
-import { findProjectRoot } from '../utils/fs';
+import { clearPackageJsonCache, findProjectRoot, readPackageJsonCached } from '../utils/fs';
+import { realpathSync } from 'node:fs';
 import { createEnvironmentDetector, EnvironmentDetector } from './environment-detector';
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
 import { createAliasManager, AliasManager } from './alias-manager';
 import { createPackageInstaller, PackageInstaller } from './package-installer';
+import { ResolutionError } from './resolution-error';
+import {
+  getProjectPreparation,
+  withProjectPreparation,
+  waitForProjectPreparation,
+  type ProjectPreparation,
+  type PreparationObserver,
+} from './project-preparation';
+import { resolve as resolvePath } from 'node:path';
 
 const logger = createLogger('resolver');
 
@@ -42,6 +55,19 @@ export class DepsConflictResolver {
   private analysisResult: AnalysisResult | null = null;
   private initialized = false;
   private initializationPromise: Promise<void> | null = null;
+  private installationPromise: Promise<void> | null = null;
+  private preparing = false;
+  private installResult: InstallReport | null = null;
+  private installDiagnostics: ResolverDiagnostic[] = [];
+  private preparation: ProjectPreparation | null = null;
+  private snapshotRevision = 0;
+  private snapshotError: ResolutionError | null = null;
+  private snapshotGeneration = 0;
+  private snapshotSignature = '';
+  private snapshotInvalidated = false;
+  private activeMappings: AliasMapping[] = [];
+  private snapshotObserver: WeakRef<PreparationObserver> | null = null;
+  private readonly observer: PreparationObserver = { refresh: () => this.refreshSnapshot() };
 
   constructor(userOptions: DepsConflictResolverOptions, hooks: PluginHooks = {}) {
     this.userOptions = userOptions;
@@ -49,7 +75,7 @@ export class DepsConflictResolver {
 
     // 设置日志级别（如果用户已指定）
     if (userOptions.debug) {
-      logger.setLevel(LogLevel.DEBUG);
+      logger.setLevel(LogLevel.ALL);
     }
   }
 
@@ -91,7 +117,11 @@ export class DepsConflictResolver {
       projectRoot,
       packageManager,
       registry,
-      autoInstall: userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall,
+      autoInstall: userOptions.offline
+        ? false
+        : (userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall),
+      offline: userOptions.offline ?? false,
+      strict: userOptions.strict ?? false,
       debug: userOptions.debug ?? DEFAULT_OPTIONS.debug,
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
       excludeRedirects: userOptions.excludeRedirects ?? {},
@@ -104,6 +134,8 @@ export class DepsConflictResolver {
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
+      if (this.preparation) await waitForProjectPreparation(this.preparation);
+      this.snapshotCurrent();
       return;
     }
 
@@ -131,6 +163,9 @@ export class DepsConflictResolver {
     if (this.initializationPromise && !this.initialized) {
       throw new Error('Cannot invalidate while initialization is in progress');
     }
+    if (this.installationPromise) {
+      throw new Error('Cannot invalidate while installation is in progress');
+    }
 
     this.initialized = false;
     this.initializationPromise = null;
@@ -142,18 +177,30 @@ export class DepsConflictResolver {
    */
   private rollbackGeneration(): void {
     this.initialized = false;
+    if (this.snapshotObserver) this.preparation?.observers.delete(this.snapshotObserver);
+    this.snapshotObserver = null;
+    this.snapshotError = null;
+    this.snapshotSignature = '';
+    this.snapshotInvalidated = false;
+    this.snapshotGeneration++;
+    this.activeMappings = [];
     this.analysisResult = null;
     this.analyzer = null;
     this.aliasManager?.clear?.();
     this.aliasManager = null;
     this.installer = null;
+    this.installResult = null;
+    this.installDiagnostics = [];
   }
 
   private async initializeGeneration(): Promise<void> {
+    // A previous generation may repopulate IO caches during peer linkage or
+    // adapter setup. Refresh before environment detection and the first read.
+    clearPackageJsonCache();
     logger.info('Initializing dependencies resolver...');
 
     // 验证项目根目录
-    const projectRoot = this.userOptions.projectRoot ?? process.cwd();
+    const projectRoot = resolvePath(this.userOptions.projectRoot ?? process.cwd());
     const validRoot = findProjectRoot(projectRoot);
     if (!validRoot) {
       throw new Error(`Could not find package.json in ${projectRoot} or parent directories`);
@@ -164,42 +211,73 @@ export class DepsConflictResolver {
     }
 
     // 解析配置（包含自动检测）
-    this.options = await this.resolveOptions(this.userOptions, validRoot);
+    let physicalRoot = validRoot;
+    try {
+      physicalRoot = realpathSync(validRoot);
+    } catch {
+      /* Retain the validated root. */
+    }
+    this.options = await this.resolveOptions(this.userOptions, physicalRoot);
 
     // 设置日志级别
     if (this.options.debug) {
-      logger.setLevel(LogLevel.DEBUG);
+      logger.setLevel(LogLevel.ALL);
     }
 
     // 初始化子模块
     this.aliasManager = createAliasManager(this.options);
     this.installer = createPackageInstaller(this.options);
 
-    // 创建依赖分析器（同步创建，异步分析）
-    this.analyzer = createDependencyAnalyzer(this.options);
+    this.preparation = getProjectPreparation(this.options.projectRoot);
 
-    // 执行分析
-    this.analysisResult = await this.analyzer.analyze();
-
-    // 输出缺失的 peer 依赖警告（不自动安装，仅提示）
-    this.logMissingFirstLevelPeers(this.analysisResult);
-
-    // 调用钩子
+    // Notifications may initialize another resolver. Never await user code
+    // while owning the project lock; read its inputs again afterwards.
     if (this.hooks.onAnalysisComplete) {
+      this.analysisResult = await withProjectPreparation(this.preparation, () =>
+        this.analyzeCurrent(),
+      );
       await this.hooks.onAnalysisComplete(this.analysisResult);
     }
 
-    // 自动安装
-    if (this.options.autoInstall) {
-      await this.installDependencies();
-    } else {
-      // An empty installSpec identifies an alias that analysis verified as
-      // already reusable. Generated aliases still require installation before
-      // they may enter runtime rules.
-      this.setActiveAliasMappings(
-        this.analysisResult.aliasMappings.filter((mapping) => mapping.installSpec === ''),
+    await withProjectPreparation(
+      this.preparation,
+      async (markChanged) => {
+        this.analysisResult = await this.analyzeCurrent();
+        this.logMissingFirstLevelPeers(this.analysisResult);
+        this.assertResolved();
+        if (this.options.autoInstall) {
+          const installing = this.installGeneration(markChanged);
+          this.installationPromise = installing;
+          try {
+            await installing;
+          } finally {
+            this.installationPromise = null;
+          }
+        } else {
+          this.publishWithoutInstallation();
+        }
+        this.observeSnapshot();
+      },
+      this.observer,
+    );
+
+    await waitForProjectPreparation(this.preparation);
+    await this.notifyInstallComplete();
+    this.assertResolved();
+
+    const unresolved = this.getDiagnostics().filter(
+      (diagnostic) => diagnostic.severity === 'error',
+    );
+    if (unresolved.length > 0) {
+      logger.warn(
+        'Resolver has ' +
+          unresolved.length +
+          ' unresolved conditions: ' +
+          [...new Set(unresolved.map((diagnostic) => diagnostic.code))].join(', ') +
+          '. Inspect getDiagnostics() or run doctor for details.',
       );
     }
+    this.logSharedPeerWarnings();
 
     // 分析器在初始化完成后不再使用，释放以允许 GC 回收其内部状态
     this.analyzer = null;
@@ -238,41 +316,265 @@ export class DepsConflictResolver {
    *
    * 这样可以避免"什么依赖都自动安装"的问题，用户可以根据警告自行决定是否安装缺失的依赖
    */
-  async installDependencies(): Promise<void> {
-    if (!this.analysisResult || !this.installer) {
+  installDependencies(): Promise<void> {
+    return (this.installationPromise ??= this.prepareInstallation().finally(() => {
+      this.installationPromise = null;
+    }));
+  }
+
+  private async prepareInstallation(): Promise<void> {
+    if (!this.analysisResult || !this.installer || !this.preparation) {
       throw new Error('Resolver not initialized. Call initialize() first.');
     }
-
-    const { aliasMappings } = this.analysisResult;
-
-    // 只安装与主工程版本冲突的别名依赖（用于编译时重定向）
-    // aliasMappings 只包含 needsAlias=true 的情况，即主工程已声明且版本冲突
-    let aliasResult: Awaited<ReturnType<PackageInstaller['installAliases']>>;
+    this.preparing = true;
     try {
-      aliasResult = await this.installer.installAliases(aliasMappings);
-    } catch (error) {
-      // A thrown installer error cannot identify a safe subset of mappings.
-      // Remove all active rules before propagating it to the generation guard.
-      this.setActiveAliasMappings([]);
-      throw error;
-    }
-
-    const completedMappings = this.filterCompletedMappings(aliasMappings, aliasResult, false);
-    this.setActiveAliasMappings(completedMappings, aliasResult.failed ?? []);
-
-    if (!aliasResult.success) {
-      logger.warn(`Some alias installations failed: ${aliasResult.errors.join(', ')}`);
-    }
-
-    // 调用钩子
-    if (this.hooks.onInstallComplete) {
-      // The hook predates structured installer results and intentionally keeps
-      // its AliasMapping[] signature. Filter the analyzed mappings internally
-      // so a failed install/collision is never reported as installed while old
-      // installer implementations that only expose failed[] remain usable.
-      await this.hooks.onInstallComplete(
-        this.filterCompletedMappings(aliasMappings, aliasResult, true),
+      await withProjectPreparation(
+        this.preparation,
+        async (markChanged) => {
+          this.analysisResult = await this.analyzeCurrent();
+          this.installDiagnostics = [];
+          this.assertResolved();
+          if (!this.options.offline) await this.installGeneration(markChanged);
+          else this.publishWithoutInstallation();
+          this.observeSnapshot();
+        },
+        this.observer,
       );
+    } finally {
+      this.preparing = false;
+    }
+    await waitForProjectPreparation(this.preparation);
+    await this.notifyInstallComplete();
+    this.assertResolved();
+    if (this.initialized) this.logSharedPeerWarnings();
+  }
+
+  private async analyzeCurrent(
+    offline = this.options.offline,
+    preparedAliases: readonly AliasMapping[] = [],
+  ): Promise<AnalysisResult> {
+    clearPackageJsonCache();
+    this.analyzer = createDependencyAnalyzer({ ...this.options, offline }, preparedAliases);
+    try {
+      return await this.analyzer.analyze();
+    } finally {
+      this.analyzer = null;
+    }
+  }
+
+  private publishWithoutInstallation(): void {
+    const mappings = this.analysisResult!.aliasMappings;
+    this.setActiveAliasMappings(mappings.filter((mapping) => mapping.installSpec === ''));
+    for (const mapping of mappings) {
+      if (mapping.installSpec)
+        this.installDiagnostics.push({
+          code: 'ALIAS_NOT_INSTALLED',
+          severity: 'error',
+          packageName: mapping.originalName,
+          aliases: [mapping.aliasName],
+          message: 'Alias is not active because installation is disabled: ' + mapping.aliasName,
+        });
+    }
+  }
+
+  private async installGeneration(markChanged: () => void): Promise<void> {
+    const report: InstallReport = {
+      success: true,
+      installed: [],
+      reused: [],
+      failed: [],
+      errors: [],
+    };
+    this.installResult = report;
+    this.installDiagnostics = [];
+    const blocked = new Set<string>();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const planned = this.analysisResult!.aliasMappings;
+      if (planned.some((mapping) => mapping.installSpec)) markChanged();
+      let result: InstallReport;
+      try {
+        result = await this.installer!.installAliases(planned);
+      } catch (error) {
+        this.setActiveAliasMappings([]);
+        throw error;
+      }
+      report.success &&= result.success;
+      for (const key of ['installed', 'reused', 'failed', 'errors'] as const) {
+        report[key] = [...new Set([...report[key], ...(result[key] ?? [])])];
+      }
+      for (const aliasName of result.failed ?? []) {
+        blocked.add(aliasName);
+        this.installDiagnostics.push({
+          code: 'ALIAS_INSTALL_FAILED',
+          severity: 'error',
+          packageName:
+            planned.find((mapping) => mapping.aliasName === aliasName)?.originalName ?? aliasName,
+          aliases: [aliasName],
+          message: 'Alias installation failed: ' + aliasName + '. ' + result.errors.join('; '),
+        });
+      }
+
+      const changed = (result.installed?.length ?? 0) > 0 || (result.failed?.length ?? 0) > 0;
+      if (!changed) {
+        this.setActiveAliasMappings(this.filterCompletedMappings(planned, result, false), blocked);
+        return;
+      }
+
+      // A package manager reifies the whole tree, including file: consumers,
+      // host packages and aliases that were reused before this install.
+      // Rebuild every derived scope from current inputs, not the old mappings.
+      this.analysisResult = await this.analyzeCurrent(
+        result.success ? this.options.offline : true,
+        this.filterCompletedMappings(planned, result, false),
+      );
+      const fresh = this.analysisResult.aliasMappings;
+      const pending = fresh.filter(
+        (mapping) => mapping.installSpec && !blocked.has(mapping.aliasName),
+      );
+      if (result.success && pending.length > 0 && attempt === 0) continue;
+      if (result.success && pending.length > 0) {
+        report.success = false;
+        const message =
+          'Dependency inputs changed during preparation; refusing to publish an unstable installation plan';
+        report.errors.push(message);
+        this.installDiagnostics.push({
+          code: 'PROJECT_STATE_CHANGED',
+          severity: 'error',
+          packageName: this.options.dependencies.join(', '),
+          message,
+        });
+      }
+      // Preserve failed candidates for doctor/prepare reports, while keeping
+      // them out of runtime rules even if a failed install left files behind.
+      for (const mapping of planned) {
+        if (
+          blocked.has(mapping.aliasName) &&
+          !fresh.some((entry) => entry.aliasName === mapping.aliasName)
+        )
+          fresh.push(mapping);
+      }
+      this.setActiveAliasMappings(
+        fresh.filter((mapping) => !mapping.installSpec && !blocked.has(mapping.aliasName)),
+        blocked,
+      );
+      if (!report.success || pending.length === 0) return;
+    }
+  }
+
+  private observeSnapshot(): void {
+    this.snapshotInvalidated = false;
+    if (!this.snapshotObserver) {
+      this.snapshotObserver = new WeakRef(this.observer);
+      this.preparation!.observers.add(this.snapshotObserver);
+    }
+    this.captureSnapshot();
+  }
+
+  private async refreshSnapshot(): Promise<void> {
+    if (!this.analysisResult || !this.aliasManager) return;
+    if (this.snapshotInvalidated) {
+      this.snapshotRevision = this.preparation!.revision;
+      return;
+    }
+    const generation = this.snapshotGeneration;
+    const previous = this.snapshotSignature;
+    try {
+      const analysis = await this.analyzeCurrent(true, this.activeMappings);
+      if (generation !== this.snapshotGeneration) return;
+      this.analysisResult = analysis;
+      this.setActiveAliasMappings(analysis.aliasMappings.filter((mapping) => !mapping.installSpec));
+      const changed = previous !== this.describeSnapshot();
+      if (this.initialized && changed) {
+        this.snapshotInvalidated = true;
+        this.setActiveAliasMappings([]);
+        this.installDiagnostics.push({
+          code: 'PROJECT_STATE_CHANGED',
+          severity: 'error',
+          packageName: this.options.dependencies.join(', '),
+          message:
+            'Another preparation changed active dependency rules. Call invalidate() and initialize() before building again.',
+        });
+      }
+    } catch (error) {
+      if (generation !== this.snapshotGeneration) return;
+      this.snapshotInvalidated = true;
+      this.setActiveAliasMappings([]);
+      this.installDiagnostics.push({
+        code: 'PROJECT_STATE_CHANGED',
+        severity: 'error',
+        packageName: this.options.dependencies.join(', '),
+        message: 'Cannot refresh dependency rules after another installation: ' + String(error),
+      });
+    }
+    this.captureSnapshot();
+  }
+
+  private describeSnapshot(): string {
+    const mappings = this.activeMappings
+      .map((mapping) => [
+        mapping.originalName,
+        mapping.aliasName,
+        mapping.resolvedVersion,
+        [...mapping.usedBy].sort(),
+        [...mapping.allDependents].sort(),
+        mapping.importerPaths ? [...mapping.importerPaths].sort() : null,
+      ])
+      .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+    const providers = (this.aliasManager?.getAliasPathMappings() ?? [])
+      .map((mapping) => {
+        let path = mapping.path;
+        try {
+          path = realpathSync(path);
+        } catch {
+          /* Missing providers are diagnosed by analysis. */
+        }
+        return [mapping.aliasName, path, readPackageJsonCached(path)] as const;
+      })
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    return JSON.stringify([mappings, providers]);
+  }
+
+  private captureSnapshot(): void {
+    this.snapshotRevision = this.preparation!.revision;
+    this.snapshotSignature = this.describeSnapshot();
+    const errors = this.generationDiagnostics().filter(
+      (diagnostic) => diagnostic.severity === 'error',
+    );
+    this.snapshotError = errors.length ? new ResolutionError(errors) : null;
+  }
+
+  private async notifyInstallComplete(): Promise<void> {
+    if (!this.installResult || !this.hooks.onInstallComplete) return;
+    await this.hooks.onInstallComplete(
+      this.filterCompletedMappings(this.analysisResult!.aliasMappings, this.installResult, true),
+    );
+  }
+
+  private snapshotCurrent(): boolean {
+    if (!this.preparation) return true;
+    if (
+      this.preparation.writing ||
+      this.preparing ||
+      this.snapshotRevision !== this.preparation.revision
+    ) {
+      const diagnostic: ResolverDiagnostic = {
+        code: 'PROJECT_STATE_CHANGED',
+        severity: 'error',
+        packageName: this.options.dependencies.join(', '),
+        message:
+          'Dependency preparation is changing this project; wait for preparation to finish before resolving modules',
+      };
+      if (this.options.strict) throw new ResolutionError([diagnostic]);
+      return false;
+    }
+    if (this.options.strict && this.snapshotError) throw this.snapshotError;
+    return true;
+  }
+
+  private logSharedPeerWarnings(): void {
+    for (const diagnostic of this.getDiagnostics()) {
+      if (diagnostic.code === 'SHARED_PEER_CONTEXT')
+        logger.warn(`[${diagnostic.code}] ${diagnostic.message}`);
     }
   }
 
@@ -339,10 +641,21 @@ export class DepsConflictResolver {
         return mapping;
       }
 
+      const blockedPaths = new Set(
+        Object.entries(mapping.peerImporterPaths ?? {})
+          .filter(([aliasName]) => inactiveAliasNames.has(aliasName))
+          .flatMap(([, paths]) => paths),
+      );
       return {
         ...mapping,
+        peerImporterPaths: Object.fromEntries(
+          Object.entries(mapping.peerImporterPaths ?? {}).filter(
+            ([aliasName]) => !inactiveAliasNames.has(aliasName),
+          ),
+        ),
         importerPaths: mapping.importerPaths.filter(
           (importerPath) =>
+            !blockedPaths.has(importerPath) &&
             ![...inactiveAliasNames].some((aliasName) =>
               this.isAliasPackagePath(importerPath, aliasName),
             ),
@@ -350,6 +663,7 @@ export class DepsConflictResolver {
       };
     });
 
+    this.activeMappings = activeMappings;
     this.aliasManager.initFromAnalysisResult({
       ...this.analysisResult,
       aliasMappings: activeMappings,
@@ -381,6 +695,8 @@ export class DepsConflictResolver {
       return null;
     }
 
+    if (!this.snapshotCurrent()) return null;
+
     // 检查钩子
     if (this.hooks.beforeResolve) {
       const hookResult = this.hooks.beforeResolve(request, importer);
@@ -401,6 +717,7 @@ export class DepsConflictResolver {
       return [];
     }
 
+    if (!this.snapshotCurrent()) return [];
     return this.aliasManager.getAliasPathMappings();
   }
 
@@ -409,6 +726,92 @@ export class DepsConflictResolver {
    */
   getAnalysisResult(): AnalysisResult | null {
     return this.analysisResult;
+  }
+
+  private generationDiagnostics(): ResolverDiagnostic[] {
+    return [
+      ...(this.analysisResult?.diagnostics ?? []),
+      ...this.installDiagnostics,
+      ...(this.aliasManager?.getDiagnostics?.() ?? []),
+    ];
+  }
+
+  /** Inspect unresolved conditions without parsing logs. */
+  getDiagnostics(): ResolverDiagnostic[] {
+    return [
+      ...(this.initialized && this.preparation && (this.preparation.writing || this.preparing)
+        ? [
+            {
+              code: 'PROJECT_STATE_CHANGED' as const,
+              severity: 'error' as const,
+              packageName: this.options.dependencies.join(', '),
+              message: 'Dependency preparation is in progress; wait before resolving modules',
+            },
+          ]
+        : []),
+      ...this.generationDiagnostics(),
+    ].map((diagnostic) =>
+      Object.assign({}, diagnostic, {
+        ...(diagnostic.aliases && { aliases: [...diagnostic.aliases] }),
+        ...(diagnostic.requestedBy && { requestedBy: [...diagnostic.requestedBy] }),
+        ...(diagnostic.importerPaths && { importerPaths: [...diagnostic.importerPaths] }),
+      }),
+    );
+  }
+
+  private assertResolved(): void {
+    if (this.options.strict) {
+      const errors = this.generationDiagnostics().filter(
+        (diagnostic) => diagnostic.severity === 'error',
+      );
+      if (errors.length > 0) throw new ResolutionError(errors);
+    }
+  }
+
+  /** Explain a request; skipHook permits side-effect-free cache validation. */
+  explainResolution(
+    request: string,
+    importer?: string,
+    options: { skipHook?: boolean } = {},
+  ): ResolutionExplanation {
+    if (!this.initialized || !this.aliasManager) {
+      return {
+        request,
+        importer,
+        resolved: null,
+        reason: 'inactive',
+        aliases: [],
+        matchedPaths: [],
+      };
+    }
+    if (!this.snapshotCurrent())
+      return {
+        request,
+        importer,
+        resolved: null,
+        reason: 'inactive',
+        aliases: [],
+        matchedPaths: [],
+      };
+    if (!options.skipHook && this.hooks.beforeResolve) {
+      const resolved = this.hooks.beforeResolve(request, importer);
+      if (resolved !== undefined) {
+        return { request, importer, resolved, reason: 'hook', aliases: [], matchedPaths: [] };
+      }
+    }
+    return this.aliasManager.explainResolution(request, importer);
+  }
+
+  getInstallResult(): InstallReport | null {
+    return (
+      this.installResult && {
+        ...this.installResult,
+        installed: [...this.installResult.installed],
+        reused: [...this.installResult.reused],
+        failed: [...this.installResult.failed],
+        errors: [...this.installResult.errors],
+      }
+    );
   }
 
   /**

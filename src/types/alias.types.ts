@@ -1,4 +1,5 @@
 import type { DependencyInfo, PeerConflict } from './dependency.types';
+import type { ResolverDiagnostic } from './diagnostic.types';
 
 /**
  * 别名映射
@@ -43,12 +44,19 @@ export interface AliasMapping {
    * does not fall back to the legacy name-only `allDependents` rule.
    */
   importerPaths?: string[];
+
+  /** Alias-owned importer paths, used to remove failed aliases from peer scopes. */
+  peerImporterPaths?: Record<string, string[]>;
 }
 
 /**
  * 依赖分析结果
  */
 export interface AnalysisResult {
+  /** Package manifests and workspace files consulted by dependency analysis. */
+  watchFiles?: string[];
+  /** Structured issues; optional for compatibility with older result producers. */
+  diagnostics?: ResolverDiagnostic[];
   /**
    * 所有分析过的依赖
    */

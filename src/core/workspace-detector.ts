@@ -230,7 +230,7 @@ export class WorkspaceDetector {
     if (rootPkgJson) {
       aliases.push(
         ...extractAliasesFromDeps(
-          rootPkgJson.dependencies,
+          { ...rootPkgJson.dependencies, ...rootPkgJson.optionalDependencies },
           targetPackage,
           rootPkgPath,
           existingAliases,

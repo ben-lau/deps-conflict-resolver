@@ -15,6 +15,17 @@ vi.mock('../../src/utils/fs', async () => {
   };
 });
 
+// Project locking and cross-instance refresh are exercised against real files
+// in preparation.test.ts; these tests isolate this resolver's lifecycle.
+vi.mock('../../src/core/project-preparation', () => ({
+  waitForProjectPreparation: async () => {},
+  getProjectPreparation: () => ({ revision: 0, writing: false, observers: new Set() }),
+  withProjectPreparation: async (
+    _state: unknown,
+    task: (markChanged: () => void) => Promise<unknown>,
+  ) => task(() => {}),
+}));
+
 // 创建 mock EnvironmentDetector 实例
 const mockEnvironmentDetector = {
   getDetectionResult: vi.fn(),
@@ -144,8 +155,8 @@ describe('DepsConflictResolver', () => {
 
       await Promise.all([first, second]);
 
-      expect(createDependencyAnalyzer).toHaveBeenCalledTimes(1);
-      expect(analyze).toHaveBeenCalledTimes(1);
+      expect(createDependencyAnalyzer).toHaveBeenCalledTimes(2);
+      expect(analyze).toHaveBeenCalledTimes(2);
       expect(initFromAnalysisResult).toHaveBeenCalledTimes(1);
       expect(onAnalysisComplete).toHaveBeenCalledTimes(1);
       expect(installAliases).toHaveBeenCalledTimes(1);
@@ -785,7 +796,13 @@ describe('DepsConflictResolver', () => {
       const { createAliasManager } = await import('../../src/core/alias-manager');
       const { createPackageInstaller } = await import('../../src/core/package-installer');
       vi.mocked(createDependencyAnalyzer).mockReturnValue({
-        analyze: vi.fn().mockResolvedValue(analysisResult),
+        analyze: vi
+          .fn()
+          .mockResolvedValueOnce(analysisResult)
+          .mockResolvedValue({
+            ...analysisResult,
+            aliasMappings: [{ ...successfulMapping, installSpec: '' }, failedMapping],
+          }),
       } as never);
       vi.mocked(createAliasManager).mockReturnValue({
         initFromAnalysisResult,
@@ -807,10 +824,10 @@ describe('DepsConflictResolver', () => {
       await expect(resolver.initialize()).resolves.toBeUndefined();
 
       expect(initFromAnalysisResult).toHaveBeenCalledWith(
-        expect.objectContaining({ aliasMappings: [successfulMapping] }),
+        expect.objectContaining({ aliasMappings: [{ ...successfulMapping, installSpec: '' }] }),
       );
       expect(resolver.getAnalysisResult()?.aliasMappings).toEqual([
-        successfulMapping,
+        { ...successfulMapping, installSpec: '' },
         failedMapping,
       ]);
     });
@@ -874,7 +891,13 @@ describe('DepsConflictResolver', () => {
         let activeAnalysisResult: AnalysisResult | undefined;
 
         vi.mocked(createDependencyAnalyzer).mockReturnValue({
-          analyze: vi.fn().mockResolvedValue(analysisResult),
+          analyze: vi
+            .fn()
+            .mockResolvedValueOnce(analysisResult)
+            .mockResolvedValue({
+              ...analysisResult,
+              aliasMappings: [{ ...successfulMapping, installSpec: '' }, failedMapping],
+            }),
         } as never);
         vi.mocked(createPackageInstaller).mockReturnValue({
           installAliases: vi.fn().mockResolvedValue({

@@ -9,9 +9,15 @@ import type {
   AnalysisResult,
   AliasMapping,
   WorkspaceAliasInfo,
+  ResolverDiagnostic,
 } from '../types/index';
 import { createLogger } from '../utils/logger';
-import { readPackageJsonCached, findPackagePath, clearPackageJsonCache } from '../utils/fs';
+import {
+  readPackageJsonCached,
+  findPackagePath,
+  clearPackageJsonCache,
+  fileExists,
+} from '../utils/fs';
 import type { InstalledPackageInfo } from '../types';
 import { createWorkspaceDetector, WorkspaceDetector } from './workspace-detector';
 import {
@@ -28,6 +34,9 @@ import {
   type InstalledDependencyGraph,
   type InstalledPackageNode,
 } from './dependency-graph';
+
+import { linkAliasPeers } from './alias-peer-resolver';
+import { validateSharedPeerContexts } from './shared-peer-contexts';
 
 const logger = createLogger('dependency-analyzer');
 
@@ -92,6 +101,10 @@ export class DependencyAnalyzer {
   private dependencyGraph: InstalledDependencyGraph | null = null;
   /** 注册表访问适配器（可注入以支持离线分析和确定性测试） */
   private registryClient: RegistryClient;
+  private graphPopulated = false;
+  private diagnostics: ResolverDiagnostic[] = [];
+  private watchFiles = new Set<string>();
+  private injectedInstalledDeps?: Map<string, InstalledPackageInfo>;
 
   constructor(
     options: ResolvedOptions,
@@ -103,9 +116,11 @@ export class DependencyAnalyzer {
   ) {
     this.options = options;
     this.registryClient = registryClient;
+    this.injectedInstalledDeps = installedDeps;
     this.rawDeclaredDeps = {
       ...mainPackageJson.dependencies,
       ...mainPackageJson.devDependencies,
+      ...mainPackageJson.optionalDependencies,
     };
     // 初始时 declaredDeps 与 rawDeclaredDeps 相同，后续会在 analyze 中解析 catalog 协议
     this.declaredDeps = { ...this.rawDeclaredDeps };
@@ -140,6 +155,7 @@ export class DependencyAnalyzer {
     }
 
     const pkgJson = readPackageJsonCached(packagePath);
+    this.watchFiles.add(join(this.normalizeInstalledPath(packagePath), 'package.json'));
     return { packagePath, pkgJson };
   }
 
@@ -168,6 +184,7 @@ export class DependencyAnalyzer {
     this.workspaceRootDeclaredDeps = {
       ...rootPkgJson.dependencies,
       ...rootPkgJson.devDependencies,
+      ...rootPkgJson.optionalDependencies,
     };
   }
 
@@ -282,6 +299,8 @@ export class DependencyAnalyzer {
    */
   async analyze(): Promise<AnalysisResult> {
     logger.info('Starting dependency analysis...');
+    this.watchFiles.clear();
+    this.watchFiles.add(join(this.options.projectRoot, 'package.json'));
 
     try {
       // 0. 解析 catalog: 协议的依赖版本
@@ -289,6 +308,12 @@ export class DependencyAnalyzer {
 
       // 0.1 预加载 workspaceRoot 的声明依赖（用于后续“已声明”判断合并）
       this.ensureWorkspaceRootDeclaredDepsLoaded();
+      const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
+      if (workspaceRoot) {
+        this.watchFiles.add(join(workspaceRoot, 'package.json'));
+        const workspaceFile = join(workspaceRoot, 'pnpm-workspace.yaml');
+        if (fileExists(workspaceFile)) this.watchFiles.add(workspaceFile);
+      }
 
       // 先建立按真实安装路径标识的完整图。后续所有关系判断都从该图
       // 读取；analyzedDependencies 仅保留按名称兼容的首个可见实例。
@@ -296,11 +321,22 @@ export class DependencyAnalyzer {
         this.options.dependencies,
         this.options.projectRoot,
       );
+      for (const node of this.dependencyGraph.nodes.values()) {
+        this.watchFiles.add(join(node.packagePath, 'package.json'));
+      }
 
       // 1. 从用户指定的依赖开始，递归分析所有子依赖（deps + peerDeps）
       //    构建完整依赖树用于后续重定向判断
       for (const depName of this.options.dependencies) {
         this.analyzeDependencyRecursive(depName, []);
+        if (!this.findGraphRoot(depName) && !this.injectedInstalledDeps?.has(depName)) {
+          this.diagnostics.push({
+            code: 'DEPENDENCY_NOT_FOUND',
+            severity: 'error',
+            packageName: depName,
+            message: 'Configured dependency not found: ' + depName,
+          });
+        }
       }
 
       // 2. 只收集第一层依赖的 peer 依赖（用于冲突检测）
@@ -313,6 +349,13 @@ export class DependencyAnalyzer {
       // 4. 生成别名映射（只为需要安装别名的冲突生成）
       //    会收集完整依赖树用于重定向判断
       const aliasMappings = await this.generateAliasMappings(peerConflicts);
+      validateSharedPeerContexts(
+        this.dependencyGraph,
+        aliasMappings,
+        this.options,
+        this.diagnostics,
+        this.watchFiles,
+      );
 
       // 5. 找出缺失的 peer 依赖（仅记录，不自动安装）
       const missingFirstLevelPeers = this.findMissingFirstLevelPeers(peerDepsMap);
@@ -325,6 +368,8 @@ export class DependencyAnalyzer {
       );
 
       return {
+        watchFiles: [...this.watchFiles],
+        diagnostics: this.diagnostics,
         analyzedDependencies: this.analyzedDependencies,
         peerConflicts,
         aliasMappings,
@@ -359,7 +404,7 @@ export class DependencyAnalyzer {
     const graphRoot = this.findGraphRoot(packageName);
     if (graphRoot) {
       this.populateAnalyzedDependenciesFromGraph();
-      return this.analyzedDependencies.get(graphRoot.name) ?? null;
+      return this.analyzedDependencies.get(packageName) ?? null;
     }
 
     // 使用包名作为 visited 键，同一个包只分析一次
@@ -405,7 +450,7 @@ export class DependencyAnalyzer {
         name,
         version: pkgJson.version ?? 'unknown',
         dependencyPath: [...path],
-        dependencies: pkgJson.dependencies ?? {},
+        dependencies: { ...pkgJson.dependencies, ...pkgJson.optionalDependencies },
         peerDependencies: pkgJson.peerDependencies ?? {},
         peerDependenciesMeta: pkgJson.peerDependenciesMeta,
       };
@@ -419,7 +464,7 @@ export class DependencyAnalyzer {
 
       const currentPath = [...path, name];
       const depsToCheck = [
-        ...Object.keys(pkgJson.dependencies ?? {}),
+        ...Object.keys({ ...pkgJson.dependencies, ...pkgJson.optionalDependencies }),
         ...Object.keys(pkgJson.peerDependencies ?? {}),
       ];
 
@@ -436,13 +481,8 @@ export class DependencyAnalyzer {
 
   private findGraphRoot(packageName: string): InstalledPackageNode | null {
     if (!this.dependencyGraph) return null;
-
-    for (const rootId of this.dependencyGraph.roots) {
-      const root = this.dependencyGraph.nodes.get(rootId);
-      if (root?.name === packageName) return root;
-    }
-
-    return null;
+    const rootId = this.dependencyGraph.rootRequests.get(packageName);
+    return rootId ? (this.dependencyGraph.nodes.get(rootId) ?? null) : null;
   }
 
   private getDependencyPathForGraphNode(node: InstalledPackageNode): string[] {
@@ -461,7 +501,8 @@ export class DependencyAnalyzer {
   }
 
   private populateAnalyzedDependenciesFromGraph(): void {
-    if (!this.dependencyGraph) return;
+    if (!this.dependencyGraph || this.graphPopulated) return;
+    this.graphPopulated = true;
 
     const rootVisibleNodeIds = new Map<string, string>();
     for (const node of this.dependencyGraph.nodes.values()) {
@@ -502,11 +543,28 @@ export class DependencyAnalyzer {
         name: node.name,
         version: node.version,
         dependencyPath: this.getDependencyPathForGraphNode(node),
-        dependencies: packageJson.dependencies ?? {},
+        dependencies: { ...packageJson.dependencies, ...packageJson.optionalDependencies },
         peerDependencies: packageJson.peerDependencies ?? {},
         peerDependenciesMeta: packageJson.peerDependenciesMeta,
       });
       this.visitedPackages.add(node.name);
+    }
+
+    for (const [name, rootId] of this.dependencyGraph.rootRequests) {
+      const node = this.dependencyGraph.nodes.get(rootId);
+      if (!node || node.name === name) continue;
+      const packageJson = readPackageJsonCached(node.packagePath);
+      if (!packageJson) continue;
+      this.cacheInstalledPackageInfo(name, node.packagePath, packageJson);
+      this.analyzedDependencies.set(name, {
+        name,
+        version: node.version,
+        dependencyPath: [],
+        dependencies: { ...packageJson.dependencies, ...packageJson.optionalDependencies },
+        peerDependencies: packageJson.peerDependencies ?? {},
+        peerDependenciesMeta: packageJson.peerDependenciesMeta,
+      });
+      this.visitedPackages.add(name);
     }
   }
 
@@ -538,10 +596,8 @@ export class DependencyAnalyzer {
     const declaredSpec = this.declaredDeps[packageName];
     if (typeof declaredSpec === 'string' && declaredSpec.startsWith('npm:')) {
       info.isAlias = true;
-      const parsed = parseNpmAlias(declaredSpec);
-      if (parsed) {
-        info.realName = parsed[0];
-      }
+      // The declaration is intent, not proof of the installed package identity.
+      info.realName = pkgJson.name;
     }
 
     this.installedPackageCache.set(packageName, info);
@@ -619,6 +675,17 @@ export class DependencyAnalyzer {
       // 只有声明过的包才会参与冲突判定
       const mainVersion = isDeclared ? this.getMainProjectVersion(packageName) : null;
       const isInstalled = mainVersion !== null;
+      if (!isDeclared || !isInstalled) {
+        this.diagnostics.push({
+          code: isDeclared ? 'PEER_NOT_INSTALLED' : 'PEER_NOT_DECLARED',
+          severity: 'error',
+          packageName,
+          requestedBy: requestedBy.map((request) => request.path.join('>')),
+          message:
+            packageName +
+            (isDeclared ? ' is declared but not installed' : ' is not declared by the host'),
+        });
+      }
 
       const conflictingRanges: DependencyPath[] = [];
       const satisfiedRanges: DependencyPath[] = [];
@@ -681,7 +748,7 @@ export class DependencyAnalyzer {
       return pkgJson.version;
     }
 
-    const cached = this.installedPackageCache.get(packageName);
+    const cached = this.injectedInstalledDeps?.get(packageName);
     if (cached) {
       return cached.version;
     }
@@ -704,6 +771,7 @@ export class DependencyAnalyzer {
    */
   private async generateAliasMappings(conflicts: PeerConflict[]): Promise<AliasMapping[]> {
     const aliasMappings: AliasMapping[] = [];
+    const usedAliasNames = new Set<string>();
 
     // 按包名分组需要别名的冲突
     const aliasNeeded = conflicts.filter((c) => c.needsAlias);
@@ -713,64 +781,24 @@ export class DependencyAnalyzer {
 
     // 对于每个需要别名的包
     for (const conflict of aliasNeeded) {
-      const mappings = await this.createAliasMappingsForConflict(conflict, allConflictPackageNames);
+      const mappings = await this.createAliasMappingsForConflict(
+        conflict,
+        allConflictPackageNames,
+        usedAliasNames,
+      );
       aliasMappings.push(...mappings);
     }
 
-    this.linkAliasPeerImporterPaths(aliasMappings);
+    await linkAliasPeers(
+      aliasMappings,
+      this.options,
+      this.registryClient,
+      this.diagnostics,
+      conflicts,
+      this.watchFiles,
+    );
 
     return aliasMappings;
-  }
-
-  private getAliasCandidatePaths(aliasName: string): string[] {
-    const paths = new Set<string>();
-    const addRootPath = (root: string): void => {
-      paths.add(join(root, 'node_modules', aliasName));
-      paths.add(join(this.normalizeInstalledPath(root), 'node_modules', aliasName));
-    };
-
-    addRootPath(this.options.projectRoot);
-    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
-    if (workspaceRoot) addRootPath(workspaceRoot);
-
-    const installedPath = findPackagePath(aliasName, this.options.projectRoot);
-    if (installedPath) paths.add(this.normalizeInstalledPath(installedPath));
-
-    return [...paths];
-  }
-
-  /**
-   * If one generated alias represents a package with a peer dependency that
-   * is also aliased, its installed package directory must be an importer for
-   * the peer alias. Otherwise the alias's own import resolves back to the
-   * host version and breaks the peer closure.
-   */
-  private linkAliasPeerImporterPaths(mappings: AliasMapping[]): void {
-    if (!this.dependencyGraph || mappings.length < 2) return;
-
-    for (const importerMapping of mappings) {
-      const peerNames = new Set(
-        [...this.dependencyGraph.nodes.values()]
-          .filter((node) => node.name === importerMapping.originalName)
-          .flatMap((node) => node.peerDependencyNames),
-      );
-      if (peerNames.size === 0) continue;
-
-      const importerPaths = this.getAliasCandidatePaths(importerMapping.aliasName);
-      for (const peerMapping of mappings) {
-        if (
-          peerMapping === importerMapping ||
-          !peerNames.has(peerMapping.originalName) ||
-          peerMapping.importerPaths === undefined
-        ) {
-          continue;
-        }
-
-        peerMapping.importerPaths = [
-          ...new Set([...(peerMapping.importerPaths ?? []), ...importerPaths]),
-        ];
-      }
-    }
   }
 
   /**
@@ -779,6 +807,7 @@ export class DependencyAnalyzer {
   private async createAliasMappingsForConflict(
     conflict: PeerConflict,
     allConflictPackageNames: string[],
+    usedAliasNames: Set<string>,
   ): Promise<AliasMapping[]> {
     const { packageName, conflictingRanges } = conflict;
 
@@ -818,8 +847,7 @@ export class DependencyAnalyzer {
 
     // 获取已存在的别名（用于复用和避免命名冲突）
     const existingAliasNames = this.getExistingAliasNames(packageName);
-    // 记录这次已使用的别名，避免重复使用
-    const usedAliasNames = new Set<string>();
+    // Names are reserved across all conflicts in this analysis generation.
     const mappings: AliasMapping[] = [];
 
     // 先收集所有真实已安装的别名身份，再按范围筛选候选。否则当同名
@@ -838,10 +866,20 @@ export class DependencyAnalyzer {
 
     for (const [aliasName, aliases] of installedAliasesByName) {
       const identities = new Set(
-        aliases.map((alias) => `${alias.installedPath ?? alias.scope}\0${alias.version}`),
+        aliases.map(
+          (alias) =>
+            `${alias.installedPath ? this.normalizeInstalledPath(alias.installedPath) : alias.scope}\0${alias.version}`,
+        ),
       );
       if (identities.size < 2) continue;
 
+      this.diagnostics.push({
+        code: 'AMBIGUOUS_ALIAS_SCOPE',
+        severity: 'error',
+        packageName,
+        aliases: [aliasName],
+        message: 'Alias resolves to multiple installed identities: ' + aliasName,
+      });
       logger.warn(
         `Alias reuse skipped: ${JSON.stringify({
           code: 'AMBIGUOUS_ALIAS_SCOPE',
@@ -875,7 +913,7 @@ export class DependencyAnalyzer {
       }
 
       usedAliasNames.add(existingAlias.name);
-      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ?? existingAlias.scope}\0${existingAlias.version}`;
+      const aliasIdentity = `${existingAlias.name}\0${existingAlias.installedPath ? this.normalizeInstalledPath(existingAlias.installedPath) : existingAlias.scope}\0${existingAlias.version}`;
       const reusedGroup = reusedAliasGroups.get(aliasIdentity);
       if (reusedGroup) {
         reusedGroup.requests.push(request);
@@ -903,6 +941,13 @@ export class DependencyAnalyzer {
     for (const [aliasName, groups] of reusedGroupsByAliasName) {
       if (groups.length < 2) continue;
 
+      this.diagnostics.push({
+        code: 'AMBIGUOUS_ALIAS_SCOPE',
+        severity: 'error',
+        packageName,
+        aliases: [aliasName],
+        message: 'Alias resolves to multiple installed identities: ' + aliasName,
+      });
       logger.warn(
         `Alias reuse skipped: ${JSON.stringify({
           code: 'AMBIGUOUS_ALIAS_SCOPE',
@@ -937,18 +982,53 @@ export class DependencyAnalyzer {
       return mappings;
     }
 
+    if (this.options.offline) {
+      this.diagnostics.push({
+        code: 'OFFLINE_ALIAS_MISSING',
+        severity: 'error',
+        packageName,
+        requestedBy: unresolvedRequests.map((request) => request.path.join('>')),
+        message: 'No installed alias satisfies ' + packageName + ' in offline mode',
+      });
+      return mappings;
+    }
+
     // 只为未匹配请求获取远程版本；registry 失败时保留前面已经生成的复用映射。
     let versions: string[];
     try {
       versions = await this.registryClient.fetchAllVersions(packageName, this.options.registry);
     } catch (error) {
+      this.diagnostics.push({
+        code: 'REGISTRY_ERROR',
+        severity: 'error',
+        packageName,
+        message: 'Failed to fetch versions for ' + packageName + ': ' + String(error),
+      });
       logger.warn(`Failed to fetch versions for ${packageName}: ${String(error)}`);
       return mappings;
     }
 
     if (versions.length === 0) {
+      this.diagnostics.push({
+        code: 'NO_MATCHING_VERSION',
+        severity: 'error',
+        packageName,
+        message: 'No versions available for ' + packageName,
+      });
       logger.warn(`No versions found for ${packageName}`);
       return mappings;
+    }
+
+    for (const request of unresolvedRequests) {
+      if (!versions.some((version) => satisfies(version, request.requiredRange))) {
+        this.diagnostics.push({
+          code: 'NO_MATCHING_VERSION',
+          severity: 'error',
+          packageName,
+          requestedBy: request.path,
+          message: 'No available version satisfies ' + packageName + '@' + request.requiredRange,
+        });
+      }
     }
 
     // 仅对未匹配请求按范围兼容性分组
@@ -1264,7 +1344,6 @@ export class DependencyAnalyzer {
 
     // 2. 查找 workspace 级别的别名
     const workspaceAliases = this.findWorkspaceAliasesForPackage(packageName);
-    const workspaceRoot = this.workspaceDetector.getWorkspaceRoot();
 
     if (workspaceAliases.length > 0) {
       logger.debug(`  Checking ${workspaceAliases.length} workspace alias(es)...`);
@@ -1277,64 +1356,24 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      // 尝试从 workspace 根目录获取已安装版本（pnpm 模式下依赖安装在根目录）
-      let installedVersion: string | null = null;
-      let installedPath: string | undefined;
-
-      if (workspaceRoot) {
-        const { packagePath, pkgJson } = this.resolvePackageJson(wsAlias.aliasName, workspaceRoot);
-        if (packagePath) {
-          if (pkgJson?.name !== packageName) {
-            logger.debug(
-              `    Skip ${wsAlias.aliasName}: installed package name ${pkgJson?.name ?? 'unknown'} does not match ${packageName}`,
-            );
-            continue;
-          }
-          installedVersion = pkgJson?.version ?? null;
-          installedPath = packagePath;
-          logger.debug(
-            `    Found ${wsAlias.aliasName} installed at workspace root: ${installedVersion}`,
-          );
-        }
+      // Workspace declarations supply candidate names. Verify the installation
+      // visible from the same host origin used by runtime alias resolution.
+      const { packagePath, pkgJson } = this.resolvePackageJson(
+        wsAlias.aliasName,
+        this.options.projectRoot,
+      );
+      if (!packagePath || pkgJson?.name !== packageName || !pkgJson.version) continue;
+      const installedVersion = pkgJson.version;
+      if (ranges.every((range) => satisfies(installedVersion, range))) {
+        logger.info(`    Reusing workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
+        return {
+          name: wsAlias.aliasName,
+          version: installedVersion,
+          isWorkspaceAlias: true,
+          installedPath: packagePath,
+          scope: 'workspace',
+        };
       }
-
-      // 如果找不到，尝试从当前项目查找（可能是 hoisted 或软链接）
-      if (!installedVersion) {
-        installedVersion = this.getAliasInstalledVersion(wsAlias.aliasName);
-        if (installedVersion) {
-          const installedAlias = this.installedPackageCache.get(wsAlias.aliasName);
-          installedPath = installedAlias?.path;
-          if (installedAlias?.realName !== packageName) {
-            logger.debug(
-              `    Skip ${wsAlias.aliasName}: installed package name ${installedAlias?.realName ?? 'unknown'} does not match ${packageName}`,
-            );
-            continue;
-          }
-          logger.debug(`    Found ${wsAlias.aliasName} installed at project: ${installedVersion}`);
-        }
-      }
-
-      // 如果已安装，用实际版本检查
-      if (installedVersion) {
-        const allSatisfied = ranges.every((range) => satisfies(installedVersion, range));
-        if (allSatisfied) {
-          logger.info(`    Reusing workspace alias: ${wsAlias.aliasName}@${installedVersion}`);
-          return {
-            name: wsAlias.aliasName,
-            version: installedVersion,
-            isWorkspaceAlias: true,
-            installedPath,
-            scope: 'workspace',
-          };
-        } else {
-          logger.debug(
-            `    Skip ${wsAlias.aliasName}@${installedVersion}: version doesn't satisfy all ranges`,
-          );
-        }
-        continue;
-      }
-
-      // 仅已安装的 workspace alias 可复用；声明但尚未安装的 alias 仍需解析远程版本。
     }
 
     logger.debug(`  No existing alias found for ${packageName}`);
@@ -1447,10 +1486,8 @@ export class DependencyAnalyzer {
   ): InstalledPackageNode | null {
     if (!this.dependencyGraph) return null;
 
-    const packagePath = findPackagePath(dependencyName, parent.packagePath);
-    if (!packagePath) return null;
-
-    return this.dependencyGraph.nodes.get(this.normalizeInstalledPath(packagePath)) ?? null;
+    const childId = parent.resolvedChildren.get(dependencyName);
+    return childId ? (this.dependencyGraph.nodes.get(childId) ?? null) : null;
   }
 
   /**
@@ -1464,12 +1501,8 @@ export class DependencyAnalyzer {
     if (!this.dependencyGraph) return null;
 
     const roots = packageNames
-      .map((packageName) =>
-        this.dependencyGraph!.roots.map((rootId) => this.dependencyGraph!.nodes.get(rootId)).find(
-          (node) => node?.name === packageName,
-        ),
-      )
-      .filter((node): node is InstalledPackageNode => node !== undefined);
+      .map((packageName) => this.findGraphRoot(packageName))
+      .filter((node): node is InstalledPackageNode => node !== null);
     if (roots.length === 0) return null;
 
     const excludeSet = new Set(excludePackages);
@@ -1567,7 +1600,7 @@ export class DependencyAnalyzer {
         continue;
       }
 
-      const deps = pkgJson.dependencies ?? {};
+      const deps = { ...pkgJson.dependencies, ...pkgJson.optionalDependencies };
       const peerDeps = pkgJson.peerDependencies ?? {};
 
       for (const depName of Object.keys(deps)) {
@@ -1674,12 +1707,33 @@ export class DependencyAnalyzer {
 /**
  * 创建依赖分析器实例
  */
-export function createDependencyAnalyzer(options: ResolvedOptions): DependencyAnalyzer {
+export function createDependencyAnalyzer(
+  options: ResolvedOptions,
+  preparedAliases: readonly AliasMapping[] = [],
+): DependencyAnalyzer {
   const mainPackageJson = readPackageJsonCached(options.projectRoot);
   if (!mainPackageJson) {
     throw new Error(`Could not read package.json at ${options.projectRoot}`);
   }
 
-  // 不预先扫描 node_modules，按需查找包
-  return new DependencyAnalyzer(options, mainPackageJson);
+  // Package managers may be configured not to save dependencies. Keep aliases
+  // verified by this preparation available to the fresh analysis, while still
+  // checking their actual installed identity and honoring real declarations.
+  const declared = {
+    ...mainPackageJson.dependencies,
+    ...mainPackageJson.devDependencies,
+    ...mainPackageJson.optionalDependencies,
+  };
+  const additional = Object.fromEntries(
+    preparedAliases
+      .filter((mapping) => !Object.hasOwn(declared, mapping.aliasName))
+      .map((mapping) => [
+        mapping.aliasName,
+        'npm:' + mapping.originalName + '@' + mapping.resolvedVersion,
+      ]),
+  );
+  return new DependencyAnalyzer(options, {
+    ...mainPackageJson,
+    devDependencies: { ...additional, ...mainPackageJson.devDependencies },
+  });
 }
