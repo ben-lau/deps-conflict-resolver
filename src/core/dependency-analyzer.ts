@@ -747,7 +747,13 @@ export class DependencyAnalyzer {
       aliasMappings.push(...mappings);
     }
 
-    await linkAliasPeers(aliasMappings, this.options, this.registryClient, this.diagnostics);
+    await linkAliasPeers(
+      aliasMappings,
+      this.options,
+      this.registryClient,
+      this.diagnostics,
+      conflicts,
+    );
 
     return aliasMappings;
   }

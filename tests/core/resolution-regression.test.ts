@@ -10,8 +10,8 @@ import { resetGlobalLogLevel } from '../../src/utils/logger';
 
 const roots: string[] = [];
 
-function project(manifest: PackageJson): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'deps-resolution-')));
+function project(manifest: PackageJson, prefix = 'deps-resolution-'): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   roots.push(root);
   writeFileSync(
     join(root, 'package.json'),
@@ -305,6 +305,125 @@ describe('resolution correctness with installed packages', () => {
       strict: true,
     });
     expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe('runtime2');
+  });
+
+  it.each(['host', 'same-alias', 'unspecified', 'override'])(
+    'checks every consumer of a shared alias: %s',
+    async (context) => {
+      const root = project({
+        dependencies: {
+          a: '1.0.0',
+          b: '1.0.0',
+          renderer: '2.0.0',
+          runtime: '3.0.0',
+          renderer1: 'npm:renderer@1.0.0',
+          runtime2: 'npm:runtime@2.0.0',
+        },
+      });
+      pkg(root, 'a', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+      pkg(root, 'b', {
+        peerDependencies: {
+          renderer: '^1',
+          ...(context === 'unspecified'
+            ? {}
+            : { runtime: context === 'host' || context === 'override' ? '^3' : '^2' }),
+        },
+      });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      const renderer = pkg(root, 'renderer1', {
+        name: 'renderer',
+        version: '1.0.0',
+        peerDependencies: { runtime: '>=2' },
+      });
+      pkg(root, 'runtime2', { name: 'runtime', version: '2.0.0' });
+      const options = {
+        ...baseOptions(root, ['a', 'b']),
+        offline: true,
+        excludeRedirects: { runtime: context === 'override' ? ['a'] : [] },
+      };
+      const resolver = await createResolver(options);
+      if (context === 'host') {
+        expect(resolver.getDiagnostics()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              code: 'AMBIGUOUS_IMPORTER',
+              severity: 'error',
+              requestedBy: ['renderer1'],
+            }),
+          ]),
+        );
+        expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBeNull();
+        await expect(createResolver({ ...options, strict: true })).rejects.toBeInstanceOf(
+          ResolutionError,
+        );
+      } else {
+        expect(resolver.getDiagnostics()).toEqual([]);
+        expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe(
+          context === 'override' ? null : 'runtime2',
+        );
+      }
+    },
+  );
+
+  it.each(['valid', 'compatible-version', 'missing', 'wrong-name', 'out-of-range'])(
+    'reuses workspace optional aliases offline only when verified: %s',
+    async (installed) => {
+      const root = project({
+        workspaces: ['packages/*'],
+        dependencies: { vue: '3.5.0' },
+        optionalDependencies: { vue2: 'npm:vue@2.7.16' },
+      });
+      const app = join(root, 'packages/app');
+      mkdirSync(app, { recursive: true });
+      writeFileSync(
+        join(app, 'package.json'),
+        JSON.stringify({ name: 'app', dependencies: { legacy: '1.0.0' } }),
+      );
+      const legacy = pkg(app, 'legacy', { peerDependencies: { vue: '^2' } });
+      pkg(root, 'vue', { version: '3.5.0' });
+      if (installed !== 'missing')
+        pkg(root, 'vue2', {
+          name: installed === 'wrong-name' ? 'other' : 'vue',
+          version:
+            installed === 'out-of-range'
+              ? '3.5.0'
+              : installed === 'compatible-version'
+                ? '2.6.14'
+                : '2.7.16',
+        });
+      const fetch = vi.spyOn(globalThis, 'fetch');
+      const resolver = await createResolver({ ...baseOptions(app), offline: true });
+      if (installed === 'valid' || installed === 'compatible-version') {
+        expect(resolver.getDiagnostics()).toEqual([]);
+        expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
+        await expect(
+          createResolver({ ...baseOptions(app), offline: true, strict: true }),
+        ).resolves.toBeDefined();
+      } else {
+        expect(resolver.getDiagnostics()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ code: 'OFFLINE_ALIAS_MISSING', severity: 'error' }),
+          ]),
+        );
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps host and dependency scopes separate when the project root contains a hash', async () => {
+    const root = project(
+      { dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.7.16' } },
+      'deps-resolution-#',
+    );
+    const legacy = pkg(root, 'legacy', { peerDependencies: { vue: '^2' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    const resolver = await createResolver({ ...baseOptions(root), offline: true, strict: true });
+    expect(resolver.resolveModule('vue', join(root, 'src/app.js'))).toBeNull();
+    expect(resolver.resolveModule('vue?raw', join(legacy, 'index.js') + '?vue&type=script')).toBe(
+      'vue2?raw',
+    );
   });
 
   it('includes installed optional runtime dependencies and host optional declarations', async () => {

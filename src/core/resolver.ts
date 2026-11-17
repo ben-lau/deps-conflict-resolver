@@ -336,6 +336,7 @@ export class DepsConflictResolver {
       { ...this.options, offline: true },
       npmRegistryClient,
       this.installDiagnostics,
+      this.analysisResult.peerConflicts,
     );
     this.setActiveAliasMappings(completedMappings, aliasResult.failed ?? []);
 
