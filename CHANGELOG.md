@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.1...v1.1.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **core:** verify installed aliases before accepting success ([487abc3](https://github.com/ben-lau/deps-conflict-resolver/commit/487abc359b33f5bf213acd00b28955f8475ea0f0))
+
 ## [1.1.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.0...v1.1.1) (2026-11-17)
 
 
