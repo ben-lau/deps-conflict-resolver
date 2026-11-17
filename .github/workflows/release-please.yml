@@ -13,8 +13,11 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/verify-release.yml
+    with:
+      ref: "${{ github.event.head_commit.message == 'ci: recover 1.1.1 publishing' && 'v1.1.1' || github.sha }}"
 
   release-please:
+    if: "${{ github.event.head_commit.message != 'ci: recover 1.1.1 publishing' }}"
     needs: verify
     runs-on: ubuntu-latest
     permissions:
@@ -45,7 +48,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: '.node-version'
-          registry-url: https://registry.npmjs.org/
       - uses: actions/download-artifact@v8
         with:
           name: release-package
@@ -59,4 +61,31 @@ jobs:
           package_version=$(tar -xOf "$RUNNER_TEMP"/release-package/*.tgz package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
           test "v$package_version" = "$RELEASE_TAG"
       - run: npm i -g npm@latest
-      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance
+      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance --registry=https://registry.npmjs.org/
+
+  recover-publish:
+    if: "${{ github.event.head_commit.message == 'ci: recover 1.1.1 publishing' }}"
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v1.1.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.node-version'
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-package
+      - name: Verify the recovered tag and tested package
+        run: |
+          test "$(git rev-parse HEAD)" = "a929b73ff230dd9b69779c11cae6d4267c038a5c"
+          test "$(node -p "require('./package.json').version")" = "1.1.1"
+          package_version=$(tar -xOf "$RUNNER_TEMP"/release-package/*.tgz package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          test "$package_version" = "1.1.1"
+      - run: npm i -g npm@latest
+      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance --registry=https://registry.npmjs.org/
