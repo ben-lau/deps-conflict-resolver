@@ -469,6 +469,7 @@ describe('Webpack Plugin', () => {
 function createMockCompiler() {
   return {
     hooks: {
+      compilation: { tap: vi.fn() },
       beforeRun: {
         tapPromise: vi.fn(),
       },

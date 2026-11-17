@@ -180,6 +180,10 @@ depsConflictResolverVitePlugin({
 
 默认值为 `ssr: 'manual'`。显式 `ssr.external` 和 SSR 优化排除项仍遵循 Vite 的优先级；需要重定向的包不应同时被排除。未指定 `projectRoot` 时，插件使用最终 Vite 配置的 `root`。
 
+## Webpack watch 与链接依赖
+
+Webpack watch 会跟踪分析涉及的包清单，在重定向发生变化时重新解析受影响的模块，同时保留无关模块的缓存。链接或 workspace 包的重定向从宿主工程解析，并保留包的 `exports` 及 `import`/`require` 条件。
+
 ## 工作原理
 
 ### 1. 依赖分析
