@@ -10,11 +10,15 @@ export interface InstalledPackageNode {
   parentId: string | null;
   dependencyNames: string[];
   peerDependencyNames: string[];
+  /** Resolved dependency and peer edges, including edges to shared nodes. */
+  resolvedChildren: Map<string, string>;
 }
 
 export interface InstalledDependencyGraph {
   nodes: Map<string, InstalledPackageNode>;
   roots: string[];
+  /** Logical root requests remain distinct even when they share one instance. */
+  rootRequests: Map<string, string>;
 }
 
 function normalizePackagePath(packagePath: string): string {
@@ -36,6 +40,7 @@ export function buildInstalledDependencyGraph(
 ): InstalledDependencyGraph {
   const nodes = new Map<string, InstalledPackageNode>();
   const roots: string[] = [];
+  const rootRequests = new Map<string, string>();
   const stack: Array<{ name: string; baseDir: string; parentId: string | null; root: boolean }> =
     [];
   for (let index = packageNames.length - 1; index >= 0; index--) {
@@ -51,6 +56,8 @@ export function buildInstalledDependencyGraph(
     if (!packagePath) continue;
 
     const normalizedPath = normalizePackagePath(packagePath);
+    if (item.root) rootRequests.set(item.name, normalizedPath);
+    if (item.parentId) nodes.get(item.parentId)?.resolvedChildren.set(item.name, normalizedPath);
     const existingNode = nodes.get(normalizedPath);
     if (existingNode) {
       if (item.root) {
@@ -81,6 +88,7 @@ export function buildInstalledDependencyGraph(
       parentId: item.parentId,
       dependencyNames,
       peerDependencyNames,
+      resolvedChildren: new Map(),
     };
 
     nodes.set(normalizedPath, node);
@@ -100,5 +108,5 @@ export function buildInstalledDependencyGraph(
     }
   }
 
-  return { nodes, roots };
+  return { nodes, roots, rootRequests };
 }
