@@ -36,6 +36,13 @@ export interface AliasMapping {
    * 注意：冲突包自身（如 vue、vue-router）已在收集时被排除，避免主工程引用被误重定向
    */
   allDependents: string[];
+
+  /**
+   * Normalized installed package directories whose importers use this alias.
+   * When present, runtime matching is scoped to these package instances and
+   * does not fall back to the legacy name-only `allDependents` rule.
+   */
+  importerPaths?: string[];
 }
 
 /**

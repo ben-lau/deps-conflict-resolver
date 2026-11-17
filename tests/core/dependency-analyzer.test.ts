@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DependencyAnalyzer } from '../../src/core/dependency-analyzer';
 import { AliasManager } from '../../src/core/alias-manager';
-import type { ResolvedOptions, PackageJson } from '../../src/types';
+import type { DependencyPath, ResolvedOptions, PackageJson } from '../../src/types';
 import type { InstalledPackageInfo } from '../../src/types';
+import { findBestVersion } from '../../src/utils/semver';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -1009,6 +1010,139 @@ describe('DependencyAnalyzer offline alias reuse', () => {
     } finally {
       warn.mockRestore();
       await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+const groupRanges = (requests: DependencyPath[], availableVersions: string[]) => {
+  const analyzer = new DependencyAnalyzer(
+    {
+      dependencies: [],
+      projectRoot: '/test/project',
+      autoInstall: true,
+      packageManager: 'npm',
+      registry: 'https://registry.example.test',
+      debug: false,
+      aliasPrefix: 'aliased-',
+      excludeRedirects: {},
+      includeRedirects: {},
+    },
+    { name: 'semver-grouping-host', version: '1.0.0' },
+    new Map(),
+  );
+
+  return (
+    analyzer as unknown as {
+      groupRangesByCompatibility: (
+        requests: DependencyPath[],
+        availableVersions: string[],
+      ) => DependencyPath[][];
+    }
+  ).groupRangesByCompatibility(requests, availableVersions);
+};
+
+describe('DependencyAnalyzer semver grouping', () => {
+  it('does not create a group for a range with no available version', () => {
+    const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: '^2.0.0' }];
+
+    expect(groupRanges(requests, ['1.0.0'])).toEqual([]);
+  });
+
+  it('does not create a group for an invalid range', () => {
+    const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: 'invalid-range' }];
+
+    expect(groupRanges(requests, ['1.0.0'])).toEqual([]);
+  });
+
+  it('does not create groups when there are no available versions', () => {
+    const requests: DependencyPath[] = [{ path: ['consumer'], requiredRange: '^1.0.0' }];
+
+    expect(groupRanges(requests, [])).toEqual([]);
+  });
+
+  it('excludes prereleases unless the range explicitly includes prereleases', () => {
+    const requests: DependencyPath[] = [
+      { path: ['stable-range'], requiredRange: '^2.0.0' },
+      { path: ['prerelease-range'], requiredRange: '^2.0.0-0' },
+    ];
+
+    expect(groupRanges(requests, ['2.0.0-beta.1'])).toEqual([[requests[1]]]);
+  });
+
+  it('partitions pairwise-only semver intersections into satisfiable mappings', async () => {
+    const availableVersions = ['1.5.0', '2.5.0', '3.5.0'];
+    const requests = [
+      { name: 'consumer-one', range: '1.x || 2.x' },
+      { name: 'consumer-two', range: '2.x || 3.x' },
+      { name: 'consumer-three', range: '1.x || 3.x' },
+    ] as const;
+    const rangesByRequester = new Map<string, string>(
+      requests.map(({ name, range }) => [name, range]),
+    );
+    const registryClient = {
+      fetchAllVersions: vi.fn().mockResolvedValue(availableVersions),
+    };
+    const options: ResolvedOptions = {
+      dependencies: requests.map(({ name }) => name),
+      projectRoot: '/test/project',
+      autoInstall: true,
+      packageManager: 'npm',
+      registry: 'https://registry.example.test',
+      debug: false,
+      aliasPrefix: 'aliased-',
+      excludeRedirects: {},
+      includeRedirects: {},
+    };
+    const analyzer = new DependencyAnalyzer(
+      options,
+      {
+        name: 'semver-grouping-host',
+        version: '1.0.0',
+        dependencies: { vue: '^4.0.0' },
+      },
+      new Map([
+        [
+          'vue',
+          {
+            name: 'vue',
+            version: '4.0.0',
+            path: '/test/project/node_modules/vue',
+          },
+        ],
+      ]),
+      registryClient,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (analyzer as any).analyzeDependencyRecursive = vi.fn((packageName: string) => {
+      const request = requests.find(({ name }) => name === packageName);
+      if (!request) return null;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (analyzer as any).analyzedDependencies.set(packageName, {
+        name: packageName,
+        version: '1.0.0',
+        dependencyPath: [],
+        dependencies: {},
+        peerDependencies: { vue: request.range },
+        peerDependenciesMeta: {},
+      });
+      return null;
+    });
+
+    const result = await analyzer.analyze();
+
+    expect(result.aliasMappings.length).toBeGreaterThanOrEqual(2);
+    const usedBy = result.aliasMappings.flatMap((mapping) => mapping.usedBy);
+    expect(usedBy).toHaveLength(requests.length);
+    expect(new Set(usedBy).size).toBe(requests.length);
+    expect([...usedBy].sort()).toEqual(requests.map(({ name }) => name).sort());
+
+    for (const mapping of result.aliasMappings) {
+      const ranges = mapping.usedBy.map((requester) => rangesByRequester.get(requester)!);
+      const bestVersion = findBestVersion(availableVersions, ranges);
+      expect(bestVersion).not.toBeNull();
+      expect(mapping.resolvedVersion).toBe(bestVersion);
     }
   });
 });

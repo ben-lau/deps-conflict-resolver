@@ -29,7 +29,7 @@ describe('Vite Plugin', () => {
   });
 
   describe('createViteAliases', () => {
-    it('should create exact and subpath aliases with proper regex escaping', () => {
+    it('should create package-root aliases without concatenating subpaths', () => {
       const mappings: AliasPathMapping[] = [
         {
           aliasName: 'aliased-vue',
@@ -45,8 +45,9 @@ describe('Vite Plugin', () => {
 
       const aliases = createViteAliases(mappings);
 
-      // 每个 mapping 生成 2 个 alias（精确匹配 + 子路径）
-      expect(aliases).toHaveLength(4);
+      // Each mapping gets a package-root alias. Subpaths must be resolved by
+      // Vite so that package exports and conditional entry points remain active.
+      expect(aliases).toHaveLength(2);
 
       // 精确匹配
       const exactMatch = aliases[0]!.find as RegExp;
@@ -54,13 +55,10 @@ describe('Vite Plugin', () => {
       expect(exactMatch.test('aliased-vue/x')).toBe(false);
       expect(aliases[0]!.replacement).toBe('/node_modules/aliased-vue');
 
-      // 子路径匹配
-      const subpathMatch = aliases[1]!.find as RegExp;
-      expect(subpathMatch.test('aliased-vue/dist/vue.js')).toBe(true);
-      expect(subpathMatch.test('aliased-vue')).toBe(false);
+      expect(exactMatch.test('aliased-vue/dist/vue.js')).toBe(false);
 
       // scoped 包的 regex 转义
-      const scopedMatch = aliases[2]!.find as RegExp;
+      const scopedMatch = aliases[1]!.find as RegExp;
       expect(scopedMatch.test('@scope/pkg')).toBe(true);
       expect(scopedMatch.test('@scopeXpkg')).toBe(false);
     });
@@ -197,6 +195,40 @@ describe('Vite Plugin', () => {
       expect(result).toBeDefined();
       expect(result?.resolve?.alias).toBeDefined();
       expect(result?.optimizeDeps?.include).toContain('aliased-vue');
+    });
+
+    it('should include only active aliases in optimizeDeps after an install failure', async () => {
+      mockResolverInstance.initialize.mockResolvedValue(undefined);
+      mockResolverInstance.getAnalysisResult.mockReturnValue({
+        ...mockAnalysisResult,
+        aliasMappings: [
+          ...mockAnalysisResult.aliasMappings,
+          {
+            originalName: 'vue',
+            aliasName: 'aliased-vue1',
+            resolvedVersion: '1.7.0',
+            usedBy: ['very-legacy-package'],
+            allDependents: ['very-legacy-package'],
+            installSpec: 'aliased-vue1@npm:vue@1.7.0',
+          },
+        ],
+      });
+      mockResolverInstance.getAliasPathMappings.mockReturnValue(mockAliasPathMappings);
+      mockResolverInstance.getOptions.mockReturnValue({ projectRoot: '/test' });
+
+      const plugin = depsConflictResolverVitePlugin({
+        dependencies: ['vue'],
+      });
+
+      const config = plugin.config as (
+        config: unknown,
+        env: { command: string },
+      ) => Promise<unknown>;
+      const result = (await config({}, { command: 'build' })) as {
+        optimizeDeps?: { include?: string[] };
+      };
+
+      expect(result.optimizeDeps?.include).toEqual(['aliased-vue']);
     });
 
     describe('resolveId', () => {

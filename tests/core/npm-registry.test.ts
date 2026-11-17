@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fetchAllVersions, clearNpmRegistryCache } from '../../src/core/npm-registry';
+import { DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../../src/constants';
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -177,6 +178,50 @@ describe('npm-registry', () => {
       const versions = await versionsPromise;
 
       expect(versions).toEqual([]);
+    });
+
+    it('should abort a stalled response body and preserve the body error reason', async () => {
+      const bodyAbortError = new Error('response body stalled');
+      bodyAbortError.name = 'AbortError';
+      let bodyAborted = false;
+      let rejectBody!: (reason?: unknown) => void;
+
+      mockFetch.mockImplementation(async (_url, init) => {
+        const signal = init?.signal as AbortSignal;
+        return {
+          ok: true,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              rejectBody = reject;
+              signal.addEventListener(
+                'abort',
+                () => {
+                  bodyAborted = true;
+                  reject(bodyAbortError);
+                },
+                { once: true },
+              );
+            }),
+        };
+      });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const versionsPromise = fetchAllVersions('stalled-body');
+      await vi.advanceTimersByTimeAsync(DEFAULT_NPM_REGISTRY_TIMEOUT_MS);
+
+      try {
+        expect(bodyAborted).toBe(true);
+      } finally {
+        // Keep the test bounded if the timeout regression is still present.
+        rejectBody(bodyAbortError);
+      }
+
+      await expect(versionsPromise).resolves.toEqual([]);
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('Timeout fetching package info'),
+        bodyAbortError,
+      );
     });
   });
 });

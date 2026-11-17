@@ -17,7 +17,6 @@ import {
   findBestVersion,
   generateAliasName,
   createAliasInstallSpec,
-  rangesIntersect,
 } from '../utils/semver';
 import { parseNpmAlias } from '../utils/version-spec';
 import { clearNpmRegistryCache } from './npm-registry';
@@ -161,6 +160,16 @@ export class DependencyAnalyzer {
       ...rootPkgJson.dependencies,
       ...rootPkgJson.devDependencies,
     };
+  }
+
+  /** Keep generated alias names clear of host and workspace dependencies. */
+  private getReservedDependencyNames(): Set<string> {
+    this.ensureWorkspaceRootDeclaredDepsLoaded();
+    return new Set([
+      ...Object.keys(this.rawDeclaredDeps),
+      ...Object.keys(this.declaredDeps),
+      ...Object.keys(this.workspaceRootDeclaredDeps),
+    ]);
   }
 
   /**
@@ -789,7 +798,7 @@ export class DependencyAnalyzer {
     }
 
     // 仅对未匹配请求按范围兼容性分组
-    const rangeGroups = this.groupRangesByCompatibility(unresolvedRequests);
+    const rangeGroups = this.groupRangesByCompatibility(unresolvedRequests, versions);
     logger.info(`Creating alias for "${packageName}": ${rangeGroups.length} version groups`);
 
     // 为每组创建别名映射
@@ -825,18 +834,32 @@ export class DependencyAnalyzer {
    * 按范围兼容性分组
    * 有交集的范围放在一组，互斥的分开
    */
-  private groupRangesByCompatibility(requests: DependencyPath[]): DependencyPath[][] {
+  private groupRangesByCompatibility(
+    requests: DependencyPath[],
+    availableVersions: string[],
+  ): DependencyPath[][] {
     const groups: DependencyPath[][] = [];
+    const orderedRequests = requests
+      .map((request, index) => ({
+        request,
+        index,
+        satisfyingVersionCount: availableVersions.filter((version) =>
+          satisfies(version, request.requiredRange),
+        ).length,
+      }))
+      .sort(
+        (left, right) =>
+          left.satisfyingVersionCount - right.satisfyingVersionCount || left.index - right.index,
+      );
 
-    for (const request of requests) {
+    for (const { request } of orderedRequests) {
       let added = false;
 
       // 尝试加入现有组
       for (const group of groups) {
-        // 检查是否与组内所有范围都有交集
-        const canJoin = group.every((existing) =>
-          rangesIntersect(existing.requiredRange, request.requiredRange),
-        );
+        // 检查合并后的整个范围集合是否有可用版本。两两有交集不代表整个集合有交集。
+        const proposedRanges = [...group, request].map((item) => item.requiredRange);
+        const canJoin = findBestVersion(availableVersions, proposedRanges) !== null;
 
         if (canJoin) {
           group.push(request);
@@ -847,6 +870,10 @@ export class DependencyAnalyzer {
 
       // 没有合适的组，创建新组
       if (!added) {
+        // 没有任何可用版本满足该请求时，不创建不可安装的 singleton 组。
+        if (findBestVersion(availableVersions, [request.requiredRange]) === null) {
+          continue;
+        }
         groups.push([request]);
       }
     }
@@ -895,7 +922,11 @@ export class DependencyAnalyzer {
     }
 
     // 3. 生成新的别名名称
-    const combinedExisting = new Set([...existingAliasNames, ...usedAliasNames]);
+    const combinedExisting = new Set([
+      ...existingAliasNames,
+      ...usedAliasNames,
+      ...this.getReservedDependencyNames(),
+    ]);
     const aliasName = this.generateUniqueAliasName(packageName, bestVersion, combinedExisting);
     const installSpec = createAliasInstallSpec(aliasName, packageName, bestVersion);
 
