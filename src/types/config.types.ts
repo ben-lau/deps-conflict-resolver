@@ -42,6 +42,12 @@ export interface DepsConflictResolverOptions {
    */
   debug?: boolean;
 
+  /** Never query a registry or run installation; only verified installed aliases are usable. */
+  offline?: boolean;
+
+  /** Fail when required peers, aliases, or resolution contexts remain unresolved. */
+  strict?: boolean;
+
   /**
    * 自定义别名前缀
    * @default 'aliased-'
@@ -70,7 +76,11 @@ export interface DepsConflictResolverOptions {
  * 解析后的配置（带默认值）
  * 注意：packageManager 和 registry 在解析后会是具体的值，不会是 'auto'
  */
-export interface ResolvedOptions extends Required<DepsConflictResolverOptions> {
+export interface ResolvedOptions extends Required<
+  Omit<DepsConflictResolverOptions, 'offline' | 'strict'>
+> {
+  offline?: boolean;
+  strict?: boolean;
   /**
    * 解析后的包管理器类型（已自动检测或用户指定）
    */
