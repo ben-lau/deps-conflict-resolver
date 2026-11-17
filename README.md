@@ -10,7 +10,7 @@
 
 ## 功能特性
 
-- 🔍 **递归依赖分析**：深度分析依赖树中的所有子依赖、孙依赖
+- 🔍 **递归依赖分析**：深度遍历依赖树中的所有子依赖、孙依赖，并按实际安装路径区分嵌套实例
 - 🎯 **智能冲突检测**：自动识别 peer 依赖与主工程的版本冲突
 - 📦 **自动别名安装**：为冲突的依赖创建别名并自动安装合适的版本
 - 🔄 **模块解析重定向**：在运行时自动将模块引用重定向到正确的别名版本
@@ -105,7 +105,7 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 | `projectRoot`      | `string`                              | `process.cwd()` | 项目根目录路径                                                                                                                                                                        |
 | `autoInstall`      | `boolean`                             | `true`          | 是否自动安装缺失的别名依赖                                                                                                                                                            |
 | `packageManager`   | `'auto' \| 'npm' \| 'yarn' \| 'pnpm'` | `'auto'`        | 包管理器类型，`'auto'` 自动检测                                                                                                                                                       |
-| `registry`         | `string`                              | 自动检测        | NPM 注册表地址，不指定则自动从 .npmrc 读取                                                                                                                                            |
+| `registry`         | `string`                              | 自动检测        | NPM 注册表地址；显式指定时同时用于版本查询和别名安装                                                                                                                                  |
 | `debug`            | `boolean`                             | `false`         | 是否启用调试日志                                                                                                                                                                      |
 | `aliasPrefix`      | `string`                              | `'aliased-'`    | 别名前缀                                                                                                                                                                              |
 | `excludeRedirects` | `Record<string, string[]>`            | `{}`            | 从重定向列表中排除特定包。键为原始包名，值为要排除的 importer 包名列表。示例：`{ vue: ['vue-demi', 'pinia'] }`                                                                        |
@@ -132,8 +132,10 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 1. 项目级 `.npmrc` 文件
 2. 用户级 `~/.npmrc` 文件
-3. yarn 项目的 `.yarnrc.yml` 文件
+3. pnpm 的用户级 `.pnpmrc` 或 yarn 项目的 `.yarnrc.yml` 文件
 4. 默认使用 `https://registry.npmjs.org`
+
+显式设置 `registry` 时会覆盖上述自动检测结果：解析器从该地址查询可用版本，包管理器安装别名时也使用同一地址。
 
 ## 工作原理
 
@@ -158,7 +160,7 @@ package-a
 
 ### 3. 版本解析
 
-从 npm 注册表获取可用版本列表，找到满足所有 peer 依赖范围的最佳版本：
+先检查项目或 workspace 中已经安装、且包名和版本都匹配的 npm alias。可复用的 alias 会直接离线使用，不访问 registry，也不会重复安装；只有未匹配的请求才从 registry 获取版本列表，并找到满足所有 peer 依赖范围的最佳版本：
 
 - `vue@^2.0.0` → 选择 `vue@2.7.14`
 - `vue-router@^3.0.0` → 选择 `vue-router@3.6.5`
@@ -186,12 +188,14 @@ import Vue from 'vue'; // → 解析到 vue (3.x)
 
 ### 行为边界
 
-- **冲突检测范围**：只检测用户指定的 `dependencies` 的第一层 `peerDependencies` 与主工程的版本冲突。子依赖的 `peerDependencies` 不触发别名安装。
-- **重定向范围**：声明冲突 peer 的包及其所有子依赖（`dependencies` + `peerDependencies` 递归）都会被收入重定向候选列表。冲突包自身（如 `vue`、`vue-router`）在收集时会被自动排除，避免主工程的同名引用被错误重定向。
+- **冲突检测范围**：只检测用户指定的 `dependencies` 的第一层 `peerDependencies` 与主工程的版本冲突。子依赖的 `peerDependencies` 会参与依赖图构建和运行时重定向判断，但不会单独触发别名安装。标记为 `optional: true` 的第一层 peer 会完全跳过，不产生冲突、missing 警告或 alias。
+- **重定向范围**：冲突 peer 的声明包及其 `dependencies`/`peerDependencies` 会递归加入重定向候选列表；冲突目标包自身（如 `vue`、`vue-router`）会被排除，避免主工程引用被误重定向。
+- **嵌套版本**：依赖图以规范化的实际安装目录为节点，并从所属包目录解析子依赖。同名但不同版本的嵌套实例会保留为不同节点，生成的重定向规则优先按 importer 路径匹配；因此 `excludeRedirects` 也会作用于具体实例及其子树，而不是简单按包名全局去重。
 - **`excludeRedirects`**：从重定向候选列表中剔除指定包，适用于运行时实际使用宿主 Vue 3 版本的共享包（如 `vue-demi`、`pinia`）。
 - **`includeRedirects`**：将指定包强制加入重定向列表，适用于 semver 范围写得过宽（如 `vue: ">=2.5.0"` 同时满足 Vue 2/3），但运行时仍需要使用旧版本的包。`includeRedirects` 在 `excludeRedirects` 之前应用。
-- **别名安装**：只为"主工程已声明且版本冲突"的依赖自动安装别名。未声明的 peer 依赖只会输出警告，不自动安装。
-- **依赖图去重**：依赖树遍历按包名去重（同名包只分析一次）。在极少数情况下，如同一包名存在多个不同版本的嵌套安装，只有第一个被解析到的版本会被分析。这对重定向结果的影响极小，因为重定向判断只基于包名匹配，不涉及版本。
+- **别名安装与复用**：只为“主工程已声明且版本冲突”的依赖自动安装别名；未声明的 peer 依赖只输出警告，不自动安装。已安装且身份/版本匹配的 local 或 workspace alias 会复用（无需 registry 和安装）；声明但尚未安装的 workspace alias 不算可复用。已有目录身份或版本不匹配时会报告 alias collision，并保持原目录不变，不原地覆盖。
+- **Registry**：`registry` 显式配置同时约束远程版本查询和包管理器安装；未配置时才按项目/用户配置自动检测。
+- **初始化失败策略**：核心 `createResolver()` 与 Vite 插件会把初始化错误交给调用方；Webpack 插件保持 fail-open，初始化或模块解析失败只记录错误并继续编译（该轮不会应用 alias）。Webpack watch 每次 `watchRun` 会先失效旧 generation，再等待新分析；新一轮失败时仍可在后续 watch 周期重试。
 
 ## 高级用法
 
@@ -206,9 +210,9 @@ depsConflictResolverVitePlugin({
       console.log('Found conflicts:', result.peerConflicts);
     },
 
-    // 安装完成后
-    onInstallComplete: (installed) => {
-      console.log('Installed aliases:', installed);
+    // 安装尝试完成后
+    onInstallComplete: (mappings) => {
+      console.log('Alias mappings after install attempt:', mappings);
     },
 
     // 自定义模块解析
@@ -222,6 +226,8 @@ depsConflictResolverVitePlugin({
   },
 });
 ```
+
+`onInstallComplete` 在安装尝试结束后触发；其参数是本轮分析得到的 alias mappings，并不表示每个 mapping 都已成功安装（已复用、已安装和失败项需结合日志或安装结果判断）。
 
 ### 精细控制重定向范围（includeRedirects + excludeRedirects）
 
@@ -250,7 +256,7 @@ new DepsConflictResolverWebpackPlugin({
 
 ### 复用已有别名
 
-如果项目中已经安装了合适版本的别名（如 `vue2@npm:vue@2.6.14`），插件会自动检测并复用，不会重复安装。
+如果项目中已经安装了合适版本的别名（如 `vue2@npm:vue@2.6.14`），插件会在访问 registry 前自动检测并复用，不会重复安装；workspace alias 只有在实际安装且包名/版本验证通过时才会复用。若现有目录不匹配，插件会报告冲突并保留原目录。
 
 ## API 参考
 
