@@ -39,6 +39,80 @@ afterEach(() => {
 });
 
 describe('optimizer adapters', () => {
+  it('applies SSR externals to nested esbuild requests while preserving whitelist and entry points', async () => {
+    const { root, resolver, importer } = await fixture();
+    const resolve = vi.fn(async (_source: string, _importer: string, isRequire: boolean) =>
+      isRequire ? '/nested/native.cjs' : 'data:text/javascript,export{}',
+    );
+    const isExternal = vi.fn((name: string) => name !== '@scope/allowed');
+    const options = createOptimizerOptions(resolver, root, '7.3.5', { isExternal, resolve });
+    let callback!: (args: OnResolveArgs) => Promise<OnResolveResult | null>;
+    await options.esbuildOptions!.plugins[1]!.setup({
+      onResolve(_options: unknown, handler: typeof callback) {
+        callback = handler;
+      },
+    } as unknown as PluginBuild);
+    const args = {
+      path: '@scope/native/subpath',
+      importer,
+      kind: 'require-call',
+      namespace: 'file',
+      resolveDir: root,
+      pluginData: undefined,
+      with: {},
+    } as OnResolveArgs;
+    expect(await callback(args)).toEqual({ path: '/nested/native.cjs', external: true });
+    expect(isExternal).toHaveBeenCalledWith('@scope/native');
+    expect(resolve).toHaveBeenCalledWith(args.path, importer, true);
+    expect(await callback({ ...args, kind: 'import-statement' })).toEqual({
+      path: 'data:text/javascript,export{}',
+      external: true,
+    });
+    const calls = resolve.mock.calls.length;
+    for (const path of [
+      '@scope/allowed/subpath',
+      './relative.js',
+      '/absolute.js',
+      '\0virtual',
+      'virtual:module',
+      'node:fs',
+      '#private',
+    ]) {
+      expect(await callback({ ...args, path })).toBeNull();
+    }
+    expect(await callback({ ...args, importer: '', kind: 'entry-point' })).toBeNull();
+    expect(resolve).toHaveBeenCalledTimes(calls);
+    expect(createOptimizerOptions(resolver, root, '7.3.5').esbuildOptions!.plugins).toHaveLength(1);
+  });
+
+  it('preserves require/import kinds for native Rolldown SSR externals', async () => {
+    const { root, resolver, importer } = await fixture();
+    const resolve = vi.fn(async (_source: string, _importer: string, isRequire: boolean) =>
+      isRequire ? '/nested/native.cjs' : 'data:text/javascript,export{}',
+    );
+    const options = createOptimizerOptions(resolver, root, '8.3.8', {
+      isExternal: (name) => name !== 'allowed',
+      resolve,
+    });
+    const hook = options.rolldownOptions!.plugins[1]!.resolveId;
+    if (typeof hook !== 'function') throw new Error('Expected resolveId function');
+    const context = {} as ThisParameterType<typeof hook>;
+    const request = { isEntry: false, attributes: {}, custom: undefined, kind: 'require-call' };
+    expect(await hook.call(context, 'native-addon', importer, request)).toEqual({
+      id: '/nested/native.cjs',
+      external: true,
+    });
+    expect(resolve).toHaveBeenCalledWith('native-addon', importer, true);
+    expect(
+      await hook.call(context, 'native-addon', importer, { ...request, kind: 'import-statement' }),
+    ).toEqual({ id: 'data:text/javascript,export{}', external: true });
+    expect(resolve).toHaveBeenLastCalledWith('native-addon', importer, false);
+    expect(await hook.call(context, 'allowed/subpath', importer, request)).toBeNull();
+    expect(
+      await hook.call(context, 'native-addon', undefined, { ...request, isEntry: true }),
+    ).toBeNull();
+  });
+
   it('preserves esbuild resolution metadata for a redirected request', async () => {
     const { root, resolver, importer } = await fixture();
     let callback:
