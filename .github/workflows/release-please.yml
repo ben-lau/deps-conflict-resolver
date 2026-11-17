@@ -85,7 +85,9 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "a929b73ff230dd9b69779c11cae6d4267c038a5c"
           test "$(node -p "require('./package.json').version")" = "1.1.1"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
           package_version=$(tar -xOf "$RUNNER_TEMP"/release-package/*.tgz package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
           test "$package_version" = "1.1.1"
       - run: npm i -g npm@latest
-      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance --registry=https://registry.npmjs.org/
+      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance --registry=https://registry.npmjs.org/ --loglevel=verbose
