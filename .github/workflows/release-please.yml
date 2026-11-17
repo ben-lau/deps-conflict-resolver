@@ -2,14 +2,20 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/staged-release]
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
+  verify:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify-release.yml
+
   release-please:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -21,6 +27,7 @@ jobs:
       - uses: googleapis/release-please-action@v5
         id: release
         with:
+          target-branch: ${{ github.ref_name }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -33,14 +40,23 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: actions/setup-node@v6
         with:
           node-version-file: '.node-version'
           registry-url: https://registry.npmjs.org/
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-package
+      - name: Verify the tag is the tested commit
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "v$(node -p "require('./package.json').version")" = "$RELEASE_TAG"
+          package_version=$(tar -xOf "$RUNNER_TEMP"/release-package/*.tgz package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          test "v$package_version" = "$RELEASE_TAG"
       - run: npm i -g npm@latest
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm publint
-      - run: pnpm attw
-      - run: npm publish --provenance
+      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance

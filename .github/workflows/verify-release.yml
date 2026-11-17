@@ -1,0 +1,86 @@
+name: Verify Release
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.node-version'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm lint
+      - run: pnpm fmt:check
+      - run: pnpm typecheck
+      - run: pnpm publint
+      - run: pnpm exec attw --pack --entrypoints . ./vite ./webpack
+      - name: Pack the candidate
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-package"
+          pnpm pack --pack-destination "$RUNNER_TEMP/release-package"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-package/*.tgz
+          if-no-files-found: error
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:run
+
+  consumer:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { node-version: 18, vite-version: '4.0.0' }
+          - { node-version: 22, vite-version: '4.0.0' }
+          - { node-version: 22, vite-version: '5' }
+          - { node-version: 22, vite-version: '6' }
+          - { node-version: 22, vite-version: '7' }
+          - { node-version: 22, vite-version: '8' }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release-package
+      - name: Install the packed package and Vite
+        run: >-
+          npm install --prefix "$RUNNER_TEMP/release-consumer"
+          --ignore-scripts --no-audit --no-fund --package-lock=false
+          "$RUNNER_TEMP"/release-package/*.tgz "vite@${{ matrix.vite-version }}"
+      - name: Load all public entry points as ESM and CommonJS
+        working-directory: ${{ runner.temp }}/release-consumer
+        run: |
+          node --input-type=module -e "for (const name of ['deps-conflict-resolver', 'deps-conflict-resolver/vite', 'deps-conflict-resolver/webpack']) await import(name)"
+          node -e "for (const name of ['deps-conflict-resolver', 'deps-conflict-resolver/vite', 'deps-conflict-resolver/webpack']) require(name)"
+      - name: Build a consumer with conflicting Vue versions
+        run: node tests/compat/vite-release.mjs "$RUNNER_TEMP/release-consumer"
