@@ -75,7 +75,7 @@ jobs:
       - name: Install the packed package and Vite
         run: >-
           npm install --prefix "$RUNNER_TEMP/release-consumer"
-          --ignore-scripts --no-audit --no-fund --package-lock=false
+          --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact
           "$RUNNER_TEMP"/release-package/*.tgz "vite@${{ matrix.vite-version }}"
       - name: Load all public entry points as ESM and CommonJS
         working-directory: ${{ runner.temp }}/release-consumer
@@ -84,3 +84,14 @@ jobs:
           node -e "for (const name of ['deps-conflict-resolver', 'deps-conflict-resolver/vite', 'deps-conflict-resolver/webpack']) require(name)"
       - name: Build a consumer with conflicting Vue versions
         run: node tests/compat/vite-release.mjs "$RUNNER_TEMP/release-consumer"
+      - name: Verify optimizer and SSR compatibility when available
+        if: ${{ matrix.node-version == 22 }}
+        run: |
+          if [ -f tests/compat/vite.mjs ]; then
+            npm install --prefix "$RUNNER_TEMP/release-consumer" --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact "vite@${{ matrix.vite-version }}" vue@3.5.18 vue2@npm:vue@2.7.16
+            ln -s "$RUNNER_TEMP/release-consumer/node_modules" node_modules
+            mkdir -p "$RUNNER_TEMP/unpacked-release"
+            tar -xzf "$RUNNER_TEMP"/release-package/*.tgz -C "$RUNNER_TEMP/unpacked-release"
+            cp -R "$RUNNER_TEMP/unpacked-release/package/dist" dist
+            node tests/compat/vite.mjs "$RUNNER_TEMP/release-consumer"
+          fi
