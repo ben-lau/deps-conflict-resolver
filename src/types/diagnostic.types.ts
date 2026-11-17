@@ -1,6 +1,7 @@
 /** A problem the caller can inspect without parsing log messages. */
 export interface ResolverDiagnostic {
   code:
+    | 'PROJECT_STATE_CHANGED'
     | 'DEPENDENCY_NOT_FOUND'
     | 'PEER_NOT_DECLARED'
     | 'PEER_NOT_INSTALLED'

@@ -1707,12 +1707,33 @@ export class DependencyAnalyzer {
 /**
  * 创建依赖分析器实例
  */
-export function createDependencyAnalyzer(options: ResolvedOptions): DependencyAnalyzer {
+export function createDependencyAnalyzer(
+  options: ResolvedOptions,
+  preparedAliases: readonly AliasMapping[] = [],
+): DependencyAnalyzer {
   const mainPackageJson = readPackageJsonCached(options.projectRoot);
   if (!mainPackageJson) {
     throw new Error(`Could not read package.json at ${options.projectRoot}`);
   }
 
-  // 不预先扫描 node_modules，按需查找包
-  return new DependencyAnalyzer(options, mainPackageJson);
+  // Package managers may be configured not to save dependencies. Keep aliases
+  // verified by this preparation available to the fresh analysis, while still
+  // checking their actual installed identity and honoring real declarations.
+  const declared = {
+    ...mainPackageJson.dependencies,
+    ...mainPackageJson.devDependencies,
+    ...mainPackageJson.optionalDependencies,
+  };
+  const additional = Object.fromEntries(
+    preparedAliases
+      .filter((mapping) => !Object.hasOwn(declared, mapping.aliasName))
+      .map((mapping) => [
+        mapping.aliasName,
+        'npm:' + mapping.originalName + '@' + mapping.resolvedVersion,
+      ]),
+  );
+  return new DependencyAnalyzer(options, {
+    ...mainPackageJson,
+    devDependencies: { ...additional, ...mainPackageJson.devDependencies },
+  });
 }
