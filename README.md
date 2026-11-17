@@ -137,6 +137,18 @@ const resolved = resolver.resolveModule('vue', '/path/to/importer.js');
 
 显式设置 `registry` 时会覆盖上述自动检测结果：解析器从该地址查询可用版本，包管理器安装别名时也使用同一地址。
 
+## 命令行诊断与准备
+
+可以先诊断依赖冲突，再显式安装需要的别名，并在 CI 中离线校验：
+
+```bash
+pnpm exec deps-conflict-resolver doctor legacy-lib --json
+pnpm exec deps-conflict-resolver prepare legacy-lib
+pnpm exec deps-conflict-resolver doctor legacy-lib --offline --strict --json
+```
+
+`doctor` 不执行安装；未指定包名时会检查项目的运行时依赖和已安装的可选依赖。`prepare` 需要指定包名，并通过项目包管理器更新依赖清单和锁文件。`--json` 输出包含诊断、别名和安装结果的结构化报告。建议提交准备过程产生的清单和锁文件，并在 CI 中先执行冻结安装。
+
 ## 严格模式与离线解析
 
 `offline: true` 只复用经过验证的已安装别名，不查询 registry，也不执行安装；单独设置 `autoInstall: false` 不会禁止版本查询。`strict: true` 会在必要依赖未解决、安装失败或实际解析存在歧义时报告错误。两者默认均为 `false`。
