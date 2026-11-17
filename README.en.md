@@ -180,6 +180,10 @@ depsConflictResolverVitePlugin({
 
 The default is `ssr: 'manual'`. Explicit `ssr.external` entries and SSR optimization exclusions retain Vite's precedence; avoid excluding packages that require redirection. When `projectRoot` is omitted, the plugin uses the final configured Vite `root`.
 
+## Webpack Watch and Linked Dependencies
+
+Webpack watch tracks package manifests consulted during analysis and re-resolves affected modules when redirects change, while retaining unrelated module caches. Redirects from linked and workspace packages resolve from the host while preserving package `exports` and `import`/`require` conditions.
+
 ## How It Works
 
 ### 1. Dependency Analysis
