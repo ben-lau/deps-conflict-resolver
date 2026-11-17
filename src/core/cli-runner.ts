@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { DepsConflictResolver } from './resolver';
-import { findProjectRoot, readPackageJsonCached } from '../utils/fs';
+import { findPackagePath, findProjectRoot, readPackageJsonCached } from '../utils/fs';
 import { createLogger, LogLevel } from '../utils/logger';
 import { ResolutionError } from './resolution-error';
 
@@ -94,6 +94,11 @@ export async function runCli(
           ? packages
           : Object.keys(runtimeDependencies)
               .filter((name) => !runtimeDependencies[name]?.startsWith('npm:'))
+              .filter(
+                (name) =>
+                  !Object.hasOwn(manifest.optionalDependencies ?? {}, name) ||
+                  findPackagePath(name, projectRoot) !== null,
+              )
               .sort(),
       ),
     ];
