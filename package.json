@@ -26,6 +26,9 @@
     "type": "git",
     "url": "git+https://github.com/ben-lau/deps-conflict-resolver.git"
   },
+  "bin": {
+    "deps-conflict-resolver": "./dist/cli.js"
+  },
   "files": [
     "dist"
   ],
