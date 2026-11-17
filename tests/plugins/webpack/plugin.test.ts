@@ -183,6 +183,19 @@ describe('Webpack Plugin', () => {
         expect(plugin.isInitialized()).toBe(true);
       });
 
+      it('propagates initialization failures in strict mode', async () => {
+        mockResolverInstance.initialize.mockRejectedValue(new Error('unresolved peer'));
+        const plugin = new DepsConflictResolverWebpackPlugin({
+          dependencies: ['legacy'],
+          strict: true,
+        });
+        const compiler = createMockCompiler();
+        plugin.apply(compiler as unknown as Compiler);
+        const beforeRun = compiler.hooks.beforeRun.tapPromise.mock.calls[0]![1];
+        await expect(beforeRun()).rejects.toThrow('unresolved peer');
+        expect(plugin.isInitialized()).toBe(false);
+      });
+
       it('should refresh the resolver before each watch compilation', async () => {
         const events: string[] = [];
         mockResolverInstance.initialize.mockImplementation(async () => {

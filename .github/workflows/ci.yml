@@ -88,6 +88,29 @@ jobs:
           files: coverage/lcov.info
           fail_ci_if_error: false
 
+  vite-compat:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        vite-version: ['4.0.0', '5', '6', '7', '8']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Install isolated Vite version
+        run: npm install --prefix "$RUNNER_TEMP/deps-vite" "vite@${{ matrix.vite-version }}" --ignore-scripts --no-audit --no-fund --package-lock=false
+      - name: Verify cold optimizer and SSR runtime identities
+        run: node tests/compat/vite.mjs "$RUNNER_TEMP/deps-vite"
+
   quality:
     needs: build
     runs-on: ubuntu-latest

@@ -167,6 +167,19 @@ console.log(resolver.explainResolution('vue', '/absolute/path/to/legacy-lib/inde
 
 诊断包含稳定的错误代码；严格模式初始化失败时可捕获导出的 `ResolutionError` 并读取其 `diagnostics`。
 
+## Vite 服务端渲染
+
+Vite 插件支持 Vite 4–7 的 esbuild 预构建和 Vite 8 的原生 Rolldown。设置 `ssr: 'auto'` 可将需要重定向的包和有效别名加入 SSR 构建及开发预构建：
+
+```typescript
+depsConflictResolverVitePlugin({
+  dependencies: ['legacy-lib'],
+  ssr: 'auto',
+});
+```
+
+默认值为 `ssr: 'manual'`。显式 `ssr.external` 和 SSR 优化排除项仍遵循 Vite 的优先级；需要重定向的包不应同时被排除。未指定 `projectRoot` 时，插件使用最终 Vite 配置的 `root`。
+
 ## 工作原理
 
 ### 1. 依赖分析
