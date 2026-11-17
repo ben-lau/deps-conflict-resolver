@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main, codex/staged-release]
+    branches: [main, staged-release]
 
 concurrency:
   group: release
