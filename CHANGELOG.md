@@ -5,7 +5,8 @@
 
 ### Bug Fixes
 
-* **core:** verify installed aliases before accepting success ([487abc3](https://github.com/ben-lau/deps-conflict-resolver/commit/487abc359b33f5bf213acd00b28955f8475ea0f0))
+* **core:** resolve dependency conflicts using package paths and importer-specific dependency graphs ([a29b629](https://github.com/ben-lau/deps-conflict-resolver/commit/a29b629))
+* **core:** preserve root-visible dependencies and scoped include rules ([70c3721](https://github.com/ben-lau/deps-conflict-resolver/commit/70c3721))
 
 ## [1.1.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.1.0...v1.1.1) (2026-11-17)
 
