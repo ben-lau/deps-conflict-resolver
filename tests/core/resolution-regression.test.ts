@@ -1,22 +1,25 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  mkdirSync,
   mkdtempSync,
+  mkdirSync,
+  writeFileSync,
   readFileSync,
+  rmSync,
   realpathSync,
   renameSync,
-  rmSync,
   symlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ResolutionError } from '../../src/core/resolution-error';
+import { resolveConfig } from 'vite';
+import { createRequire } from 'node:module';
 import { createResolver } from '../../src/core/resolver';
-import type { PackageJson } from '../../src/types';
+import { ResolutionError } from '../../src/core/resolution-error';
 import { npmRegistryClient } from '../../src/core/registry-client';
+import { depsConflictResolverVitePlugin } from '../../src/plugins/vite';
 import { clearPackageJsonCache } from '../../src/utils/fs';
 import { resetGlobalLogLevel } from '../../src/utils/logger';
+import type { AnalysisResult, PackageJson } from '../../src/types';
 
 const roots: string[] = [];
 
@@ -295,6 +298,32 @@ describe('diagnostics and deterministic offline operation', () => {
     expect(resolver.getDiagnostics()).toEqual([]);
     expect(resolver.getAnalysisResult()!.aliasMappings[0]!.usedBy).toEqual(['a', 'b']);
     expect(resolver.resolveModule('vue', join(physical, 'index.js'))).toBe('vue2');
+  });
+
+  it('reuses the current hoisted alias target on the first offline refresh', async () => {
+    const root = project({
+      workspaces: ['packages/*'],
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@^2' },
+    });
+    const legacy = pkg(root, 'legacy', { peerDependencies: { vue: '^2' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    const old = pkg(root, 'store-old', { name: 'vue', version: '2.6.14' });
+    const fresh = pkg(root, 'store-new', { name: 'vue', version: '2.7.16' });
+    const link = join(root, 'node_modules/vue2');
+    symlinkSync(old, link, 'junction');
+    const app = join(root, 'packages/app');
+    mkdirSync(app, { recursive: true });
+    writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'app' }));
+    createRequire(join(app, 'package.json')).resolve('vue2/package.json');
+    const resolver = await createResolver({ ...baseOptions(app), offline: true, strict: true });
+    expect(resolver.getAnalysisResult()!.aliasMappings[0]!.resolvedVersion).toBe('2.6.14');
+    rmSync(link);
+    symlinkSync(fresh, link, 'junction');
+    resolver.invalidate();
+    await resolver.initialize();
+    expect(resolver.getAnalysisResult()!.aliasMappings[0]!.resolvedVersion).toBe('2.7.16');
+    expect(resolver.getAliasPathMappings()[0]!.path).toBe(fresh);
+    expect(resolver.resolveModule('vue', join(legacy, 'index.js'))).toBe('vue2');
   });
 
   it.each([
@@ -751,5 +780,30 @@ describe('resolution correctness with installed packages', () => {
     );
     expect(resolver.resolveModule('vue', join(renderer, 'index.js'))).toBe('vue3');
     expect(resolver.getDiagnostics()).toEqual([]);
+  });
+
+  it('inherits the Vite root when no plugin projectRoot is supplied', async () => {
+    const root = project({
+      dependencies: { legacy: '1.0.0', vue: '3.5.0', vue2: 'npm:vue@2.7.16' },
+    });
+    pkg(root, 'legacy', { peerDependencies: { vue: '^2.0.0' } });
+    pkg(root, 'vue', { version: '3.5.0' });
+    pkg(root, 'vue2', { name: 'vue', version: '2.7.16' });
+    let analysis: AnalysisResult | undefined;
+    const plugin = depsConflictResolverVitePlugin({
+      dependencies: ['legacy'],
+      autoInstall: false,
+      hooks: {
+        onAnalysisComplete: (result) => {
+          analysis = result;
+        },
+      },
+    });
+    await resolveConfig(
+      { root, configFile: false, logLevel: 'silent', plugins: [plugin] },
+      'build',
+    );
+
+    expect(analysis?.aliasMappings.map((mapping) => mapping.aliasName)).toEqual(['vue2']);
   });
 });
