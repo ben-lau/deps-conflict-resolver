@@ -36,7 +36,7 @@
 
 **方案**：复用前读取 alias 目录的 `package.json`，同时校验真实包名和版本。安装器遇到缺失/无效元数据、包名不匹配或版本不匹配时，返回结构化的 `ALIAS_NAME_OCCUPIED` collision，标记该 alias 失败且不调用包管理器；已有目录保持不变。只有身份和版本都匹配时才复用。
 
-**教训**：安装操作必须是非破坏性的；遇到占用或不确定状态应报告冲突并 fail closed，而不是静默覆盖。别名名称对所有项目/workspace 依赖键的预留属于后续改进，不能把当前的名称后缀策略描述成完整的所有权保证。
+**教训**：安装操作必须是非破坏性的；遇到占用或不确定状态应报告冲突并 fail closed，而不是静默覆盖。生成名称时已预留当前工程与 workspace 根 dependencies/devDependencies/optionalDependencies 的键；安装前后仍需校验实际包身份，不能仅凭名称认为资源属于本库。
 
 ### 5. optional peerDependencies 应排除在冲突和 missing 报告之外
 
@@ -95,7 +95,7 @@
 - 若进程组仍未退出，再发送 SIGKILL（Windows 使用 `taskkill /pid <pid> /t /f`）
 - 以子进程 `close` 事件作为最终完成信号，`settled`/`closeSeen` 只负责保证 Promise 单次完成
 
-这个计时器约束的是 alias 安装子进程，不应被表述为覆盖 registry 响应体读取或 `response.json()`；后者仍是独立的 registry-client 后续改进项。
+这个计时器约束的是 alias 安装子进程，不应被表述为覆盖 registry 响应体读取或 `response.json()`；registry-client 已为 fetch 与响应体读取共用一个 AbortController 和时间预算；两套超时机制相互独立。
 
 **教训**：外部进程必须有超时和优雅降级；超时结果应在子进程真正退出后报告，不能用 `child.killed` 或提前 resolve 代替完成信号。
 
@@ -132,7 +132,7 @@ Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 
 
 **问题**：esbuild 0.17+ 提供了 `build.resolve` API，但更早版本没有。直接调用会在旧版 esbuild 上崩溃。
 
-**方案**：运行时检测 `typeof build.resolve === 'function'`，旧版使用 fallback 路径返回 `{ path, resolveDir }`。
+**方案**：运行时检测 `typeof build.resolve === 'function'`，旧版降级为从工程根目录进行 Node 解析；Vite 8 使用原生 Rolldown resolveId 适配，而非依赖 esbuild 插件的兼容转换。
 
 ### 14. Vite 插件在 dev/build 模式下应可独立开关
 
@@ -182,7 +182,7 @@ Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 
 
 **问题**：入口开启 debug 模式后，子模块各自创建的 logger 实例仍然使用默认 INFO 级别，导致关键调试信息不输出。
 
-**方案**：logger 使用模块级可变的全局级别变量，所有 logger 实例共享。支持位运算组合选择性输出。
+**方案**：logger 使用模块级可变的全局级别变量，所有 logger 实例共享。debug=true 应设置 ALL，在添加调试信息时保留 warn/error；仅设置 DEBUG 会意外隐藏其他级别。命令行 JSON 报告会关闭库日志，避免污染输出。
 
 ### 21. semver 操作必须 try/catch
 
@@ -200,7 +200,7 @@ Registry 同理：显式 `registry` 选项优先；否则按项目 `.npmrc` → 
 2. 完整版本后缀：`aliased-vue-2-6-14`
 3. 数字计数器：`aliased-vue2-2`
 
-安装器仍会在落盘前验证实际包名/版本；即使目录已被其他包占用，也只报告 `ALIAS_NAME_OCCUPIED` 并保留原目录。当前名称候选集合主要来自已有 local/workspace alias；将项目和 workspace 的所有依赖键纳入预留集合、避免生成阶段撞上无关依赖，是后续 alias-ownership 工作，不能在文档中承诺已经完成。
+安装器仍会在落盘前验证实际包名/版本；即使目录已被其他包占用，也只报告 `ALIAS_NAME_OCCUPIED` 并保留原目录。名称候选集合已包含当前工程和 workspace 根 dependencies/devDependencies/optionalDependencies 的键。实际目录占用仍由安装前后校验处理；退出码成功而无法找到有效 alias 时也应报告失败。
 
 ### 23. 双重初始化应为 no-op
 

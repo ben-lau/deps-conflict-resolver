@@ -2,13 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
-    branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build:
@@ -108,7 +107,7 @@ jobs:
           path: dist/
       - name: Install isolated Vite version
         run: npm install --prefix "$RUNNER_TEMP/deps-vite" "vite@${{ matrix.vite-version }}" --ignore-scripts --no-audit --no-fund --package-lock=false
-      - name: Verify cold optimizer and SSR runtime identities
+      - name: Verify cold optimizer, SSR build and ESM/CommonJS SSR dev identities
         run: node tests/compat/vite.mjs "$RUNNER_TEMP/deps-vite"
 
   quality:
@@ -128,3 +127,102 @@ jobs:
           path: dist/
       - run: pnpm publint
       - run: pnpm attw
+
+  preview:
+    needs: [build, lint, typecheck, unit-test, vite-compat, quality]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-preview.yml
+
+  preview-comment:
+    needs: preview
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: main-preview-comment
+      cancel-in-progress: false
+    steps:
+      - name: Find the current pending release PR
+        id: release-pr
+        uses: actions/github-script@v9
+        env:
+          PREVIEW_SHA: ${{ needs.preview.outputs.sha }}
+        with:
+          script: |
+            const sha = process.env.PREVIEW_SHA;
+            const isCurrentMain = async () => {
+              const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'main' });
+              return branch.commit.sha === sha;
+            };
+            if (!(await isCurrentMain())) return;
+
+            // Release Please runs in parallel. Wait briefly for its job so a
+            // newly created release PR is available before posting the link.
+            const deadline = Date.now() + 120_000;
+            let releaseJobFinished = false;
+            while (Date.now() < deadline) {
+              const { data: runs } = await github.rest.actions.listWorkflowRuns({
+                ...context.repo,
+                workflow_id: 'release-please.yml',
+                branch: 'main',
+                event: 'push',
+                head_sha: sha,
+                per_page: 20,
+              });
+              if (runs.workflow_runs.length) {
+                const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                  ...context.repo,
+                  run_id: runs.workflow_runs[0].id,
+                  per_page: 100,
+                });
+                const releaseJob = data.jobs.find((job) => job.name === 'release-please');
+                if (releaseJob?.status === 'completed') {
+                  releaseJobFinished = true;
+                  break;
+                }
+              }
+              await new Promise((resolve) => setTimeout(resolve, 10_000));
+            }
+            if (!releaseJobFinished) core.warning('Release Please did not finish in time; checking for an existing release PR.');
+            if (!(await isCurrentMain())) return;
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              ...context.repo,
+              state: 'open',
+              base: 'main',
+              head: `${context.repo.owner}:release-please--branches--main`,
+              per_page: 100,
+            });
+            const pr = prs.find((item) => item.labels.some((label) => label.name === 'autorelease: pending'));
+            core.setOutput('number', pr?.number || '');
+            if (!pr) core.info('No pending release PR; copy installation commands from the preview job summary.');
+      - uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        if: steps.release-pr.outputs.number != ''
+        with:
+          number: ${{ steps.release-pr.outputs.number }}
+          header: deps-conflict-resolver-preview
+          skip_unchanged: true
+          message: |
+            ## main 预览包
+
+            本次通过 CI 的提交：`${{ needs.preview.outputs.sha }}`
+
+            ```sh
+            pnpm add -D https://pkg.pr.new/${{ github.repository }}/deps-conflict-resolver@main
+            ```
+
+            <details>
+            <summary>固定本次提交的安装命令</summary>
+
+            ```sh
+            pnpm add -D https://pkg.pr.new/${{ github.repository }}/deps-conflict-resolver@${{ needs.preview.outputs.sha }}
+            ```
+            </details>
+
+            `@main` 可能仍指向较早的成功构建；新提交后请先确认 [CI](${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml?query=branch%3Amain) 成功。需要复现时请使用固定 SHA 的链接。
