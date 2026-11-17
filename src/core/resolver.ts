@@ -322,15 +322,15 @@ export class DepsConflictResolver {
       });
     }
     const completedNames = new Set(completedMappings.map((mapping) => mapping.aliasName));
-    this.analysisResult.diagnostics = this.analysisResult.diagnostics?.filter(
-      (diagnostic) =>
-        !(
-          ['ALIAS_METADATA_UNAVAILABLE', 'ALIAS_PEER_UNSATISFIED'].includes(diagnostic.code) &&
-          [...(diagnostic.aliases ?? []), ...(diagnostic.requestedBy ?? [])].some((name) =>
-            completedNames.has(name),
-          )
-        ),
-    );
+    this.analysisResult.diagnostics = this.analysisResult.diagnostics?.filter((diagnostic) => {
+      const owners =
+        diagnostic.code === 'ALIAS_METADATA_UNAVAILABLE'
+          ? diagnostic.aliases
+          : ['ALIAS_PEER_UNSATISFIED', 'AMBIGUOUS_IMPORTER'].includes(diagnostic.code)
+            ? diagnostic.requestedBy
+            : undefined;
+      return !owners?.some((name) => completedNames.has(name));
+    });
     await linkAliasPeers(
       completedMappings,
       { ...this.options, offline: true },

@@ -243,6 +243,70 @@ describe('resolution correctness with installed packages', () => {
     expect(resolver.resolveModule('vue', join(renderer, 'index.js'))).toBe('vue3');
   });
 
+  it.each(['host', 'nested'])(
+    'keeps a compatible %s provider ahead of another consumer alias',
+    async (provider) => {
+      const root = project({
+        dependencies: {
+          a: '1.0.0',
+          b: '1.0.0',
+          renderer: '2.0.0',
+          runtime: '3.0.0',
+          renderer1: 'npm:renderer@1.0.0',
+          runtime2: 'npm:runtime@2.0.0',
+        },
+      });
+      const a = pkg(root, 'a', { peerDependencies: { renderer: '^1', runtime: '^3' } });
+      pkg(root, 'b', { peerDependencies: { runtime: '^2' } });
+      pkg(root, 'renderer', { version: '2.0.0' });
+      pkg(root, 'runtime', { version: '3.0.0' });
+      const renderer = pkg(root, 'renderer1', {
+        name: 'renderer',
+        version: '1.0.0',
+        peerDependencies: { runtime: '>=2' },
+      });
+      pkg(root, 'runtime2', { name: 'runtime', version: '2.0.0' });
+      if (provider === 'nested') pkg(renderer, 'runtime', { version: '2.5.0' });
+
+      const resolver = await createResolver({
+        ...baseOptions(root, ['a', 'b']),
+        offline: true,
+        strict: true,
+      });
+      expect(resolver.resolveModule('runtime', join(a, 'index.js'))).toBeNull();
+      expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBeNull();
+      expect(resolver.getDiagnostics()).toEqual([]);
+    },
+  );
+
+  it('keeps the consumer peer alias ahead of a compatible host provider', async () => {
+    const root = project({
+      dependencies: {
+        a: '1.0.0',
+        renderer: '2.0.0',
+        runtime: '3.0.0',
+        renderer1: 'npm:renderer@1.0.0',
+        runtime2: 'npm:runtime@2.0.0',
+      },
+    });
+    pkg(root, 'a', { peerDependencies: { renderer: '^1', runtime: '^2' } });
+    pkg(root, 'renderer', { version: '2.0.0' });
+    pkg(root, 'runtime', { version: '3.0.0' });
+    const renderer = pkg(root, 'renderer1', {
+      name: 'renderer',
+      version: '1.0.0',
+      peerDependencies: { runtime: '>=2' },
+    });
+    pkg(root, 'runtime2', { name: 'runtime', version: '2.0.0' });
+
+    const resolver = await createResolver({
+      ...baseOptions(root, ['a']),
+      offline: true,
+      strict: true,
+    });
+    expect(resolver.resolveModule('runtime', join(renderer, 'index.js'))).toBe('runtime2');
+  });
+
   it('includes installed optional runtime dependencies and host optional declarations', async () => {
     const root = project({
       dependencies: { legacy: '1.0.0', vue2: 'npm:vue@2.7.16' },

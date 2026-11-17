@@ -10,6 +10,7 @@ interface PeerLinkOptions {
   projectRoot: string;
   registry: string;
   offline?: boolean;
+  autoInstall?: boolean;
 }
 
 function actualPath(path: string): string {
@@ -90,6 +91,9 @@ export async function linkAliasPeers(
     if (workspaceRoot) importerPaths.add(join(workspaceRoot, 'node_modules', importer.aliasName));
     const installedPath = installedPaths.get(importer);
     if (installedPath) importerPaths.add(actualPath(installedPath));
+    // Registry manifests describe peers, but only installation establishes
+    // nested providers. Do not reject an install that can supply those peers.
+    const pendingInstallation = !installedPath && options.autoInstall && importer.installSpec;
 
     for (const [peerName, range] of Object.entries(manifest.peerDependencies ?? {})) {
       if (manifest.peerDependenciesMeta?.[peerName]?.optional) continue;
@@ -102,7 +106,15 @@ export async function linkAliasPeers(
       const sharedContexts = candidates.filter((candidate) =>
         candidate.usedBy.some((consumer) => importer.usedBy.includes(consumer)),
       );
-      if (sharedContexts.length > 0) candidates = sharedContexts;
+      if (sharedContexts.length > 0) {
+        candidates = sharedContexts;
+      } else {
+        // A foreign consumer's alias is only a fallback. Preserve a compatible
+        // provider visible from this package instead of crossing peer contexts.
+        const naturalPath = findPackagePath(peerName, installedPath ?? options.projectRoot);
+        const natural = naturalPath ? readPackageJsonCached(naturalPath) : null;
+        if (natural?.version && satisfies(natural.version, range)) continue;
+      }
 
       if (candidates.length === 1) {
         const peer = candidates[0]!;
@@ -119,7 +131,7 @@ export async function linkAliasPeers(
       if (candidates.length > 1) {
         diagnostics.push({
           code: 'AMBIGUOUS_IMPORTER',
-          severity: 'error',
+          severity: pendingInstallation ? 'warning' : 'error',
           packageName: peerName,
           aliases: candidates.map((candidate) => candidate.aliasName).sort(),
           requestedBy: [importer.aliasName],
@@ -135,23 +147,21 @@ export async function linkAliasPeers(
         continue;
       }
 
-      const naturalPath = findPackagePath(peerName, installedPath ?? options.projectRoot);
-      const natural = naturalPath ? readPackageJsonCached(naturalPath) : null;
-      if (!natural?.version || !satisfies(natural.version, range)) {
-        diagnostics.push({
-          code: 'ALIAS_PEER_UNSATISFIED',
-          severity: 'error',
-          packageName: peerName,
-          requestedBy: [importer.aliasName],
-          message:
-            importer.aliasName +
-            ' requires ' +
-            peerName +
-            '@' +
-            range +
-            ', but no compatible alias or installed provider is available',
-        });
-      }
+      diagnostics.push({
+        code: 'ALIAS_PEER_UNSATISFIED',
+        severity: pendingInstallation ? 'warning' : 'error',
+        packageName: peerName,
+        requestedBy: [importer.aliasName],
+        message:
+          importer.aliasName +
+          ' requires ' +
+          peerName +
+          '@' +
+          range +
+          (pendingInstallation
+            ? '; provider availability will be checked after installation'
+            : ', but no compatible alias or installed provider is available'),
+      });
     }
   }
 }
