@@ -3,21 +3,15 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: release
-  cancel-in-progress: false
+  queue: max
 
 jobs:
-  verify:
-    permissions:
-      contents: read
-    uses: ./.github/workflows/verify-release.yml
-    with:
-      ref: ${{ github.sha }}
-
   release-please:
-    needs: verify
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -33,9 +27,23 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  publish:
+  verify:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: >-
+      ${{
+        !cancelled() &&
+        (github.event_name == 'workflow_dispatch' ||
+        (needs.release-please.result == 'success' && needs.release-please.outputs.release_created == 'true'))
+      }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify-release.yml
+    with:
+      release-tag: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || needs.release-please.outputs.tag_name }}
+
+  publish:
+    needs: verify
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -43,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version-file: '.node-version'
@@ -51,13 +59,5 @@ jobs:
         with:
           name: release-package
           path: ${{ runner.temp }}/release-package
-      - name: Verify the tag is the tested commit
-        env:
-          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "v$(node -p "require('./package.json').version")" = "$RELEASE_TAG"
-          package_version=$(tar -xOf "$RUNNER_TEMP"/release-package/*.tgz package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
-          test "v$package_version" = "$RELEASE_TAG"
       - run: npm i -g npm@latest
-      - run: npm publish "$RUNNER_TEMP"/release-package/*.tgz --provenance --registry=https://registry.npmjs.org/
+      - run: npm publish "$RUNNER_TEMP/release-package/package.tgz" --ignore-scripts --provenance --registry=https://registry.npmjs.org/

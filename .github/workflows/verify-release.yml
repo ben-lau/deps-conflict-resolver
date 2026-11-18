@@ -1,9 +1,10 @@
 name: Verify Release
 
 on:
+  workflow_dispatch:
   workflow_call:
     inputs:
-      ref:
+      release-tag:
         required: true
         type: string
 
@@ -14,30 +15,70 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
+      - name: Require a published GitHub Release for manual publishing
+        if: github.event_name == 'workflow_dispatch' && inputs.release-tag
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
+            echo "::error::Run Release on an existing release tag. To inspect a branch without publishing, run Verify Release."
+            exit 1
+          fi
+          is_draft=$(gh release view --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft -- "$RELEASE_TAG")
+          if [ "$is_draft" != 'false' ]; then
+            echo "::error::The GitHub Release for $RELEASE_TAG is still a draft."
+            exit 1
+          fi
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || github.sha }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
           node-version-file: '.node-version'
           cache: pnpm
+      - name: Check the release commit and version
+        if: github.event_name == 'push' || inputs.release-tag
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::The release tag $RELEASE_TAG points to a different commit. Run Release again on that tag."
+            exit 1
+          fi
+          expected_tag="v$(node -p "require('./package.json').version")"
+          if [ "$RELEASE_TAG" != "$expected_tag" ]; then
+            echo "::error::Expected release tag $expected_tag, got $RELEASE_TAG."
+            exit 1
+          fi
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm lint
       - run: pnpm fmt:check
       - run: pnpm typecheck
-      - run: pnpm publint
-      - run: pnpm exec attw --pack --entrypoints . ./vite ./webpack
       - name: Pack the candidate
         run: |
           mkdir -p "$RUNNER_TEMP/release-package"
-          pnpm pack --pack-destination "$RUNNER_TEMP/release-package"
+          pnpm pack --out "$RUNNER_TEMP/release-package/package.tgz"
+      - name: Check the packed candidate
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          archive="$RUNNER_TEMP/release-package/package.tgz"
+          pnpm exec publint run "$archive"
+          pnpm exec attw "$archive" --entrypoints . ./vite ./webpack
+          if [ -n "$RELEASE_TAG" ]; then
+            package_version=$(tar -xOf "$archive" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+            test "v$package_version" = "$RELEASE_TAG"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: release-package
-          path: ${{ runner.temp }}/release-package/*.tgz
+          path: ${{ runner.temp }}/release-package/package.tgz
           if-no-files-found: error
+          overwrite: true
 
   tests:
     runs-on: ubuntu-latest
@@ -48,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -68,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
@@ -80,7 +121,7 @@ jobs:
         run: >-
           npm install --prefix "$RUNNER_TEMP/release-webpack"
           --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact
-          "$RUNNER_TEMP"/release-package/*.tgz webpack@5
+          "$RUNNER_TEMP/release-package/package.tgz" webpack@5
       - name: Verify Webpack watch with the packaged plugin
         run: node tests/compat/webpack-release.mjs "$RUNNER_TEMP/release-webpack"
 
@@ -100,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
@@ -112,7 +153,7 @@ jobs:
         run: >-
           npm install --prefix "$RUNNER_TEMP/release-consumer"
           --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact
-          "$RUNNER_TEMP"/release-package/*.tgz "vite@${{ matrix.vite-version }}"
+          "$RUNNER_TEMP/release-package/package.tgz" "vite@${{ matrix.vite-version }}"
       - name: Load all public entry points as ESM and CommonJS
         working-directory: ${{ runner.temp }}/release-consumer
         run: |
@@ -135,7 +176,7 @@ jobs:
             npm install --prefix "$RUNNER_TEMP/release-consumer" --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact "vite@${{ matrix.vite-version }}" vue@3.5.18 vue2@npm:vue@2.7.16
             ln -s "$RUNNER_TEMP/release-consumer/node_modules" node_modules
             mkdir -p "$RUNNER_TEMP/unpacked-release"
-            tar -xzf "$RUNNER_TEMP"/release-package/*.tgz -C "$RUNNER_TEMP/unpacked-release"
+            tar -xzf "$RUNNER_TEMP/release-package/package.tgz" -C "$RUNNER_TEMP/unpacked-release"
             cp -R "$RUNNER_TEMP/unpacked-release/package/dist" dist
             node tests/compat/vite.mjs "$RUNNER_TEMP/release-consumer"
           fi

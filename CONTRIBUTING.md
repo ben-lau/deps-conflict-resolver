@@ -106,13 +106,24 @@ chore(deps): bump vitest to v4
 
 ## Release Process
 
-This project uses [release-please](https://github.com/googleapis/release-please) for fully automated releases:
+CI runs on pull requests and pushes to `main`. Open a draft PR to test a work-in-progress branch or build a preview package. The `CI checks` status summarizes all required CI jobs. After it passes, CI publishes the preview to pkg.pr.new.
 
-1. Merge commits to `main` following conventional commit format
-2. release-please automatically creates/updates a Release PR with changelog
-3. Review and merge the Release PR
-4. A GitHub Release + tag is automatically created
-5. npm publish is triggered automatically via OIDC (no token required)
+1. Merge Conventional Commits into `main`. [Release Please](https://github.com/googleapis/release-please) creates or updates a release PR when a new version is due.
+2. Review and merge the release PR. If GitHub asks to approve workflow runs on the bot's PR, approve them and wait for `CI checks` to pass.
+3. Release Please creates the GitHub Release and tag. The Release workflow then builds the tarball at that commit and verifies it in consumer projects.
+4. After verification passes, the workflow publishes that same tarball to npm via OIDC.
+
+To check a candidate without publishing, run **Verify Release** on the desired branch or tag.
+
+```bash
+gh workflow run verify-release.yml --ref vX.Y.Z
+```
+
+If verification or npm publishing fails after GitHub creates the release, use **Re-run failed jobs** on the original run. If its commit differs from the release tag or the artifact has expired, run **Release** on the existing release tag. The tag must contain this workflow. The workflow verifies a newly packed candidate before publishing it.
+
+```bash
+gh workflow run release-please.yml --ref vX.Y.Z
+```
 
 ## Project Structure
 

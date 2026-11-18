@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -128,8 +128,22 @@ jobs:
       - run: pnpm publint
       - run: pnpm attw
 
-  preview:
+  checks:
+    name: CI checks
     needs: [build, lint, typecheck, unit-test, vite-compat, quality]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require every CI job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$JOB_RESULTS"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$JOB_RESULTS" > /dev/null
+
+  preview:
+    needs: checks
     permissions:
       contents: read
     uses: ./.github/workflows/publish-preview.yml
