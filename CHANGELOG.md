@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.0...v1.5.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **core:** close peerOverrides pipeline across dependency graph and shared contexts ([addfde1](https://github.com/ben-lau/deps-conflict-resolver/commit/addfde181a48384143bc5f66910984d0beac1ce4))
+* **core:** isolate pruned descendants across nested node_modules and sibling aliases ([f48bfd3](https://github.com/ben-lau/deps-conflict-resolver/commit/f48bfd3a89d0fbc367b02f0d8c6456f0646bfd4e))
+* **core:** preserve all workspace entry paths for shared physical roots ([543f082](https://github.com/ben-lau/deps-conflict-resolver/commit/543f0822c9950cbe655de2e4857009910c6c301d))
+
+
+### Performance
+
+* **core:** cache canonical package paths and skip redundant shared-peer checks ([0a969b9](https://github.com/ben-lau/deps-conflict-resolver/commit/0a969b970f233012d0baa40eecc05fe76e870a73))
+
 ## [1.5.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.4.2...v1.5.0) (2026-11-20)
 
 
