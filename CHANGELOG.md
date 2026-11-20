@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.4.2...v1.5.0) (2026-11-20)
+
+
+### Features
+
+* **core:** support peerOverrides for inaccurate upstream peer ranges ([a094516](https://github.com/ben-lau/deps-conflict-resolver/commit/a094516e55ca9307ae4e69bdd2e7cc12ea3575ea))
+
+
+### Bug Fixes
+
+* **core:** discover configured dependency instances through workspace links ([4e020fb](https://github.com/ben-lau/deps-conflict-resolver/commit/4e020fb3512e5b5e3f10a23b8e98097a9a2429a2))
+* **core:** skip descendants whose declared peers only match the host ([7da25ac](https://github.com/ben-lau/deps-conflict-resolver/commit/7da25ac41d7765f2ee37b08176388ea253cbeb1a))
+
 ## [1.4.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.4.1...v1.4.2) (2026-12-31)
 
 
