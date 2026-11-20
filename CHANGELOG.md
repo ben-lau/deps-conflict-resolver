@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.1...v1.5.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **core:** allow owning workspace packages to satisfy host-undeclared peers ([07f94c6](https://github.com/ben-lau/deps-conflict-resolver/commit/07f94c6afd73800412c661ae051c8973c6129031))
+* **core:** harden shared-peer protocol resolution and nested pruning boundaries ([7a4a023](https://github.com/ben-lau/deps-conflict-resolver/commit/7a4a0231cd21ca1a7da01ada352172fd27105ba0))
+* **core:** verify workspace peer identity and avoid redundant snapshot realpaths ([8ed8f1c](https://github.com/ben-lau/deps-conflict-resolver/commit/8ed8f1c6b0b1905609531705417b9b5c2bf6c9d9))
+
+
+### Performance
+
+* **core:** retain canonical path cache across init and precompile peerOverrides ([1a1a501](https://github.com/ben-lau/deps-conflict-resolver/commit/1a1a5018cdb7feb5149b0afe0de0ebe4913b792b))
+
 ## [1.5.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.0...v1.5.1) (2026-11-20)
 
 
