@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.5.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.1...v1.5.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **core:** allow owning workspace packages to satisfy host-undeclared peers ([07f94c6](https://github.com/ben-lau/deps-conflict-resolver/commit/07f94c6afd73800412c661ae051c8973c6129031))
+* **core:** catch configured importer ambiguity during initialization ([207edba](https://github.com/ben-lau/deps-conflict-resolver/commit/207edba6a3cdab7cc64d18a226000592ed1d663e))
+* **core:** harden shared-peer protocol resolution and nested pruning boundaries ([7a4a023](https://github.com/ben-lau/deps-conflict-resolver/commit/7a4a0231cd21ca1a7da01ada352172fd27105ba0))
+* **core:** keep descendant redirects without a compatible provider ([45d702c](https://github.com/ben-lau/deps-conflict-resolver/commit/45d702c47b98c6ddd399f358ee823c3d7f22dcb3))
+* **core:** normalize installed peer requests across alias names ([f2999c2](https://github.com/ben-lau/deps-conflict-resolver/commit/f2999c2839f66748160e7f148e42deb6dd1c2ab3))
+* **core:** prune incompatible aliases from descendant ties ([1877e04](https://github.com/ben-lau/deps-conflict-resolver/commit/1877e046228e91c77538a93c67ea33c5e1abc3bf))
+* **core:** validate peer contexts against active alias rules ([96a1cd0](https://github.com/ben-lau/deps-conflict-resolver/commit/96a1cd05febf744af3c29f2696bd2706e134b43f))
+* **core:** verify workspace peer identity and avoid redundant snapshot realpaths ([8ed8f1c](https://github.com/ben-lau/deps-conflict-resolver/commit/8ed8f1c6b0b1905609531705417b9b5c2bf6c9d9))
+* **vite:** preserve all reachable workspace routes in SSR builds ([3148043](https://github.com/ben-lau/deps-conflict-resolver/commit/3148043cea71c378a2ac76244e3870a6b70c8ed6))
+
+
+### Performance
+
+* **core:** retain canonical path cache across init and precompile peerOverrides ([1a1a501](https://github.com/ben-lau/deps-conflict-resolver/commit/1a1a5018cdb7feb5149b0afe0de0ebe4913b792b))
+
 ## [1.5.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.0...v1.5.1) (2026-11-20)
 
 
