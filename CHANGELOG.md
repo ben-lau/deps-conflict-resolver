@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.6.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.2...v1.6.0) (2026-11-24)
+
+
+### Features
+
+* **core:** share resolver options through CLI config modules ([b51ea47](https://github.com/ben-lau/deps-conflict-resolver/commit/b51ea47983c9bdfa617225b5a1896c449b5e9ea5))
+
+
+### Bug Fixes
+
+* **core:** honor workspace roots and registry settings ([be954b9](https://github.com/ben-lau/deps-conflict-resolver/commit/be954b977768e5b5874550908c4c807d7b6a2078))
+* **core:** keep dependency preparation ordered ([656afe2](https://github.com/ben-lau/deps-conflict-resolver/commit/656afe290d5e682922522f196a83caf4b12a7bd3))
+* **core:** select aliases against effective peer providers ([2e8e88d](https://github.com/ben-lau/deps-conflict-resolver/commit/2e8e88dce306480550473ebd8908c667bcc10f71))
+* **core:** validate peers against installed package contexts ([e102d0f](https://github.com/ben-lau/deps-conflict-resolver/commit/e102d0f4361739c962fb69f2244be6954680e3ed))
+* **vite:** preserve scoped resolution across build and optimization ([e14c131](https://github.com/ben-lau/deps-conflict-resolver/commit/e14c131c2a1810423bcb8041ec4e3913d4e82aad))
+* **webpack:** tolerate compilers without cache hooks ([04d29d1](https://github.com/ben-lau/deps-conflict-resolver/commit/04d29d199369b40adb34db5c61630183c76766f5))
+
+
+### Performance
+
+* **core:** share resolution for verified sibling importers ([4cbc430](https://github.com/ben-lau/deps-conflict-resolver/commit/4cbc43053f69518e2d81637836fdba3e88c813fc))
+* **vite:** filter unrelated resolver requests ([2eaf562](https://github.com/ben-lau/deps-conflict-resolver/commit/2eaf562221918118b15f34218dcec047ca5f8733))
+
 ## [1.5.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.1...v1.5.2) (2026-11-23)
 
 
