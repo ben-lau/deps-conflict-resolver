@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.0...v1.6.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **core:** publish verified dependency preparation snapshots ([243dc19](https://github.com/ben-lau/deps-conflict-resolver/commit/243dc1956da0b3cfe9c7200faaa82a9351decbf8))
+* **core:** resolve manifests from current package lookup paths ([fc1bac1](https://github.com/ben-lau/deps-conflict-resolver/commit/fc1bac1b9331122daeaaf32839b280875a4ee8b2))
+* **vite:** align resolution hooks across pre-bundlers ([fa39455](https://github.com/ben-lau/deps-conflict-resolver/commit/fa394555e4a4f102bcf4ad7540214c47fb20cc1f))
+* **vite:** route resolver logs through the host logger ([b2829ac](https://github.com/ben-lau/deps-conflict-resolver/commit/b2829ac9e466e4f0ed910d68cd89dc8b668248e6))
+
+
+### Performance
+
+* **webpack:** reuse verified analysis during watch builds ([eb2bf3b](https://github.com/ben-lau/deps-conflict-resolver/commit/eb2bf3b90304b2b024e6fea065dcbb316c2fc721))
+
 ## [1.6.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.5.2...v1.6.0) (2026-11-24)
 
 
