@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.7.0](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.3...v1.7.0) (2026-11-27)
+
+
+### Features
+
+* **core:** guide offline resolver setup and diagnosis ([d95adca](https://github.com/ben-lau/deps-conflict-resolver/commit/d95adcab20d66f7210988d96a80a48f20ecc4937))
+* **core:** honor scoped npm registries for metadata ([1fec9d1](https://github.com/ben-lau/deps-conflict-resolver/commit/1fec9d19ba2d3ea59cf33c96f94400cb50cf1031))
+* **core:** measure dependency preparation phases ([152240b](https://github.com/ben-lau/deps-conflict-resolver/commit/152240b0d95fd68542bb7a8708635eb7b07e960f))
+* **core:** reuse verified persisted dependency plans ([0250ae2](https://github.com/ben-lau/deps-conflict-resolver/commit/0250ae268f8b5b0286a45502d11801bc35d6718a))
+
+
+### Bug Fixes
+
+* **core:** explain unchecked peer version candidates ([ecd3972](https://github.com/ben-lau/deps-conflict-resolver/commit/ecd3972195672cfb8a503047868243ae9a9e8888))
+* **core:** guard against offline redirects changing mid-build ([184182e](https://github.com/ben-lau/deps-conflict-resolver/commit/184182ea959bac37d91864850e28a995981a3e6b))
+* **core:** honor explicit registry for scoped aliases ([36e8a4a](https://github.com/ben-lau/deps-conflict-resolver/commit/36e8a4a06604fb9b9f960602d7ff64a1d9809a56))
+* **core:** keep failed preparation reports scoped to the attempt ([8e62995](https://github.com/ben-lau/deps-conflict-resolver/commit/8e6299574e62e79c7fd05aee4b21c4d33c5e8d3e))
+* **core:** make setup and optional peer diagnostics actionable ([28edc38](https://github.com/ben-lau/deps-conflict-resolver/commit/28edc388d711ca8b510d3a583de04ff8b1a264e3))
+* **core:** preserve exact registry scopes during installation ([00d573d](https://github.com/ben-lau/deps-conflict-resolver/commit/00d573d2647514fce410076de9deb699c712f9cc))
+* **core:** publish dependency preparation failures atomically ([307473a](https://github.com/ben-lau/deps-conflict-resolver/commit/307473a61091f899646ae70e55a8ea526de4c82f))
+* **core:** respect offline plan lookup policy ([968db25](https://github.com/ben-lau/deps-conflict-resolver/commit/968db253a040bf35dceff8b24e2d967d1be21750))
+* **core:** revisit peer providers across entry scopes ([b19c71f](https://github.com/ben-lau/deps-conflict-resolver/commit/b19c71fc7f355bc3cb15fc4079722058eca0e131))
+* **core:** verify exact scoped registries on Yarn Classic ([78066f1](https://github.com/ben-lau/deps-conflict-resolver/commit/78066f11d1b88290af7bbfaa32074a1206e611a4))
+* **vite:** fall back to directory polling when native watches fail ([d7b1c96](https://github.com/ben-lau/deps-conflict-resolver/commit/d7b1c96bb9b4f47262cc67870b6c272a0bc6f111))
+* **vite:** guard native watch against stale alias paths ([ae1c88e](https://github.com/ben-lau/deps-conflict-resolver/commit/ae1c88ed9ae8109271711ff103eec1f3842e859a))
+* **vite:** observe installed links through parent directories ([5d7375e](https://github.com/ben-lau/deps-conflict-resolver/commit/5d7375e44a4a44a6676cae62a62162f7af4be891))
+* **vite:** recheck missing package lookups before first build ([0a91c8a](https://github.com/ben-lau/deps-conflict-resolver/commit/0a91c8a06c825b09e889f2999d45e2141722cbe7))
+* **vite:** refresh production watch resolutions ([e06f287](https://github.com/ben-lau/deps-conflict-resolver/commit/e06f28773a34291065d5b123ea27cb7631e3dcff))
+* **vite:** track installed package paths across watch builds ([da377a9](https://github.com/ben-lau/deps-conflict-resolver/commit/da377a9d76244406293754ef084820ae29fb9307))
+* **vite:** track watch rebuilds by environment ([3b18168](https://github.com/ben-lau/deps-conflict-resolver/commit/3b181689a9c3e1d5b339419283d283eeefd8e34e))
+* **vite:** verify installed paths before publishing builds ([5db700b](https://github.com/ben-lau/deps-conflict-resolver/commit/5db700bdfa2c2791679d7c807267bbbfde33903f))
+* **vite:** watch installed providers and nearer slots ([2ac7637](https://github.com/ben-lau/deps-conflict-resolver/commit/2ac7637d5b440f2cf4628c9733ff5fdefb8f112e))
+* **webpack:** isolate strict guards for child compilations ([8208862](https://github.com/ben-lau/deps-conflict-resolver/commit/82088625c62cb4f52041d6ecc5dced3d1cd5e4f4))
+
+
+### Performance
+
+* **core:** capture offline plans in one analysis pass ([72f7575](https://github.com/ben-lau/deps-conflict-resolver/commit/72f7575ad9e2cc632bd2d65808de7f6ca52dea1a))
+* **core:** reuse physical lookups in analysis projection ([6b6dbbb](https://github.com/ben-lau/deps-conflict-resolver/commit/6b6dbbb68da3c615add4f3b945c87e99505f8926))
+* **vite:** filter guarded build and optimizer requests ([9513e7f](https://github.com/ben-lau/deps-conflict-resolver/commit/9513e7f178a0495f8af7d999bdd0ab8b50746456))
+* **vite:** omit unused resolution hook for empty plans ([79fd368](https://github.com/ben-lau/deps-conflict-resolver/commit/79fd3681f0d29588ec31961d19e44413203d1789))
+* **webpack:** avoid allocations for unrelated requests ([6789780](https://github.com/ben-lau/deps-conflict-resolver/commit/6789780078807ef909f9c097a3d59f89856a65c0))
+* **webpack:** fast-path unrelated module requests ([f7efc8c](https://github.com/ben-lau/deps-conflict-resolver/commit/f7efc8ca8f0aa168c3c7f5d7d18cfa5d27466fe7))
+
+
+### Code Refactoring
+
+* **core:** own watch inputs in one module ([d3d8362](https://github.com/ben-lau/deps-conflict-resolver/commit/d3d8362727113c8cb3e69bb87eccc15109599db2))
+* **core:** publish dependency generations atomically ([955cd6c](https://github.com/ben-lau/deps-conflict-resolver/commit/955cd6c784eb8873629e65a049e697f390513fdb))
+* **core:** remove name-based graph traversal ([5352ee4](https://github.com/ben-lau/deps-conflict-resolver/commit/5352ee40335bf677d0354b87d1be211dae1bb2e9))
+* **core:** share physical scope matching ([013c47a](https://github.com/ben-lau/deps-conflict-resolver/commit/013c47ac1aa46fc4b940d9cba9e900ad1bfdf32a))
+
 ## [1.6.3](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.2...v1.6.3) (2026-11-27)
 
 
