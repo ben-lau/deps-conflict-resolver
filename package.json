@@ -1,6 +1,6 @@
 {
   "name": "deps-conflict-resolver",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "A webpack/vite plugin that automatically resolves peer dependency conflicts by creating aliases for conflicting versions",
   "keywords": [
     "alias",
