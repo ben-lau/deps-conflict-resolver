@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.3](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.2...v1.6.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **core:** preserve custom redirect origins ([0258b7f](https://github.com/ben-lau/deps-conflict-resolver/commit/0258b7fc4234563972782f65a2e075d76ab0244a))
+* **core:** reconsider conflicting peer providers ([c1a52a6](https://github.com/ben-lau/deps-conflict-resolver/commit/c1a52a6a0a427072eae4265db9d65bfe86f7e011))
+
 ## [1.6.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.1...v1.6.2) (2026-11-27)
 
 
