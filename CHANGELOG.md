@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.2](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.1...v1.6.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **core:** isolate published analysis results ([e6dd896](https://github.com/ben-lau/deps-conflict-resolver/commit/e6dd8961fc590c74fa23bc8219ef9df8c8b2aeb3))
+* **core:** verify installed alias peer identity ([90adf06](https://github.com/ben-lau/deps-conflict-resolver/commit/90adf063a2b93ea10558f69db98d41071676b839))
+* **webpack:** retry preparation on the next build ([542bf43](https://github.com/ben-lau/deps-conflict-resolver/commit/542bf4349aaa9776c1038a6c39e715a5f5ced21d))
+
 ## [1.6.1](https://github.com/ben-lau/deps-conflict-resolver/compare/v1.6.0...v1.6.1) (2026-11-25)
 
 
