@@ -5,6 +5,9 @@ import type {
   PluginHooks,
   AliasPathMapping,
   AliasMapping,
+  ResolverDiagnostic,
+  ResolutionExplanation,
+  InstallReport,
 } from '../types/index';
 import { DEFAULT_NPM_REGISTRY } from '../constants';
 import { createLogger, LogLevel } from '../utils/logger';
@@ -13,6 +16,10 @@ import { createEnvironmentDetector, EnvironmentDetector } from './environment-de
 import { createDependencyAnalyzer, DependencyAnalyzer } from './dependency-analyzer';
 import { createAliasManager, AliasManager } from './alias-manager';
 import { createPackageInstaller, PackageInstaller } from './package-installer';
+import { ResolutionError } from './resolution-error';
+import { linkAliasPeers } from './alias-peer-resolver';
+import { npmRegistryClient } from './registry-client';
+import { resolve as resolvePath } from 'node:path';
 
 const logger = createLogger('resolver');
 
@@ -42,6 +49,8 @@ export class DepsConflictResolver {
   private analysisResult: AnalysisResult | null = null;
   private initialized = false;
   private initializationPromise: Promise<void> | null = null;
+  private installResult: InstallReport | null = null;
+  private installDiagnostics: ResolverDiagnostic[] = [];
 
   constructor(userOptions: DepsConflictResolverOptions, hooks: PluginHooks = {}) {
     this.userOptions = userOptions;
@@ -49,7 +58,7 @@ export class DepsConflictResolver {
 
     // 设置日志级别（如果用户已指定）
     if (userOptions.debug) {
-      logger.setLevel(LogLevel.DEBUG);
+      logger.setLevel(LogLevel.ALL);
     }
   }
 
@@ -91,7 +100,11 @@ export class DepsConflictResolver {
       projectRoot,
       packageManager,
       registry,
-      autoInstall: userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall,
+      autoInstall: userOptions.offline
+        ? false
+        : (userOptions.autoInstall ?? DEFAULT_OPTIONS.autoInstall),
+      offline: userOptions.offline ?? false,
+      strict: userOptions.strict ?? false,
       debug: userOptions.debug ?? DEFAULT_OPTIONS.debug,
       aliasPrefix: userOptions.aliasPrefix ?? DEFAULT_OPTIONS.aliasPrefix,
       excludeRedirects: userOptions.excludeRedirects ?? {},
@@ -147,13 +160,15 @@ export class DepsConflictResolver {
     this.aliasManager?.clear?.();
     this.aliasManager = null;
     this.installer = null;
+    this.installResult = null;
+    this.installDiagnostics = [];
   }
 
   private async initializeGeneration(): Promise<void> {
     logger.info('Initializing dependencies resolver...');
 
     // 验证项目根目录
-    const projectRoot = this.userOptions.projectRoot ?? process.cwd();
+    const projectRoot = resolvePath(this.userOptions.projectRoot ?? process.cwd());
     const validRoot = findProjectRoot(projectRoot);
     if (!validRoot) {
       throw new Error(`Could not find package.json in ${projectRoot} or parent directories`);
@@ -168,7 +183,7 @@ export class DepsConflictResolver {
 
     // 设置日志级别
     if (this.options.debug) {
-      logger.setLevel(LogLevel.DEBUG);
+      logger.setLevel(LogLevel.ALL);
     }
 
     // 初始化子模块
@@ -188,6 +203,7 @@ export class DepsConflictResolver {
     if (this.hooks.onAnalysisComplete) {
       await this.hooks.onAnalysisComplete(this.analysisResult);
     }
+    this.assertResolved();
 
     // 自动安装
     if (this.options.autoInstall) {
@@ -198,6 +214,31 @@ export class DepsConflictResolver {
       // they may enter runtime rules.
       this.setActiveAliasMappings(
         this.analysisResult.aliasMappings.filter((mapping) => mapping.installSpec === ''),
+      );
+      for (const mapping of this.analysisResult.aliasMappings) {
+        if (mapping.installSpec) {
+          this.installDiagnostics.push({
+            code: 'ALIAS_NOT_INSTALLED',
+            severity: 'error',
+            packageName: mapping.originalName,
+            aliases: [mapping.aliasName],
+            message: 'Alias is not active because installation is disabled: ' + mapping.aliasName,
+          });
+        }
+      }
+    }
+    this.assertResolved();
+
+    const unresolved = this.getDiagnostics().filter(
+      (diagnostic) => diagnostic.severity === 'error',
+    );
+    if (unresolved.length > 0) {
+      logger.warn(
+        'Resolver has ' +
+          unresolved.length +
+          ' unresolved conditions: ' +
+          [...new Set(unresolved.map((diagnostic) => diagnostic.code))].join(', ') +
+          '. Inspect getDiagnostics() or run doctor for details.',
       );
     }
 
@@ -244,6 +285,10 @@ export class DepsConflictResolver {
     }
 
     const { aliasMappings } = this.analysisResult;
+    if (this.options.offline) {
+      this.assertResolved();
+      return;
+    }
 
     // 只安装与主工程版本冲突的别名依赖（用于编译时重定向）
     // aliasMappings 只包含 needsAlias=true 的情况，即主工程已声明且版本冲突
@@ -258,6 +303,40 @@ export class DepsConflictResolver {
     }
 
     const completedMappings = this.filterCompletedMappings(aliasMappings, aliasResult, false);
+    this.installResult = {
+      success: aliasResult.success,
+      installed: [...(aliasResult.installed ?? [])],
+      reused: [...(aliasResult.reused ?? [])],
+      failed: [...(aliasResult.failed ?? [])],
+      errors: [...(aliasResult.errors ?? [])],
+    };
+    this.installDiagnostics = [];
+    for (const aliasName of aliasResult.failed ?? []) {
+      const mapping = aliasMappings.find((entry) => entry.aliasName === aliasName);
+      this.installDiagnostics.push({
+        code: 'ALIAS_INSTALL_FAILED',
+        severity: 'error',
+        packageName: mapping?.originalName ?? aliasName,
+        aliases: [aliasName],
+        message: 'Alias installation failed: ' + aliasName + '. ' + aliasResult.errors.join('; '),
+      });
+    }
+    const completedNames = new Set(completedMappings.map((mapping) => mapping.aliasName));
+    this.analysisResult.diagnostics = this.analysisResult.diagnostics?.filter(
+      (diagnostic) =>
+        !(
+          ['ALIAS_METADATA_UNAVAILABLE', 'ALIAS_PEER_UNSATISFIED'].includes(diagnostic.code) &&
+          [...(diagnostic.aliases ?? []), ...(diagnostic.requestedBy ?? [])].some((name) =>
+            completedNames.has(name),
+          )
+        ),
+    );
+    await linkAliasPeers(
+      completedMappings,
+      { ...this.options, offline: true },
+      npmRegistryClient,
+      this.installDiagnostics,
+    );
     this.setActiveAliasMappings(completedMappings, aliasResult.failed ?? []);
 
     if (!aliasResult.success) {
@@ -274,6 +353,7 @@ export class DepsConflictResolver {
         this.filterCompletedMappings(aliasMappings, aliasResult, true),
       );
     }
+    this.assertResolved();
   }
 
   /**
@@ -339,10 +419,21 @@ export class DepsConflictResolver {
         return mapping;
       }
 
+      const blockedPaths = new Set(
+        Object.entries(mapping.peerImporterPaths ?? {})
+          .filter(([aliasName]) => inactiveAliasNames.has(aliasName))
+          .flatMap(([, paths]) => paths),
+      );
       return {
         ...mapping,
+        peerImporterPaths: Object.fromEntries(
+          Object.entries(mapping.peerImporterPaths ?? {}).filter(
+            ([aliasName]) => !inactiveAliasNames.has(aliasName),
+          ),
+        ),
         importerPaths: mapping.importerPaths.filter(
           (importerPath) =>
+            !blockedPaths.has(importerPath) &&
             ![...inactiveAliasNames].some((aliasName) =>
               this.isAliasPackagePath(importerPath, aliasName),
             ),
@@ -409,6 +500,61 @@ export class DepsConflictResolver {
    */
   getAnalysisResult(): AnalysisResult | null {
     return this.analysisResult;
+  }
+
+  /** Inspect unresolved conditions without parsing logs. */
+  getDiagnostics(): ResolverDiagnostic[] {
+    return [
+      ...(this.analysisResult?.diagnostics ?? []),
+      ...this.installDiagnostics,
+      ...(this.aliasManager?.getDiagnostics?.() ?? []),
+    ].map((diagnostic) =>
+      Object.assign({}, diagnostic, {
+        ...(diagnostic.aliases && { aliases: [...diagnostic.aliases] }),
+        ...(diagnostic.requestedBy && { requestedBy: [...diagnostic.requestedBy] }),
+        ...(diagnostic.importerPaths && { importerPaths: [...diagnostic.importerPaths] }),
+      }),
+    );
+  }
+
+  private assertResolved(): void {
+    if (this.options.strict) {
+      const errors = this.getDiagnostics().filter((diagnostic) => diagnostic.severity === 'error');
+      if (errors.length > 0) throw new ResolutionError(errors);
+    }
+  }
+
+  /** Explain a request without exposing or mutating cached runtime decisions. */
+  explainResolution(request: string, importer?: string): ResolutionExplanation {
+    if (!this.initialized || !this.aliasManager) {
+      return {
+        request,
+        importer,
+        resolved: null,
+        reason: 'inactive',
+        aliases: [],
+        matchedPaths: [],
+      };
+    }
+    if (this.hooks.beforeResolve) {
+      const resolved = this.hooks.beforeResolve(request, importer);
+      if (resolved !== undefined) {
+        return { request, importer, resolved, reason: 'hook', aliases: [], matchedPaths: [] };
+      }
+    }
+    return this.aliasManager.explainResolution(request, importer);
+  }
+
+  getInstallResult(): InstallReport | null {
+    return (
+      this.installResult && {
+        ...this.installResult,
+        installed: [...this.installResult.installed],
+        reused: [...this.installResult.reused],
+        failed: [...this.installResult.failed],
+        errors: [...this.installResult.errors],
+      }
+    );
   }
 
   /**

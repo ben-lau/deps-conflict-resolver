@@ -1,20 +1,28 @@
-import type { NpmPackageInfo } from '../types/index';
+import type { NpmPackageInfo, PackageJson } from '../types/index';
 import { createLogger } from '../utils/logger';
 import { DEFAULT_NPM_REGISTRY, DEFAULT_NPM_REGISTRY_TIMEOUT_MS } from '../constants';
+import { LruCache } from '../utils/lru-cache';
 
 const logger = createLogger('npm-registry');
 
 export interface RegistryClient {
   fetchAllVersions(packageName: string, registry: string): Promise<string[]>;
+  fetchPackageManifest?(
+    packageName: string,
+    version: string,
+    registry: string,
+  ): Promise<PackageJson>;
 }
 
 /**
  * NPM 注册表缓存
  */
 const packageCache = new Map<string, NpmPackageInfo>();
+const manifestCache = new LruCache<string, PackageJson>({ maxEntries: 200 });
 
 export function clearNpmRegistryCache(): void {
   packageCache.clear();
+  manifestCache.clear();
 }
 
 /**
@@ -49,7 +57,7 @@ async function fetchWithTimeout<T>(
 async function fetchPackageInfo(
   packageName: string,
   registry = DEFAULT_NPM_REGISTRY,
-): Promise<NpmPackageInfo | null> {
+): Promise<NpmPackageInfo> {
   // 检查缓存
   const cacheKey = `${registry}:${packageName}`;
   const cached = packageCache.get(cacheKey);
@@ -63,7 +71,7 @@ async function fetchPackageInfo(
       ? `@${encodeURIComponent(packageName.slice(1))}`
       : packageName;
 
-    const url = `${registry}/${encodedName}`;
+    const url = `${registry.replace(/\/+$/, '')}/${encodedName}`;
     logger.debug(`Fetching package info from: ${url}`);
 
     const { response, data } = await fetchWithTimeout(
@@ -99,7 +107,7 @@ async function fetchPackageInfo(
     if (!response.ok) {
       if (response.status === 404) {
         logger.warn(`Package not found: ${packageName}`);
-        return null;
+        throw new Error(`Package not found: ${packageName} (HTTP 404)`);
       }
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
@@ -130,7 +138,7 @@ async function fetchPackageInfo(
     } else {
       logger.error(`Failed to fetch package info for ${packageName}:`, error);
     }
-    return null;
+    throw error;
   }
 }
 
@@ -138,5 +146,29 @@ export const npmRegistryClient: RegistryClient = {
   async fetchAllVersions(packageName: string, registry: string): Promise<string[]> {
     const info = await fetchPackageInfo(packageName, registry);
     return info?.versions ?? [];
+  },
+  async fetchPackageManifest(packageName, version, registry) {
+    const key = `${registry}\0${packageName}\0${version}`;
+    const cached = manifestCache.get(key);
+    if (cached) return cached;
+    const encodedName = packageName.startsWith('@')
+      ? `@${encodeURIComponent(packageName.slice(1))}`
+      : encodeURIComponent(packageName);
+    const url = `${registry.replace(/\/+$/, '')}/${encodedName}/${encodeURIComponent(version)}`;
+    const manifest = await fetchWithTimeout(
+      url,
+      {
+        headers: { Accept: 'application/json' },
+      },
+      async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        return (await response.json()) as PackageJson;
+      },
+    );
+    if (manifest.name !== packageName || manifest.version !== version) {
+      throw new Error(`Invalid manifest for ${packageName}@${version}`);
+    }
+    manifestCache.set(key, manifest);
+    return manifest;
   },
 };
